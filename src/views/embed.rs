@@ -200,16 +200,21 @@ fn render_media_meta_tags(tweet: &Tweet, config: &Config, url_prefix: &str) -> M
                meta name="twitter:player:stream:content_type" content="video/mp4";
            }
        } @else if let Some(gif) = gif_with_quote(tweet) {
-           @let gif_url = formatters::get_pic_url(&gif.url, config.config.base64_media);
-           @let full_gif_url = format!("{url_prefix}{gif_url}");
+           @let vid_url = formatters::get_vid_url(&gif.url, &config.config.hmac_key, config.config.base64_media);
+           @let full_gif_url = format!("{url_prefix}{vid_url}");
+           @let thumb_url = formatters::get_pic_url(&gif.thumb, config.config.base64_media);
+           @let full_thumb_url = format!("{url_prefix}{thumb_url}");
+           @let embed_url = formatters::get_video_embed_url(config, tweet.id);
 
            meta property="og:video" content=(full_gif_url);
            meta property="og:video:secure_url" content=(full_gif_url);
            meta property="og:video:type" content="video/mp4";
            meta property="og:video:width" content="480";
            meta property="og:video:height" content="480";
+           meta property="og:image" content=(full_thumb_url);
 
            meta name="twitter:card" content="player";
+           meta name="twitter:player" content=(embed_url);
            meta name="twitter:player:width" content="480";
            meta name="twitter:player:height" content="480";
            meta name="twitter:player:stream" content=(full_gif_url);
