@@ -31,7 +31,6 @@ pub const GRAPH_USER_TWEETS_AND_REPLIES: &str = "kkaJ0Mf34PZVarrxzLihjg/UserTwee
 pub const GRAPH_USER_TWEETS_AND_REPLIES_V2: &str =
    "BDX77Xzqypdt11-mDfgdpQ/UserWithProfileTweetsAndRepliesQueryV2";
 pub const GRAPH_TWEET_EDIT_HISTORY: &str = "upS9teTSG45aljmP9oTuXA/TweetEditHistory";
-
 pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                               (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
 
@@ -140,3 +139,4 @@ pub fn list_by_id_vars(list_id: &str) -> String {
 pub fn list_timeline_vars(rest_id: &str, cursor: Option<&str>) -> String {
    vars(json!({ "rest_id": rest_id, "cursor": cursor, "count": 20 }))
 }
+

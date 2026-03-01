@@ -192,6 +192,7 @@ pub enum CardKind {
    VideoDirectMessage,
    #[serde(rename = "image_direct_message")]
    ImageDirectMessage,
+   Article,
    Audiospace,
    #[serde(rename = "newsletter_publication")]
    NewsletterPublication,

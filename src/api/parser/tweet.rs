@@ -384,7 +384,7 @@ impl TryFrom<&TweetData> for Tweet {
       }
 
       // Handle amplify card: sets tweet.video directly
-      let (card, video) = if card
+      let (mut card, video) = if card
          .as_ref()
          .is_some_and(|card_ref| card_ref.kind == CardKind::Amplify)
       {
@@ -404,6 +404,91 @@ impl TryFrom<&TweetData> for Tweet {
             text = text.trim_end_matches(" Learn more.").to_owned();
          }
       }
+
+      // Synthesize a rich card from inline article data when no card exists yet.
+      // The TweetDetail response includes article metadata when
+      // withArticleRichContentState is true. When we have a card, strip the
+      // article URL from the text (the card is clickable). Otherwise, keep it
+      // as a "View article" text link fallback.
+      let has_article_card = card.is_none() && {
+         if let Some(article) = raw
+            .article
+            .as_ref()
+            .and_then(|wrapper| wrapper.article_results.as_ref())
+            .and_then(|nr| nr.result.as_deref())
+            && let Some(title) = article.title.as_deref().filter(|tt| !tt.is_empty())
+         {
+            let image = article
+               .cover_media
+               .as_ref()
+               .and_then(|cm| cm.media_info.as_ref())
+               .and_then(|mi| mi.original_img_url.clone())
+               .unwrap_or_default();
+
+            let description = article
+               .content_state
+               .as_ref()
+               .and_then(|cs| {
+                  cs.blocks
+                     .iter()
+                     .find(|blk| blk.block_type == "unstyled" && !blk.text.is_empty())
+               })
+               .map(|blk| {
+                  let desc = &blk.text;
+                  if desc.len() > 200 {
+                     let mut end = 200;
+                     while !desc.is_char_boundary(end) {
+                        end -= 1;
+                     }
+                     format!("{}…", &desc[..end])
+                  } else {
+                     desc.clone()
+                  }
+               })
+               .unwrap_or_default();
+
+            card = Some(Card {
+               kind:  CardKind::Article,
+               url:   format!("/{}/article/{id}", user.username),
+               title: title.to_owned(),
+               image,
+               text:  description,
+               dest:  format!("Article · @{}", user.username),
+               ..Card::default()
+            });
+            true
+         } else {
+            false
+         }
+      };
+
+      // Rewrite article entity URLs: when a rich card was synthesized, strip
+      // the trailing article link from both text and entities (the card is
+      // clickable). Otherwise rewrite to a "View article" fallback link.
+      entities.retain_mut(|entity| {
+         if entity.kind != EntityKind::Url || !is_article_url(&entity.url) {
+            return true;
+         }
+         if has_article_card {
+            let start = text
+               .char_indices()
+               .nth(entity.indices.0)
+               .map_or(text.len(), |(idx, _)| idx);
+            text.truncate(start);
+            #[expect(
+               clippy::assigning_clones,
+               reason = "clone_into cannot borrow text mutably while trim borrows it"
+            )]
+            {
+               text = text.trim_end().to_owned();
+            }
+            false
+         } else {
+            entity.url = format!("/{}/article/{id}", user.username);
+            "View article".clone_into(&mut entity.display);
+            true
+         }
+      });
 
       Ok(Self {
          id,
@@ -434,4 +519,29 @@ impl TryFrom<&TweetData> for Tweet {
          entities,
       })
    }
+}
+
+/// Check if a URL matches `http(s)://(x.com|twitter.com)/i/article/{id}`.
+fn is_article_url(url: &str) -> bool {
+   // Strip scheme first, then match domain
+   let without_scheme = url
+      .strip_prefix("https://")
+      .or_else(|| url.strip_prefix("http://"));
+   let Some(rest) = without_scheme else {
+      return false;
+   };
+   let Some(path) = rest
+      .strip_prefix("x.com")
+      .or_else(|| rest.strip_prefix("www.x.com"))
+      .or_else(|| rest.strip_prefix("mobile.x.com"))
+      .or_else(|| rest.strip_prefix("twitter.com"))
+      .or_else(|| rest.strip_prefix("www.twitter.com"))
+      .or_else(|| rest.strip_prefix("mobile.twitter.com"))
+   else {
+      return false;
+   };
+   let Some(id) = path.strip_prefix("/i/article/") else {
+      return false;
+   };
+   !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }

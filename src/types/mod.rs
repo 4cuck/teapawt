@@ -1,3 +1,4 @@
+mod article;
 mod prefs;
 mod query;
 mod session;
@@ -5,6 +6,7 @@ mod timeline;
 mod tweet;
 mod user;
 
+pub use article::*;
 pub use prefs::*;
 pub use query::*;
 pub use session::*;

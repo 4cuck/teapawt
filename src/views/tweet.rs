@@ -482,6 +482,16 @@ fn render_quote(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> Markup
       } else {
          String::new()
       };
+      let x_url = if quote.id != 0 {
+         let user = if quote.user.username.is_empty() {
+            "i"
+         } else {
+            &quote.user.username
+         };
+         format!("https://x.com/{user}/status/{}", quote.id)
+      } else {
+         String::new()
+      };
       return html! {
           div class="quote unavailable" {
               a class="unavailable-quote" href=(quote_href) {
@@ -491,6 +501,11 @@ fn render_quote(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> Markup
                       (quote.text)
                   } @else {
                       "This tweet is unavailable"
+                  }
+              }
+              @if !x_url.is_empty() {
+                  a class="quote-link" href=(x_url) title="View original on X" {
+                      (x_url)
                   }
               }
           }

@@ -34,6 +34,7 @@ use crate::{
       TwitterError,
    },
    types::{
+      Article,
       Conversation,
       EditHistory,
       GalleryPhoto,
@@ -571,6 +572,55 @@ impl ApiClient {
          )
          .await?;
       super::parse_timeline(&data)
+   }
+
+   /// Get a tweet with its inline article data.
+   ///
+   /// Uses `TweetDetail` (not `TweetResultByIdQuery`) because only the detail
+   /// endpoint supports `withArticleRichContentState`.
+   pub async fn get_article_tweet(&self, tweet_id: &str) -> Result<(Tweet, Article)> {
+      let data = self
+         .graphql_request::<ConversationData>(
+            endpoints::GRAPH_TWEET_DETAIL,
+            &endpoints::tweet_detail_vars(tweet_id, None),
+            endpoints::GQL_FEATURES,
+            Some(endpoints::TWEET_DETAIL_FIELD_TOGGLES),
+         )
+         .await?;
+
+      // Parse the conversation to get the Tweet (reuses proven logic).
+      let conversation = super::parse_conversation(&data, tweet_id, false)?;
+      let tweet = conversation.tweet;
+
+      // Extract raw TweetData for the article — try single-tweet path first,
+      // then scan timeline entries. Handle TweetWithVisibilityResults wrapper.
+      let raw = data
+         .tweet_result
+         .as_ref()
+         .and_then(|nested| nested.result.as_deref())
+         .or_else(|| {
+            data
+               .threaded_conversation_with_injections_v2
+               .as_ref()?
+               .instructions
+               .iter()
+               .filter_map(|instr| instr.entries.as_deref())
+               .flatten()
+               .find(|entry| {
+                  entry
+                     .entry_id_str()
+                     .starts_with(&format!("tweet-{tweet_id}"))
+               })
+               .and_then(|entry| entry.tweet_result())
+         });
+
+      // Unwrap TweetWithVisibilityResults if needed
+      let tweet_data = raw
+         .and_then(|td| td.tweet.as_deref().or(Some(td)))
+         .ok_or_else(|| Error::TweetNotFound("Tweet data not found in response".into()))?;
+
+      let article = parser::parse_article(tweet_data)?;
+      Ok((tweet, article))
    }
 
    /// Get session pool health statistics.

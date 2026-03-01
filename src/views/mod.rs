@@ -1,5 +1,6 @@
 pub mod embed;
 pub mod layout;
+pub mod notes;
 pub mod preferences;
 pub mod profile;
 pub mod renderutils;

@@ -4,6 +4,7 @@ pub mod helpers;
 mod intent;
 mod list;
 mod media;
+mod notes;
 mod preferences;
 mod redirect;
 mod rss;
@@ -89,6 +90,7 @@ pub fn router() -> Router<AppState> {
         .merge(media::router())                    // Rule 5: before timeline
         .merge(rss::router())                      // Has /{username}/rss, before timeline
         .merge(list::router())                     // Rule 6: before timeline
+        .merge(notes::router())                    // /{username}/article/{id}, before timeline catch-all
         .merge(unsupported::i_catchall_router())   // Rule 3: after specific /i/* routes
         .merge(timeline::router()) // Rule 4: MUST BE LAST
 }

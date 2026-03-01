@@ -463,6 +463,7 @@ pub struct TweetData {
    pub reply_to_screen_name:    Option<String>,
    pub birdwatch_pivot:         Option<BirdwatchPivot>,
    pub edit_control:            Option<EditControl>,
+   pub article:                 Option<ArticleWrapper>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1187,4 +1188,132 @@ impl EditHistoryData {
          .map(|payload| payload.timeline.instructions.as_slice())
          .unwrap_or_default()
    }
+}
+
+// ── Article / Notes (inline in tweet response) ──
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ArticleWrapper {
+   pub article_results: Option<NestedResult<InlineArticle>>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct InlineArticle {
+   pub rest_id:        Option<String>,
+   pub title:          Option<String>,
+   pub cover_media:    Option<InlineArticleCoverMedia>,
+   pub media_entities: Option<Vec<ArticleMediaEntry>>,
+   pub metadata:       Option<InlineArticleMetadata>,
+   pub content_state:  Option<InlineContentState>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct InlineArticleCoverMedia {
+   pub media_info: Option<InlineArticleCoverMediaInfo>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct InlineArticleCoverMediaInfo {
+   pub original_img_url: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct InlineArticleMetadata {
+   pub first_published_at_secs: Option<i64>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct InlineContentState {
+   pub blocks:     Vec<ArticleBlock>,
+   #[serde(rename = "entityMap")]
+   pub entity_map: Vec<EntityMapEntry>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct EntityMapEntry {
+   pub key:   String,
+   pub value: ArticleRawEntity,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ArticleBlock {
+   pub text:                String,
+   #[serde(rename = "type")]
+   pub block_type:          String,
+   #[serde(rename = "inlineStyleRanges")]
+   pub inline_style_ranges: Vec<ArticleRawStyleRange>,
+   #[serde(rename = "entityRanges")]
+   pub entity_ranges:       Vec<ArticleRawEntityRange>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ArticleRawStyleRange {
+   pub offset: usize,
+   pub length: usize,
+   pub style:  String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ArticleRawEntityRange {
+   pub offset: usize,
+   pub length: usize,
+   pub key:    usize,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ArticleRawEntity {
+   #[serde(rename = "type")]
+   pub entity_type: String,
+   pub data:        Option<ArticleRawEntityData>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ArticleRawEntityData {
+   pub url:         Option<String>,
+   pub markdown:    Option<String>,
+   #[serde(rename = "mediaItems")]
+   pub media_items: Option<Vec<ArticleRawMediaItem>>,
+   #[serde(rename = "tweetId")]
+   pub tweet_id:    Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ArticleRawMediaItem {
+   #[serde(rename = "mediaId")]
+   pub media_id: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ArticleMediaEntry {
+   pub media_id:   Option<String>,
+   pub media_info: Option<ArticleMediaInfo>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ArticleMediaInfo {
+   #[expect(clippy::pub_underscore_fields, reason = "serde field name matches API")]
+   pub __typename:       Option<String>,
+   pub original_img_url: Option<String>,
+   pub variants:         Option<Vec<ArticleMediaVariant>>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ArticleMediaVariant {
+   pub url: Option<String>,
 }

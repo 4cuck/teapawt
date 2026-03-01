@@ -1,3 +1,4 @@
+pub mod article;
 mod card;
 mod conversation;
 pub mod edit_history;
@@ -8,6 +9,7 @@ mod timeline;
 mod tweet;
 mod user;
 
+pub use article::parse_article;
 pub use conversation::parse_conversation;
 pub use search::{
    parse_list,

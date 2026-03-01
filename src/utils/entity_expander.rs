@@ -115,7 +115,11 @@ pub fn expand_entities(text: &str, entities: &[Entity]) -> String {
             );
          },
          EntityKind::Url => {
-            let display = short_url(&entity.url, 28);
+            let display = if entity.display.is_empty() {
+               short_url(&entity.url, 28)
+            } else {
+               entity.display.clone()
+            };
             let _ = write!(
                result,
                r#"<a href="{}">{}</a>"#,
