@@ -22,6 +22,8 @@ pub fn parse_conversation(
    tweet_id: &str,
    has_cursor: bool,
 ) -> Result<Conversation> {
+   const MIN_REPLIES_FOR_CURSOR: usize = 20;
+
    // Single tweet result path
    if let Some(tweet_data) = data
       .tweet_result
@@ -134,6 +136,14 @@ pub fn parse_conversation(
             }
          }
       }
+   }
+
+   // Twitter always sends a bottom_cursor even when there are no more
+   // replies. The first page returns ~25 reply chains when there are more
+   // pages; subsequent pages return ~36. Strip dead cursors when the reply
+   // count is well below the typical first-page size.
+   if !has_cursor && replies.content.len() < MIN_REPLIES_FOR_CURSOR {
+      replies.bottom = None;
    }
 
    // Paginated requests (with cursor) don't include the main tweet in the
