@@ -1,0 +1,35 @@
+# Ignore everything
+*
+
+# Track project files
+!.editorconfig
+!.envrc
+!.gitignore
+!.rustfmt.toml
+!.taplo.toml
+!Cargo.lock
+!Cargo.toml
+!README.md
+
+# Config (example only, not real config)
+!config/
+!config/teapot.example.toml
+
+# Session example (never real sessions)
+!sessions.example.jsonl
+
+# Source
+!src/
+!src/**
+
+# Static assets
+!public/
+!public/**
+
+# Sass sources
+!sass/
+!sass/**
+
+# Nix
+!flake.lock
+!flake.nix
