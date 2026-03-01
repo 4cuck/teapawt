@@ -1,6 +1,11 @@
 //! Entity expansion for tweet and user bio text.
 //!
 //! Converts @mentions, #hashtags, and URLs into clickable HTML links.
+//!
+//! Twitter's API returns `full_text` with HTML entities already escaped
+//! (`&amp;`, `&lt;`, `&gt;`, etc.). Text between entities is passed through
+//! as-is since it's already HTML-safe. Only entity *attributes* (URLs,
+//! display names) need escaping because they come from our own processing.
 
 use std::{
    borrow::Cow,
@@ -36,10 +41,11 @@ fn char_to_byte_index(text: &str, char_idx: usize) -> Option<usize> {
 /// Expand entities in text to HTML links.
 ///
 /// Takes the original text and a list of entities with their positions,
-/// then reconstructs the text with HTML anchor tags.
+/// then reconstructs the text with HTML anchor tags. Text between entities
+/// is passed through verbatim (Twitter already HTML-escapes it).
 pub fn expand_entities(text: &str, entities: &[Entity]) -> String {
    if entities.is_empty() {
-      return html_escape(text).into_owned();
+      return text.to_owned();
    }
 
    // Sort entities by start position
@@ -73,42 +79,39 @@ pub fn expand_entities(text: &str, entities: &[Entity]) -> String {
          continue;
       };
 
-      // Add text before this entity (escaped)
+      // Add text before this entity (already HTML-escaped by Twitter)
       if start_char > last_end_char {
-         result.push_str(&html_escape(&text[last_end_byte..start_byte]));
+         result.push_str(&text[last_end_byte..start_byte]);
       }
 
       // Add the entity as an HTML link
+      let entity_text = &text[start_byte..end_byte];
       match entity.kind {
          EntityKind::Mention => {
-            let mention_text = &text[start_byte..end_byte];
             let _ = write!(
                result,
                r#"<a href="{}" title="{}">{}</a>"#,
                html_escape(&entity.url),
                html_escape(&entity.display),
-               html_escape(mention_text)
+               entity_text
             );
          },
          EntityKind::Hashtag => {
-            let hashtag_text = &text[start_byte..end_byte];
-            // Extract tag name without # symbol
-            let tag_name = hashtag_text.trim_start_matches('#').trim_start_matches('$');
+            let tag_name = entity_text.trim_start_matches('#').trim_start_matches('$');
             let _ = write!(
                result,
                r#"<a href="/search?q=%23{}">{}</a>"#,
                url_encode(tag_name),
-               html_escape(hashtag_text)
+               entity_text
             );
          },
          EntityKind::Symbol => {
-            let symbol_text = &text[start_byte..end_byte];
-            let symbol_name = symbol_text.trim_start_matches('$');
+            let symbol_name = entity_text.trim_start_matches('$');
             let _ = write!(
                result,
                r#"<a href="/search?q=%24{}">{}</a>"#,
                url_encode(symbol_name),
-               html_escape(symbol_text)
+               entity_text
             );
          },
          EntityKind::Url => {
@@ -125,29 +128,23 @@ pub fn expand_entities(text: &str, entities: &[Entity]) -> String {
       last_end_char = end_char;
    }
 
-   // Add remaining text after last entity (escaped)
+   // Add remaining text (already HTML-escaped by Twitter)
    if last_end_char < char_count
       && let Some(last_end_byte) = char_to_byte_index(text, last_end_char)
    {
-      result.push_str(&html_escape(&text[last_end_byte..]));
+      result.push_str(&text[last_end_byte..]);
    }
 
    result
 }
 
 /// Regex-based expansion fallback.
+///
+/// Operates directly on Twitter's pre-escaped text. The `HASHTAG_RE` pattern
+/// uses `[^\w&;]` to avoid matching HTML entities like `&#x27;`.
 pub fn expand_with_regex(text: &str) -> String {
-   let escaped = html_escape(text);
-
-   // Replace @mentions: @username -> link
-   // Pattern: word boundary + @ + 1-15 alphanumeric/underscore chars
-   let result = MENTION_RE.replace_all(&escaped, r#"$1<a href="/$2">@$2</a>"#);
-
-   // Replace #hashtags: #topic -> link
-   // Negative lookbehind (?<!;) prevents matching HTML entities like &#x27;
-   // (which after html_escape becomes &amp;#x27; where ; is followed by #)
+   let result = MENTION_RE.replace_all(text, r#"$1<a href="/$2">@$2</a>"#);
    let result = HASHTAG_RE.replace_all(&result, r#"$1<a href="/search?q=%23$3">$2$3</a>"#);
-
    result.into_owned()
 }
 
@@ -242,7 +239,6 @@ mod tests {
       }];
       let result = expand_entities("Check https://t.co/xyz out!", &entities);
       assert!(result.contains(r#"href="https://example.com/long/path""#));
-      // Display text is computed by short_url() at render time
       assert!(result.contains("example.com/long/path"));
    }
 
@@ -264,11 +260,9 @@ mod tests {
 
    #[test]
    fn test_html_entity_not_treated_as_hashtag() {
-      // &#x27; is the HTML entity for single quote -- the #x27 must NOT become a
-      // hashtag link
-      let result = expand_with_regex("It's a test");
-      // After html_escape, ' becomes &#x27; -- should NOT contain a hashtag link for
-      // #x27
+      // &#x27; is the HTML entity for single quote — the #x27 must NOT become
+      // a hashtag link. Twitter sends this pre-escaped.
+      let result = expand_with_regex("It&#x27;s a test");
       assert!(
          result.contains("&#x27;"),
          "HTML entity &#x27; should be preserved"
@@ -281,11 +275,25 @@ mod tests {
 
    #[test]
    fn test_html_entity_ampersand_not_treated_as_hashtag() {
-      // &amp;#x27; case (double-encoded)
       let result = expand_with_regex("Test &amp; &#x27;end");
       assert!(
          !result.contains(r#"<a href="/search?q=%23x27">"#),
          "&amp;#x27; should not produce hashtag link"
       );
+   }
+
+   #[test]
+   fn test_no_double_escape() {
+      // Twitter returns &lt; in full_text — should stay as &lt; not become &amp;lt;
+      let result = expand_entities("x &lt; y", &[]);
+      assert_eq!(result, "x &lt; y");
+      assert!(!result.contains("&amp;"), "should not double-escape");
+   }
+
+   #[test]
+   fn test_passthrough_preserves_twitter_escaping() {
+      // Twitter pre-escapes: &amp; &lt; &gt; &quot;
+      let result = expand_entities("A &amp; B &lt; C &gt; D", &[]);
+      assert_eq!(result, "A &amp; B &lt; C &gt; D");
    }
 }
