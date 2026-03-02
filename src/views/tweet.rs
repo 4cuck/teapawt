@@ -905,7 +905,7 @@ pub fn render_reply_chains(
        }
        @if !bottom_cursor.is_empty() {
            div class="show-more" {
-               a href=(format!("/{username}/status/{id}?cursor={bottom_cursor}#r")) {
+               a href=(format!("{}#r", formatters::cursor_url(&format!("/{username}/status/{id}"), bottom_cursor))) {
                    "Load more replies"
                }
            }

@@ -32,8 +32,8 @@ pub fn render_user_list(
    prefs: Option<&Prefs>,
 ) -> Markup {
    let load_more_url = match (cursor, base_url) {
-      (Some(cur), Some(base)) => Some(format!("{base}?cursor={cur}")),
-      (Some(cur), None) => Some(format!("?cursor={cur}")),
+      (Some(cur), Some(base)) => Some(formatters::cursor_url(base, cur)),
+      (Some(cur), None) => Some(formatters::cursor_url("", cur)),
       _ => None,
    };
 

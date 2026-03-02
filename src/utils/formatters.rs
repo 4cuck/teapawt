@@ -133,7 +133,13 @@ pub fn replace_urls(text: &str, config: &Config) -> String {
    replace_urls_abs(text, config, "")
 }
 
-/// URL encode a string.
+/// Build a cursor URL with the cursor value percent-encoded.
+pub fn cursor_url(base: &str, cursor: &str) -> String {
+   let encoded: String = form_urlencoded::byte_serialize(cursor.as_bytes()).collect();
+   format!("{base}?cursor={encoded}")
+}
+
+/// URL-encode a string.
 pub fn url_encode(input: &str) -> String {
    utf8_percent_encode(input, NON_ALPHANUMERIC).to_string()
 }
