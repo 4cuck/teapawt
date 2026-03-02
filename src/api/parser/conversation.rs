@@ -101,8 +101,15 @@ pub fn parse_conversation(
             let mut is_self_thread = false;
 
             for item in entry.items() {
+               let item_id = item.entry_id_str();
+
+               // Skip promoted items inside threads
+               if item_id.contains("promoted") {
+                  continue;
+               }
+
                // Check for "Show more" cursor in thread
-               if item.entry_id_str().contains("cursor-showmore") {
+               if item_id.contains("cursor-showmore") {
                   let cursor = item.cursor_value().unwrap_or_default();
                   chain.has_more = true;
                   chain.cursor = Some(cursor.to_owned());

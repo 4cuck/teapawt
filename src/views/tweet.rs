@@ -75,14 +75,15 @@ pub const fn thread_context(index: usize, total: usize, is_definite_end: bool) -
    reason = "TweetRenderer is the canonical name used across the codebase"
 )]
 pub struct TweetRenderer<'a> {
-   tweet:       &'a Tweet,
-   config:      &'a Config,
-   is_main:     bool,
-   pinned:      bool,
-   prefs:       Option<&'a Prefs>,
-   thread_ctx:  ThreadContext,
-   extra_class: &'a str,
-   index:       usize,
+   tweet:        &'a Tweet,
+   config:       &'a Config,
+   is_main:      bool,
+   pinned:       bool,
+   prefs:        Option<&'a Prefs>,
+   thread_ctx:   ThreadContext,
+   extra_class:  &'a str,
+   index:        usize,
+   sort_toggle:  Option<&'a Markup>,
 }
 
 impl<'a> TweetRenderer<'a> {
@@ -96,6 +97,7 @@ impl<'a> TweetRenderer<'a> {
          thread_ctx: ThreadContext::None,
          extra_class: "",
          index: 0,
+         sort_toggle: None,
       }
    }
 
@@ -126,6 +128,11 @@ impl<'a> TweetRenderer<'a> {
 
    pub const fn index(mut self, index: usize) -> Self {
       self.index = index;
+      self
+   }
+
+   pub const fn sort_toggle(mut self, toggle: Option<&'a Markup>) -> Self {
+      self.sort_toggle = toggle;
       self
    }
 
@@ -355,7 +362,9 @@ impl<'a> TweetRenderer<'a> {
 
                   // Stats
                   @if !prefs.is_some_and(|pref| pref.hide_tweet_stats) {
-                      (render_stats(&display_tweet.stats))
+                      (render_stats(&display_tweet.stats, self.sort_toggle))
+                  } @else if let Some(toggle) = self.sort_toggle {
+                      div class="tweet-stats" { (toggle) }
                   }
               }
           }
@@ -813,7 +822,9 @@ fn render_video(video: &Video, config: &Config, prefs: Option<&Prefs>) -> Markup
 }
 
 /// Render tweet stats using `icon()` helper from renderutils.
-fn render_stats(stats: &TweetStats) -> Markup {
+/// Optional `extra` markup is appended after the stat icons (used for the
+/// reply-sort toggle on the main tweet).
+fn render_stats(stats: &TweetStats, extra: Option<&Markup>) -> Markup {
    let fmt = |n: i64| {
       if n > 0 {
          formatters::format_with_commas(n)
@@ -827,6 +838,9 @@ fn render_stats(stats: &TweetStats) -> Markup {
            span class="tweet-stat" { (icon("retweet", &fmt(stats.retweets), "", "", "")) }
            span class="tweet-stat" { (icon("heart", &fmt(stats.likes), "", "", "")) }
            span class="tweet-stat" { (icon("views", &fmt(stats.views), "", "", "")) }
+           @if let Some(extra) = extra {
+               (extra)
+           }
        }
    }
 }

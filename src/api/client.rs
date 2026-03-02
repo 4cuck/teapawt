@@ -353,11 +353,12 @@ impl ApiClient {
       &self,
       tweet_id: &str,
       cursor: Option<&str>,
+      ranking_mode: &str,
    ) -> Result<Conversation> {
       let data = self
          .graphql_request::<ConversationData>(
             endpoints::GRAPH_TWEET_DETAIL,
-            &endpoints::tweet_detail_vars(tweet_id, cursor),
+            &endpoints::tweet_detail_vars(tweet_id, cursor, ranking_mode),
             endpoints::GQL_FEATURES,
             Some(endpoints::TWEET_DETAIL_FIELD_TOGGLES),
          )
@@ -582,7 +583,7 @@ impl ApiClient {
       let data = self
          .graphql_request::<ConversationData>(
             endpoints::GRAPH_TWEET_DETAIL,
-            &endpoints::tweet_detail_vars(tweet_id, None),
+            &endpoints::tweet_detail_vars(tweet_id, None, "Relevance"),
             endpoints::GQL_FEATURES,
             Some(endpoints::TWEET_DETAIL_FIELD_TOGGLES),
          )

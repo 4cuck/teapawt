@@ -51,6 +51,16 @@ use crate::{
 pub struct StatusQuery {
    pub cursor: Option<String>,
    pub scroll: Option<String>,
+   pub sort:   Option<String>,
+}
+
+/// Map the `?sort=` query parameter to a Twitter API `rankingMode` value.
+fn ranking_mode(sort: Option<&str>) -> &str {
+   match sort {
+      Some("recency") => "Recency",
+      Some("likes") => "Likes",
+      _ => "Relevance",
+   }
 }
 
 pub fn router() -> Router<AppState> {
@@ -106,14 +116,17 @@ async fn status(
    // Extract prefs from cookies
    let prefs = Prefs::from_cookies(&jar, &state.config);
 
-   // Fetch conversation (with cache for first page)
-   let conv_result = if query.cursor.is_none() {
+   let sort = ranking_mode(query.sort.as_deref());
+   let is_sorted = sort != "Relevance";
+
+   // Fetch conversation (with cache for first page, default sort only)
+   let conv_result = if query.cursor.is_none() && !is_sorted {
       let cache_key = cache_keys::conversation(&id);
       if let Some(cached) = state.cache.get(&cache_key) {
          tracing::debug!("Cache hit for conversation: {id}");
          Ok(cached)
       } else {
-         let result = state.api.get_conversation(&id, None).await;
+         let result = state.api.get_conversation(&id, None, sort).await;
          if let Ok(ref conv) = result {
             state.cache.set(&cache_key, conv, ttl::DEFAULT);
          }
@@ -122,7 +135,7 @@ async fn status(
    } else {
       state
          .api
-         .get_conversation(&id, query.cursor.as_deref())
+         .get_conversation(&id, query.cursor.as_deref(), sort)
          .await
    };
 
@@ -158,7 +171,7 @@ async fn status(
             {
                cached
             } else {
-               match state.api.get_conversation(&id, None).await {
+               match state.api.get_conversation(&id, None, sort).await {
                   Ok(fresh) => {
                      state.cache.set(&cache_key, &fresh, ttl::DEFAULT);
                      fresh
@@ -174,6 +187,7 @@ async fn status(
                &id,
                &prefs,
                &state.config,
+               query.sort.as_deref(),
             ));
          }
 
@@ -185,7 +199,9 @@ async fn status(
             let cache_key = cache_keys::conversation(&id);
             if let Some(cached) = state.cache.get::<Conversation>(&cache_key) {
                conversation.tweet = cached.tweet;
-            } else if let Ok(fresh) = state.api.get_conversation(&id, None).await {
+            } else if let Ok(fresh) =
+               state.api.get_conversation(&id, None, sort).await
+            {
                state.cache.set(&cache_key, &fresh, ttl::DEFAULT);
                conversation.tweet = fresh.tweet;
             }
@@ -198,6 +214,7 @@ async fn status(
             &id,
             &prefs,
             &state.config,
+            query.sort.as_deref(),
          ))
       },
       Err(Error::TweetNotFound(msg)) => {
@@ -223,6 +240,7 @@ fn render_conversation(
    id: &str,
    prefs: &Prefs,
    config: &Config,
+   sort: Option<&str>,
 ) -> Response {
    let tweet = &conversation.tweet;
 
@@ -236,6 +254,36 @@ fn render_conversation(
       let markup = layout::render_error(config, "Tweet not found", msg);
       return (StatusCode::NOT_FOUND, Html(markup.into_string())).into_response();
    }
+
+   // Build sort toggle markup (rendered inside the main tweet's stats row)
+   let has_replies = !prefs.hide_replies && !conversation.replies.content.is_empty();
+   let sort_toggle = (has_replies && !has_cursor).then(|| {
+      let base = format!("/{username}/status/{id}");
+      let sort_label = match sort {
+         Some("recency") => "Recent",
+         Some("likes") => "Likes",
+         _ => "Relevant",
+      };
+      html! {
+          div class="reply-sort" {
+              button class="reply-sort-btn" type="button" {
+                  (sort_label) " \u{25BE}"
+              }
+              div class="reply-sort-menu" {
+                  @for (label, value) in [("Relevant", None), ("Recent", Some("recency")), ("Likes", Some("likes"))] {
+                      @let active = sort == value;
+                      @if active {
+                          span class="reply-sort-active" { (label) }
+                      } @else if let Some(val) = value {
+                          a href=(format!("{base}?sort={val}")) { (label) }
+                      } @else {
+                          a href=(base) { (label) }
+                      }
+                  }
+              }
+          }
+      }
+   });
 
    let content = html! {
        div class="conversation" {
@@ -281,11 +329,15 @@ fn render_conversation(
                        }
                    }
 
-                   // Main tweet (highlighted, larger)
+                   // Main tweet (highlighted, larger) — sort toggle injected into stats row
                    @let has_after = !conversation.after.content.is_empty();
                    @let after_class = if has_after { "thread thread-line" } else { "" };
                    div class="main-tweet" id="m" {
-                       (TweetRenderer::new(tweet, config, true).prefs(prefs).extra_class(after_class).render())
+                       (TweetRenderer::new(tweet, config, true)
+                           .prefs(prefs)
+                           .extra_class(after_class)
+                           .sort_toggle(sort_toggle.as_ref())
+                           .render())
                    }
 
                    // After context (thread continuation) with thread line
@@ -316,7 +368,7 @@ fn render_conversation(
                }
 
                // Replies section
-               @if !prefs.hide_replies && !conversation.replies.content.is_empty() {
+               @if has_replies {
                    div class="replies" id="r" {
                        (render_reply_chains(
                            &conversation.replies.content,
@@ -332,6 +384,7 @@ fn render_conversation(
 
            // Scroll to top button
            (render_to_top_with_focus("#m"))
+
        }
    };
 
