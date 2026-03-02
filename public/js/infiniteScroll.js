@@ -17,7 +17,8 @@ function isDuplicate(item, itemClass) {
 
 window.onload = function () {
     const url = window.location.pathname;
-    const isTweet = url.indexOf("/status/") !== -1;
+    const isEngagement = /\/status\/\d+\/(retweets|quotes)/.test(url);
+    const isTweet = !isEngagement && url.indexOf("/status/") !== -1;
     const containerClass = isTweet ? ".replies" : ".timeline";
     const itemClass = containerClass + " > div:not(.top-ref)";
 

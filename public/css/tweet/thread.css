@@ -121,6 +121,31 @@
   padding: 7px 0;
 }
 
+.engagement-header {
+  display: flex;
+  align-items: stretch;
+  background-color: var(--bg_panel);
+  margin-bottom: 5px;
+
+  & .back-arrow {
+    display: flex;
+    align-items: center;
+    padding: 8px 12px;
+    font-size: 18px;
+    color: var(--fg_color);
+    text-decoration: none;
+
+    &:hover {
+      color: var(--accent);
+    }
+  }
+
+  & .tab {
+    flex: 1;
+    margin: 0;
+  }
+}
+
 .reply-sort {
   margin-left: auto;
   position: relative;

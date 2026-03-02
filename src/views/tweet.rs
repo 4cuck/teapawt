@@ -362,7 +362,7 @@ impl<'a> TweetRenderer<'a> {
 
                   // Stats
                   @if !prefs.is_some_and(|pref| pref.hide_tweet_stats) {
-                      (render_stats(&display_tweet.stats, self.sort_toggle))
+                      (render_stats(&display_tweet.stats, &display_tweet.user.username, display_tweet.id, self.sort_toggle))
                   } @else if let Some(toggle) = self.sort_toggle {
                       div class="tweet-stats" { (toggle) }
                   }
@@ -822,9 +822,10 @@ fn render_video(video: &Video, config: &Config, prefs: Option<&Prefs>) -> Markup
 }
 
 /// Render tweet stats using `icon()` helper from renderutils.
+/// Retweet count links to the retweeters page; quote count links to search.
 /// Optional `extra` markup is appended after the stat icons (used for the
 /// reply-sort toggle on the main tweet).
-fn render_stats(stats: &TweetStats, extra: Option<&Markup>) -> Markup {
+fn render_stats(stats: &TweetStats, username: &str, id: i64, extra: Option<&Markup>) -> Markup {
    let fmt = |n: i64| {
       if n > 0 {
          formatters::format_with_commas(n)
@@ -835,7 +836,14 @@ fn render_stats(stats: &TweetStats, extra: Option<&Markup>) -> Markup {
    html! {
        div class="tweet-stats" {
            span class="tweet-stat" { (icon("comment", &fmt(stats.replies), "", "", "")) }
-           span class="tweet-stat" { (icon("retweet", &fmt(stats.retweets), "", "", "")) }
+           a class="tweet-stat" href=(format!("/{username}/status/{id}/retweets")) title="Retweets" {
+               (icon("retweet", &fmt(stats.retweets), "", "", ""))
+           }
+           @if stats.quotes > 0 {
+               a class="tweet-stat" href=(format!("/{username}/status/{id}/quotes")) title="Quotes" {
+                   (icon("quote", &fmt(stats.quotes), "", "", ""))
+               }
+           }
            span class="tweet-stat" { (icon("heart", &fmt(stats.likes), "", "", "")) }
            span class="tweet-stat" { (icon("views", &fmt(stats.views), "", "", "")) }
            @if let Some(extra) = extra {

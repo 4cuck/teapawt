@@ -4,6 +4,7 @@ use crate::{
       InstructionType,
       ListData,
       ListMembersData,
+      RetweetersData,
       SearchTimelineData,
    },
    types::{
@@ -86,6 +87,45 @@ pub fn parse_list(raw: &ListData) -> List {
 
 /// Parse list members from API response.
 pub fn parse_list_members(data: &ListMembersData) -> PaginatedResult<User> {
+   let raw_instructions = data.instructions();
+
+   let mut users = Vec::new();
+   let mut top_cursor = None;
+   let mut bottom_cursor = None;
+
+   for instruction in raw_instructions {
+      if instruction.instruction_type != Some(InstructionType::TimelineAddEntries) {
+         continue;
+      }
+
+      for entry in instruction.entries.as_deref().unwrap_or_default() {
+         let entry_id = entry.entry_id_str();
+
+         if entry_id.starts_with("user-") {
+            if let Some(user_result) = entry.user_result()
+               && let Ok(user) = parse_user_object(user_result)
+            {
+               users.push(user);
+            }
+         } else if entry_id.starts_with("cursor-bottom-") {
+            bottom_cursor = entry.cursor_value().map(str::to_owned);
+         } else if entry_id.starts_with("cursor-top-") {
+            top_cursor = entry.cursor_value().map(str::to_owned);
+         }
+      }
+   }
+
+   PaginatedResult {
+      content:   users,
+      top:       top_cursor,
+      bottom:    bottom_cursor,
+      beginning: false,
+      query:     Query::default(),
+   }
+}
+
+/// Parse retweeters from API response (same structure as list members).
+pub fn parse_retweeters(data: &RetweetersData) -> PaginatedResult<User> {
    let raw_instructions = data.instructions();
 
    let mut users = Vec::new();

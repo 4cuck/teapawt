@@ -42,8 +42,12 @@ use crate::{
    views::{
       embed,
       layout,
-      timeline::render_to_top_with_focus,
+      timeline::{
+         render_timeline_with_prefs,
+         render_to_top_with_focus,
+      },
       tweet as tweet_view,
+      user_list,
    },
 };
 
@@ -88,6 +92,14 @@ pub fn router() -> Router<AppState> {
          .route(
             &format!("/{{username}}/{prefix}/{{id}}/history"),
             get(edit_history),
+         )
+         .route(
+            &format!("/{{username}}/{prefix}/{{id}}/retweets"),
+            get(retweets),
+         )
+         .route(
+            &format!("/{{username}}/{prefix}/{{id}}/quotes"),
+            get(quotes),
          );
    }
 
@@ -468,6 +480,108 @@ async fn user_by_id(State(state): State<AppState>, Path(id): Path<String>) -> Re
             .into_response())
       },
    }
+}
+
+/// Render the back-arrow + Retweets/Quotes tab bar.
+fn engagement_tabs(username: &str, id: &str, active: &str) -> maud::Markup {
+   let base = format!("/{username}/status/{id}");
+   let rt_class = if active == "retweets" { "tab-item active" } else { "tab-item" };
+   let qt_class = if active == "quotes" { "tab-item active" } else { "tab-item" };
+
+   html! {
+       div class="engagement-header" {
+           a class="back-arrow" href=(format!("{base}#m")) { "\u{2190}" }
+           ul class="tab" {
+               li class=(rt_class) { a href=(format!("{base}/retweets")) { "Retweets" } }
+               li class=(qt_class) { a href=(format!("{base}/quotes")) { "Quotes" } }
+           }
+       }
+   }
+}
+
+/// Retweets page — lists users who retweeted, with infinite scroll support.
+async fn retweets(
+   State(state): State<AppState>,
+   jar: CookieJar,
+   Path((username, id)): Path<(String, String)>,
+   Query(query): Query<StatusQuery>,
+) -> Result<Response> {
+   let prefs = Prefs::from_cookies(&jar, &state.config);
+   let is_scroll = query.scroll.as_deref() == Some("true");
+
+   let result = state
+      .api
+      .get_retweeters(&id, query.cursor.as_deref())
+      .await?;
+
+   let cursor = result.bottom.as_deref();
+   let base_url = format!("/{username}/status/{id}/retweets");
+
+   // Scroll request: return just the user list HTML fragment
+   if is_scroll {
+      let fragment = user_list::render_user_list(
+         &result.content,
+         &state.config,
+         cursor,
+         Some(&base_url),
+         Some(&prefs),
+      );
+      return Ok(Html(fragment.into_string()).into_response());
+   }
+
+   let content = html! {
+       div class="timeline-container" {
+           (engagement_tabs(&username, &id, "retweets"))
+           (user_list::render_user_list(&result.content, &state.config, cursor, Some(&base_url), Some(&prefs)))
+       }
+   };
+
+   let title = format!("Retweets - @{username}/status/{id}");
+   let markup = layout::PageLayout::new(&state.config, &title, content)
+      .prefs(&prefs)
+      .render();
+   Ok(Html(markup.into_string()).into_response())
+}
+
+/// Quotes page — shows tweets that quote this tweet, with infinite scroll support.
+async fn quotes(
+   State(state): State<AppState>,
+   jar: CookieJar,
+   Path((username, id)): Path<(String, String)>,
+   Query(query): Query<StatusQuery>,
+) -> Result<Response> {
+   let prefs = Prefs::from_cookies(&jar, &state.config);
+   let is_scroll = query.scroll.as_deref() == Some("true");
+   let search_query = format!("quoted_tweet_id:{id}");
+
+   let timeline = state
+      .api
+      .search(&search_query, query.cursor.as_deref())
+      .await?;
+
+   let groups = timeline.content;
+   let cursor = timeline.bottom.as_deref();
+   let base_url = format!("/{username}/status/{id}/quotes");
+
+   // Scroll request: return just the timeline HTML fragment
+   if is_scroll {
+      let fragment =
+         render_timeline_with_prefs(&groups, &state.config, cursor, Some(&base_url), &prefs, None);
+      return Ok(Html(fragment.into_string()).into_response());
+   }
+
+   let content = html! {
+       div class="timeline-container" {
+           (engagement_tabs(&username, &id, "quotes"))
+           (render_timeline_with_prefs(&groups, &state.config, cursor, Some(&base_url), &prefs, None))
+       }
+   };
+
+   let title = format!("Quotes - @{username}/status/{id}");
+   let markup = layout::PageLayout::new(&state.config, &title, content)
+      .prefs(&prefs)
+      .render();
+   Ok(Html(markup.into_string()).into_response())
 }
 
 /// Edit history page handler.

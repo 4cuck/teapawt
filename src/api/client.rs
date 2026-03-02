@@ -21,6 +21,7 @@ use crate::{
       ListByIdData,
       ListBySlugData,
       ListMembersData,
+      RetweetersData,
       ListTimelineData,
       SearchTimelineData,
       TweetResultData,
@@ -536,6 +537,23 @@ impl ApiClient {
          )
          .await?;
       Ok(super::parse_list_members(&data))
+   }
+
+   /// Get users who retweeted a tweet.
+   pub async fn get_retweeters(
+      &self,
+      tweet_id: &str,
+      cursor: Option<&str>,
+   ) -> Result<PaginatedResult<User>> {
+      let data = self
+         .graphql_request::<RetweetersData>(
+            endpoints::GRAPH_RETWEETERS,
+            &endpoints::retweeters_vars(tweet_id, cursor),
+            endpoints::GQL_FEATURES,
+            None,
+         )
+         .await?;
+      Ok(super::parse_retweeters(&data))
    }
 
    /// Get user's tweets and replies timeline.

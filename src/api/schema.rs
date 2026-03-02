@@ -476,6 +476,7 @@ pub struct TweetLegacy {
    pub reply_count:               i64,
    pub retweet_count:             i64,
    pub favorite_count:            i64,
+   pub quote_count:               i64,
    pub in_reply_to_status_id_str: Option<String>,
    pub in_reply_to_screen_name:   Option<String>,
    pub conversation_id_str:       Option<String>,
@@ -1117,6 +1118,24 @@ impl ListMembersData {
          .list
          .as_ref()
          .and_then(|nested| nested.members_timeline.as_ref())
+         .map(|payload| payload.timeline.instructions.as_slice())
+         .unwrap_or_default()
+   }
+}
+
+// ── Retweeters (get_retweeters) ──
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct RetweetersData {
+   pub retweeters_timeline: Option<TimelinePayload>,
+}
+
+impl RetweetersData {
+   pub fn instructions(&self) -> &[Instruction] {
+      self
+         .retweeters_timeline
+         .as_ref()
          .map(|payload| payload.timeline.instructions.as_slice())
          .unwrap_or_default()
    }

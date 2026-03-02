@@ -254,6 +254,7 @@ pub struct TweetStats {
    pub replies:  i64,
    pub retweets: i64,
    pub likes:    i64,
+   pub quotes:   i64,
    pub views:    i64,
 }
 

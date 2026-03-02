@@ -124,6 +124,7 @@ impl TryFrom<&TweetData> for Tweet {
          replies:  legacy.reply_count,
          retweets: legacy.retweet_count,
          likes:    legacy.favorite_count,
+         quotes:   legacy.quote_count,
          views:    raw
             .views
             .as_ref()
