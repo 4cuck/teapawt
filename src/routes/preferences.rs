@@ -181,29 +181,26 @@ pub struct PrefsForm {
 impl PrefsForm {
    fn to_prefs(&self, config: &Config) -> Prefs {
       let defaults = Prefs::with_defaults(config);
-      let parse_bool =
-         |field: &Option<String>, default: bool| field.as_ref().map_or(default, |val| val == "on");
+      // Unchecked checkboxes are absent from form data (None) — always false.
+      let parse_bool = |field: &Option<String>| field.as_ref().is_some_and(|val| val == "on");
       let parse_str = |field: &Option<String>, default: String| field.clone().unwrap_or(default);
 
       Prefs {
          theme:                parse_str(&self.theme, defaults.theme),
-         infinite_scroll:      parse_bool(&self.infinite_scroll, defaults.infinite_scroll),
-         sticky_profile:       parse_bool(&self.sticky_profile, defaults.sticky_profile),
-         bidi_support:         parse_bool(&self.bidi_support, defaults.bidi_support),
-         mp4_playback:         parse_bool(&self.mp4_playback, defaults.mp4_playback),
-         autoplay_gifs:        parse_bool(&self.autoplay_gifs, defaults.autoplay_gifs),
-         mute_videos:          parse_bool(&self.mute_videos, defaults.mute_videos),
-         hide_tweet_stats:     parse_bool(&self.hide_tweet_stats, defaults.hide_tweet_stats),
-         hide_banner:          parse_bool(&self.hide_banner, defaults.hide_banner),
-         hide_pins:            parse_bool(&self.hide_pins, defaults.hide_pins),
-         hide_replies:         parse_bool(&self.hide_replies, defaults.hide_replies),
-         hide_community_notes: parse_bool(
-            &self.hide_community_notes,
-            defaults.hide_community_notes,
-         ),
-         square_avatars:       parse_bool(&self.square_avatars, defaults.square_avatars),
-         use_twemoji:          parse_bool(&self.use_twemoji, defaults.use_twemoji),
-         sticky_nav:           parse_bool(&self.sticky_nav, defaults.sticky_nav),
+         infinite_scroll:      parse_bool(&self.infinite_scroll),
+         sticky_profile:       parse_bool(&self.sticky_profile),
+         bidi_support:         parse_bool(&self.bidi_support),
+         mp4_playback:         parse_bool(&self.mp4_playback),
+         autoplay_gifs:        parse_bool(&self.autoplay_gifs),
+         mute_videos:          parse_bool(&self.mute_videos),
+         hide_tweet_stats:     parse_bool(&self.hide_tweet_stats),
+         hide_banner:          parse_bool(&self.hide_banner),
+         hide_pins:            parse_bool(&self.hide_pins),
+         hide_replies:         parse_bool(&self.hide_replies),
+         hide_community_notes: parse_bool(&self.hide_community_notes),
+         square_avatars:       parse_bool(&self.square_avatars),
+         use_twemoji:          parse_bool(&self.use_twemoji),
+         sticky_nav:           parse_bool(&self.sticky_nav),
          replace_twitter:      parse_str(&self.replace_twitter, defaults.replace_twitter),
          replace_youtube:      parse_str(&self.replace_youtube, defaults.replace_youtube),
          replace_reddit:       parse_str(&self.replace_reddit, defaults.replace_reddit),
