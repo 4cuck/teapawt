@@ -7,7 +7,6 @@ use crate::{
    api::schema::{
       TweetData,
       TweetLegacy,
-      TweetResultData,
       indices,
    },
    error::{
@@ -24,18 +23,6 @@ use crate::{
       TweetStats,
    },
 };
-
-/// Parse a tweet from typed GraphQL response.
-pub fn parse_tweet(data: &TweetResultData) -> Result<Tweet> {
-   let tweet_data = data
-      .tweet_result
-      .as_ref()
-      .or(data.tweet.as_ref())
-      .and_then(|nested| nested.result.as_deref())
-      .ok_or_else(|| Error::TweetNotFound("Tweet data not found in response".into()))?;
-
-   parse_tweet_object(tweet_data)
-}
 
 /// Parse a tweet object (from `NestedResult` or direct).
 pub fn parse_tweet_object(raw: &TweetData) -> Result<Tweet> {

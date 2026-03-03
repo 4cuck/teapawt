@@ -37,7 +37,6 @@ use crate::{
    types::{
       Conversation,
       Prefs,
-      Tweet,
    },
    views::{
       embed,
@@ -406,38 +405,66 @@ fn render_conversation(
 
 async fn status_by_id(
    State(state): State<AppState>,
+   jar: CookieJar,
    Path(id): Path<String>,
-   Query(_query): Query<StatusQuery>,
+   Query(query): Query<StatusQuery>,
 ) -> Result<Response> {
    // Validate tweet ID is numeric
-   let Ok(tweet_id) = id.parse() else {
+   if id.parse::<u64>().is_err() {
       return Ok((
          StatusCode::NOT_FOUND,
          Html(layout::render_error(&state.config, "Not Found", "Invalid tweet ID").into_string()),
       )
          .into_response());
-   };
-   let cache_key = cache_keys::tweet(tweet_id);
+   }
 
-   let tweet_result = if let Some(cached) = state.cache.get::<Tweet>(&cache_key) {
-      tracing::debug!("Cache hit for tweet: {id}");
-      Ok(cached)
-   } else {
-      let result = state.api.get_tweet(&id).await;
-      if let Ok(ref tweet) = result {
-         state.cache.set(&cache_key, tweet, ttl::DEFAULT);
+   let prefs = Prefs::from_cookies(&jar, &state.config);
+   let sort = ranking_mode(query.sort.as_deref());
+
+   // Fetch conversation directly — render the tweet page inline instead of
+   // redirecting, matching X.com behaviour.
+   let cache_key = cache_keys::conversation(&id);
+   let conv_result = if query.cursor.is_none() && sort == "Relevance" {
+      if let Some(cached) = state.cache.get(&cache_key) {
+         Ok(cached)
+      } else {
+         let result = state.api.get_conversation(&id, None, sort).await;
+         if let Ok(ref conv) = result {
+            state.cache.set(&cache_key, conv, ttl::DEFAULT);
+         }
+         result
       }
-      result
+   } else {
+      state
+         .api
+         .get_conversation(&id, query.cursor.as_deref(), sort)
+         .await
    };
 
-   match tweet_result {
-      Ok(tweet) => {
-         let redirect_url = format!("/{}/status/{id}", tweet.user.username);
-         Ok(Redirect::to(&redirect_url).into_response())
+   match conv_result {
+      Ok(conversation) => {
+         let username = conversation.tweet.user.username.clone();
+         Ok(render_conversation(
+            &conversation,
+            query.cursor.is_some(),
+            &username,
+            &id,
+            &prefs,
+            &state.config,
+            query.sort.as_deref(),
+         ))
+      },
+      Err(Error::TweetNotFound(msg)) => {
+         let markup = layout::render_error(&state.config, "Tweet not found", &msg);
+         Ok((StatusCode::NOT_FOUND, Html(markup.into_string())).into_response())
       },
       Err(err) => {
-         let markup = layout::render_error(&state.config, "Tweet not found", &err.to_string());
-         Ok((StatusCode::NOT_FOUND, Html(markup.into_string())).into_response())
+         let markup = layout::render_error(&state.config, "Error", &err.to_string());
+         Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html(markup.into_string()),
+         )
+            .into_response())
       },
    }
 }

@@ -22,5 +22,4 @@ pub use timeline::{
    parse_search_timeline,
    parse_timeline,
 };
-pub use tweet::parse_tweet;
 pub use user::parse_user;

@@ -77,9 +77,6 @@ pub mod keys {
       format!("u:{}", username.to_lowercase())
    }
 
-   pub fn tweet(id: i64) -> String {
-      format!("t:{id}")
-   }
 
    pub fn profile(username: &str) -> String {
       format!("p:{}", username.to_lowercase())

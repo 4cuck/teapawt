@@ -24,7 +24,6 @@ use crate::{
       RetweetersData,
       ListTimelineData,
       SearchTimelineData,
-      TweetResultData,
       UserResultData,
       UserTimelineData,
    },
@@ -337,16 +336,12 @@ impl ApiClient {
    }
 
    /// Get tweet by ID.
+   ///
+   /// Uses the TweetDetail endpoint (same as conversation) because
+   /// TweetResultByIdQuery returns 404 for many tweets.
    pub async fn get_tweet(&self, tweet_id: &str) -> Result<Tweet> {
-      let data = self
-         .graphql_request::<TweetResultData>(
-            endpoints::GRAPH_TWEET_RESULT,
-            &endpoints::tweet_vars(tweet_id, None),
-            endpoints::GQL_FEATURES,
-            None,
-         )
-         .await?;
-      super::parse_tweet(&data)
+      let convo = self.get_conversation(tweet_id, None, "Relevance").await?;
+      Ok(convo.tweet)
    }
 
    /// Get conversation/thread for a tweet.

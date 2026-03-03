@@ -21,7 +21,6 @@ pub const GRAPH_USER_TWEETS: &str = "oRJs8SLCRNRbQzuZG93_oA/UserTweets";
 pub const GRAPH_USER_MEDIA: &str = "36oKqyQ7E_9CmtONGjJRsA/UserMedia";
 pub const GRAPH_USER_MEDIA_V2: &str = "bp0e_WdXqgNBIwlLukzyYA/MediaTimelineV2";
 pub const GRAPH_TWEET_DETAIL: &str = "YVyS4SfwYW7Uw5qwy0mQCA/TweetDetail";
-pub const GRAPH_TWEET_RESULT: &str = "nzme9KiYhfIOrrLrPP_XeQ/TweetResultByIdQuery";
 pub const GRAPH_SEARCH_TIMELINE: &str = "bshMIjqDk8LTXTq4w91WKw/SearchTimeline";
 pub const GRAPH_LIST_BY_ID: &str = "cIUpT1UjuGgl_oWiY7Snhg/ListByRestId";
 pub const GRAPH_LIST_BY_SLUG: &str = "K6wihoTiTrzNzSF8y1aeKQ/ListBySlug";
@@ -59,13 +58,6 @@ fn vars(mut value: serde_json::Value) -> String {
 
 // ── Builder functions ───────────────────────────────────────────────────
 
-pub fn tweet_vars(post_id: &str, cursor: Option<&str>) -> String {
-   vars(json!({
-      "postId": post_id, "cursor": cursor,
-      "includeHasBirdwatchNotes": false, "includePromotedContent": false,
-      "withBirdwatchNotes": false, "withVoice": false, "withV2Timeline": true,
-   }))
-}
 
 pub fn tweet_detail_vars(
    focal_tweet_id: &str,

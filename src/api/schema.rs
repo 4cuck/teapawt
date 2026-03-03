@@ -991,16 +991,6 @@ pub struct UserResultData {
    pub user_results: Option<NestedResult<UserData>>,
 }
 
-// ── Tweet endpoint (get_tweet) ──
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-pub struct TweetResultData {
-   #[serde(rename = "tweetResult")]
-   pub tweet_result: Option<NestedResult<TweetData>>,
-   pub tweet:        Option<NestedResult<TweetData>>,
-}
-
 // ── User timeline (get_user_tweets, get_user_media,
 // get_user_tweets_and_replies) ──
 
