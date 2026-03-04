@@ -328,7 +328,7 @@ impl<'a> TweetRenderer<'a> {
 
                   // Poll
                   @if let Some(ref poll) = display_tweet.poll {
-                      (render_poll(poll))
+                      (render_poll(poll, config))
                   }
 
                   // Quote tweet
@@ -606,7 +606,7 @@ fn render_quote(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> Markup
    clippy::cast_possible_truncation,
    reason = "poll vote counts fit in f64, leader index is always 0-3"
 )]
-fn render_poll(poll: &Poll) -> Markup {
+fn render_poll(poll: &Poll, config: &Config) -> Markup {
    let total_votes = poll.votes.max(1); // Avoid division by zero
    let leader_idx = poll.leader as usize;
    let percentages = poll
@@ -620,9 +620,17 @@ fn render_poll(poll: &Poll) -> Markup {
          }
       })
       .collect::<Vec<_>>();
+   let has_images = !poll.choice_images.is_empty();
 
    html! {
        div class="poll" {
+           @if has_images {
+               div class="poll-choice-images" {
+                   @for img in &poll.choice_images {
+                       (gen_img(img, "poll-choice-img", config))
+                   }
+               }
+           }
            @for (idx, option) in poll.options.iter().enumerate() {
                @let perc = percentages.get(idx).copied().unwrap_or(0.0);
                @let perc_str = format!("{perc:.0}%");

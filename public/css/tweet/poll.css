@@ -38,3 +38,18 @@
 .leader .poll-choice-bar {
   background: var(--accent_dark);
 }
+
+.poll-choice-images {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+  pointer-events: all;
+}
+
+.poll-choice-img {
+  flex: 1;
+  min-width: 0;
+  border-radius: 8px;
+  object-fit: cover;
+  aspect-ratio: 1;
+}

@@ -123,13 +123,14 @@ pub type PhotoRail = Vec<GalleryPhoto>;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Poll {
-   pub options:  Vec<String>,
-   pub values:   Vec<i64>,
-   pub votes:    i64,
-   pub leader:   i64,
+   pub options:       Vec<String>,
+   pub values:        Vec<i64>,
+   pub votes:         i64,
+   pub leader:        i64,
    #[serde(with = "time::serde::timestamp::option")]
-   pub end_time: Option<time::OffsetDateTime>,
-   pub image:    Option<String>,
+   pub end_time:      Option<time::OffsetDateTime>,
+   pub image:         Option<String>,
+   pub choice_images: Vec<String>,
 }
 
 impl Poll {
