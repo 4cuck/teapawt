@@ -215,9 +215,7 @@ async fn oembed_standard(
       author_name,
       tweet.user.username,
       tweet.id,
-      tweet.time
-         .map(format_relative_time)
-         .unwrap_or_default(),
+      tweet.time.map(format_relative_time).unwrap_or_default(),
    );
 
    let data = StandardOEmbed {
@@ -246,7 +244,9 @@ fn extract_tweet_id(url: &str) -> Option<&str> {
    let path = url
       .strip_prefix("http://")
       .or_else(|| url.strip_prefix("https://"))
-      .map_or(url, |stripped| stripped.split_once('/').map_or("", |(_, rest)| rest));
+      .map_or(url, |stripped| {
+         stripped.split_once('/').map_or("", |(_, rest)| rest)
+      });
 
    let segments: Vec<&str> = path.split('/').collect();
    for window in segments.windows(2) {

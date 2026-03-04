@@ -56,7 +56,10 @@ pub fn og_images(tweet: &Tweet) -> Vec<&str> {
 
 /// Try `f` on the tweet, falling back to the quote tweet when this tweet has
 /// no media.
-fn with_quote_fallback<'a, T>(tweet: &'a Tweet, func: impl Fn(&'a Tweet) -> Option<T>) -> Option<T> {
+fn with_quote_fallback<'a, T>(
+   tweet: &'a Tweet,
+   func: impl Fn(&'a Tweet) -> Option<T>,
+) -> Option<T> {
    func(tweet).or_else(|| {
       if tweet.has_media() {
          return None;

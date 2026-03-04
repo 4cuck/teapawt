@@ -25,11 +25,11 @@ use tweet_view::{
 
 use crate::{
    AppState,
-   config::Config,
    cache::{
       keys as cache_keys,
       ttl,
    },
+   config::Config,
    error::{
       Error,
       Result,
@@ -186,9 +186,7 @@ async fn status(
          // cursor so "Load more replies" disappears.
          if has_cursor && conversation.replies.content.is_empty() {
             let cache_key = cache_keys::conversation(&id);
-            let mut first_page = if let Some(cached) =
-               state.cache.get::<Conversation>(&cache_key)
-            {
+            let mut first_page = if let Some(cached) = state.cache.get::<Conversation>(&cache_key) {
                cached
             } else {
                match state.api.get_conversation(&id, None, sort).await {
@@ -219,9 +217,7 @@ async fn status(
             let cache_key = cache_keys::conversation(&id);
             if let Some(cached) = state.cache.get::<Conversation>(&cache_key) {
                conversation.tweet = cached.tweet;
-            } else if let Ok(fresh) =
-               state.api.get_conversation(&id, None, sort).await
-            {
+            } else if let Ok(fresh) = state.api.get_conversation(&id, None, sort).await {
                state.cache.set(&cache_key, &fresh, ttl::DEFAULT);
                conversation.tweet = fresh.tweet;
             }
@@ -530,8 +526,16 @@ async fn user_by_id(State(state): State<AppState>, Path(id): Path<String>) -> Re
 /// Render the back-arrow + Retweets/Quotes tab bar.
 fn engagement_tabs(username: &str, id: &str, active: &str) -> maud::Markup {
    let base = format!("/{username}/status/{id}");
-   let rt_class = if active == "retweets" { "tab-item active" } else { "tab-item" };
-   let qt_class = if active == "quotes" { "tab-item active" } else { "tab-item" };
+   let rt_class = if active == "retweets" {
+      "tab-item active"
+   } else {
+      "tab-item"
+   };
+   let qt_class = if active == "quotes" {
+      "tab-item active"
+   } else {
+      "tab-item"
+   };
 
    html! {
        div class="engagement-header" {
@@ -588,7 +592,8 @@ async fn retweets(
    Ok(Html(markup.into_string()).into_response())
 }
 
-/// Quotes page — shows tweets that quote this tweet, with infinite scroll support.
+/// Quotes page — shows tweets that quote this tweet, with infinite scroll
+/// support.
 async fn quotes(
    State(state): State<AppState>,
    jar: CookieJar,
@@ -610,8 +615,14 @@ async fn quotes(
 
    // Scroll request: return just the timeline HTML fragment
    if is_scroll {
-      let fragment =
-         render_timeline_with_prefs(&groups, &state.config, cursor, Some(&base_url), &prefs, None);
+      let fragment = render_timeline_with_prefs(
+         &groups,
+         &state.config,
+         cursor,
+         Some(&base_url),
+         &prefs,
+         None,
+      );
       return Ok(Html(fragment.into_string()).into_response());
    }
 

@@ -13,7 +13,6 @@ use axum::{
    routing::get,
 };
 use axum_extra::extract::CookieJar;
-
 use maud::html;
 
 use crate::{
@@ -55,11 +54,7 @@ async fn show_note(
    show_note_inner(state, jar, id).await
 }
 
-async fn show_note_inner(
-   state: AppState,
-   jar: CookieJar,
-   id: String,
-) -> Result<impl IntoResponse> {
+async fn show_note_inner(state: AppState, jar: CookieJar, id: String) -> Result<impl IntoResponse> {
    let prefs = Prefs::from_cookies(&jar, &state.config);
    let (_tweet, article) = state.api.get_article_tweet(&id).await?;
 

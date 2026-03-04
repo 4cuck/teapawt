@@ -49,7 +49,7 @@ impl Cache {
    /// Set a value in cache with TTL in seconds.
    pub fn set<T: Any + Send + Sync + Clone>(&self, key: &str, value: &T, ttl_seconds: u64) {
       let entry = Entry {
-         value: Arc::new(value.clone()),
+         value:   Arc::new(value.clone()),
          expires: Instant::now() + Duration::from_secs(ttl_seconds),
       };
       if let Ok(mut map) = self.inner.write() {
@@ -76,7 +76,6 @@ pub mod keys {
    pub fn user(username: &str) -> String {
       format!("u:{}", username.to_lowercase())
    }
-
 
    pub fn profile(username: &str) -> String {
       format!("p:{}", username.to_lowercase())

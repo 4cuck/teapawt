@@ -179,22 +179,20 @@ fn parse_promo_video(bv: &BindingValues) -> Video {
 
    // Only use direct MP4 stream URLs; skip HLS/VMAP since we don't support them
    let raw_stream = bv.string("player_stream_url");
-   let stream_url = if !raw_stream.is_empty()
-      && !raw_stream.contains("m3u8")
-      && !raw_stream.contains("vmap")
-   {
-      raw_stream.to_owned()
-   } else {
-      String::new()
-   };
+   let stream_url =
+      if !raw_stream.is_empty() && !raw_stream.contains("m3u8") && !raw_stream.contains("vmap") {
+         raw_stream.to_owned()
+      } else {
+         String::new()
+      };
 
    let available = !stream_url.is_empty();
    let variants = if available {
       vec![VideoVariant {
          content_type: VideoType::Mp4,
-         url: stream_url.clone(),
-         bitrate: 0,
-         resolution: 0,
+         url:          stream_url.clone(),
+         bitrate:      0,
+         resolution:   0,
       }]
    } else {
       Vec::new()

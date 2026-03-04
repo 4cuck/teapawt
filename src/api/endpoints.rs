@@ -58,12 +58,7 @@ fn vars(mut value: serde_json::Value) -> String {
 
 // ── Builder functions ───────────────────────────────────────────────────
 
-
-pub fn tweet_detail_vars(
-   focal_tweet_id: &str,
-   cursor: Option<&str>,
-   ranking_mode: &str,
-) -> String {
+pub fn tweet_detail_vars(focal_tweet_id: &str, cursor: Option<&str>, ranking_mode: &str) -> String {
    vars(json!({
       "focalTweetId": focal_tweet_id, "cursor": cursor,
       "referrer": "profile", "withRuxInjections": false, "rankingMode": ranking_mode,
@@ -143,4 +138,3 @@ pub fn list_by_id_vars(list_id: &str) -> String {
 pub fn list_timeline_vars(rest_id: &str, cursor: Option<&str>) -> String {
    vars(json!({ "rest_id": rest_id, "cursor": cursor, "count": 20 }))
 }
-

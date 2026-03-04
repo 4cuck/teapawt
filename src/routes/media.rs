@@ -155,11 +155,7 @@ async fn proxy_image(state: &AppState, url: &str, original: bool) -> Result<Resp
       .into_response())
 }
 
-async fn proxy_video(
-   state: &AppState,
-   url: &str,
-   req_headers: &HeaderMap,
-) -> Result<Response> {
+async fn proxy_video(state: &AppState, url: &str, req_headers: &HeaderMap) -> Result<Response> {
    // Forward Range header to upstream for seeking support
    let mut upstream_headers = HeaderMap::new();
    if let Some(range) = req_headers.get(header::RANGE) {

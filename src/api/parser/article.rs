@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use super::user::parse_user_object;
 use crate::{
    api::schema::{
       InlineArticle,
@@ -24,8 +25,6 @@ use crate::{
       User,
    },
 };
-
-use super::user::parse_user_object;
 
 /// Parse an inline article from a tweet response fetched with article field
 /// toggles.
@@ -64,10 +63,10 @@ fn parse_inline_article(raw: &InlineArticle, user: User) -> Article {
       .and_then(|meta| meta.first_published_at_secs)
       .and_then(|secs| time::OffsetDateTime::from_unix_timestamp(secs).ok());
 
-   let (paragraphs, entities) = raw.content_state.as_ref().map_or_else(
-      || (Vec::new(), Vec::new()),
-      parse_content_state,
-   );
+   let (paragraphs, entities) = raw
+      .content_state
+      .as_ref()
+      .map_or_else(|| (Vec::new(), Vec::new()), parse_content_state);
 
    // Parse media
    let mut media = HashMap::new();
@@ -82,26 +81,27 @@ fn parse_inline_article(raw: &InlineArticle, user: User) -> Article {
 
          let type_name = info.__typename.as_deref().unwrap_or("");
          let (media_type, url) = match type_name {
-            "ApiImage" => (
-               ArticleMediaType::ApiImage,
-               info.original_img_url.clone().unwrap_or_default(),
-            ),
-            "ApiGif" => (
-               ArticleMediaType::ApiGif,
-               info
-                  .variants
-                  .as_ref()
-                  .and_then(|vars| vars.first())
-                  .and_then(|var| var.url.clone())
-                  .unwrap_or_default(),
-            ),
+            "ApiImage" => {
+               (
+                  ArticleMediaType::ApiImage,
+                  info.original_img_url.clone().unwrap_or_default(),
+               )
+            },
+            "ApiGif" => {
+               (
+                  ArticleMediaType::ApiGif,
+                  info
+                     .variants
+                     .as_ref()
+                     .and_then(|vars| vars.first())
+                     .and_then(|var| var.url.clone())
+                     .unwrap_or_default(),
+               )
+            },
             _ => continue,
          };
 
-         media.insert(
-            id.clone(),
-            ArticleMedia { media_type, url },
-         );
+         media.insert(id.clone(), ArticleMedia { media_type, url });
       }
    }
 
@@ -116,9 +116,7 @@ fn parse_inline_article(raw: &InlineArticle, user: User) -> Article {
    }
 }
 
-fn parse_content_state(
-   state: &InlineContentState,
-) -> (Vec<ArticleParagraph>, Vec<ArticleEntity>) {
+fn parse_content_state(state: &InlineContentState) -> (Vec<ArticleParagraph>, Vec<ArticleEntity>) {
    let paragraphs: Vec<ArticleParagraph> = state
       .blocks
       .iter()
@@ -156,10 +154,12 @@ fn parse_content_state(
          let entity_ranges = block
             .entity_ranges
             .iter()
-            .map(|er| ArticleEntityRange {
-               offset: er.offset,
-               length: er.length,
-               key:    er.key,
+            .map(|er| {
+               ArticleEntityRange {
+                  offset: er.offset,
+                  length: er.length,
+                  key:    er.key,
+               }
             })
             .collect();
 
@@ -196,13 +196,9 @@ fn parse_content_state(
       };
 
       let url = data.and_then(|ed| ed.url.clone()).unwrap_or_default();
-      let tweet_id = data
-         .and_then(|ed| ed.tweet_id.clone())
-         .unwrap_or_default();
+      let tweet_id = data.and_then(|ed| ed.tweet_id.clone()).unwrap_or_default();
       let twemoji = url.clone();
-      let markdown = data
-         .and_then(|ed| ed.markdown.clone())
-         .unwrap_or_default();
+      let markdown = data.and_then(|ed| ed.markdown.clone()).unwrap_or_default();
       let media_ids = data
          .and_then(|ed| ed.media_items.as_ref())
          .map(|items| items.iter().map(|item| item.media_id.clone()).collect())

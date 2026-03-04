@@ -19,8 +19,8 @@ use crate::{
       ListByIdData,
       ListBySlugData,
       ListMembersData,
-      RetweetersData,
       ListTimelineData,
+      RetweetersData,
       SearchTimelineData,
       UserResultData,
       UserTimelineData,
@@ -74,8 +74,8 @@ impl ApiClient {
          header::HeaderValue::from_static("keep-alive"),
       );
 
-      let client =
-         HttpClient::new(&config.config.proxy, &config.config.proxy_auth).with_default_headers(headers);
+      let client = HttpClient::new(&config.config.proxy, &config.config.proxy_auth)
+         .with_default_headers(headers);
 
       let tid = TidClient::new(client.clone());
 
@@ -203,7 +203,10 @@ impl ApiClient {
                   .parse()
                   .unwrap(),
             );
-            headers.insert(header::ORIGIN, header::HeaderValue::from_static("https://x.com"));
+            headers.insert(
+               header::ORIGIN,
+               header::HeaderValue::from_static("https://x.com"),
+            );
             headers.insert(
                header::CONTENT_TYPE,
                header::HeaderValue::from_static("application/json"),

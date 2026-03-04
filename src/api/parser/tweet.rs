@@ -350,14 +350,20 @@ impl TryFrom<&TweetData> for Tweet {
          .and_then(super::super::schema::BirdwatchPivot::to_note);
 
       // Parse content disclosure labels
-      let (paid_promotion, ai_generated) = raw
-         .content_disclosure
-         .as_ref()
-         .map_or((false, false), |cd| {
-            let paid = cd.advertising_disclosure.as_ref().is_some_and(|ad| ad.is_paid_promotion);
-            let ai = cd.ai_generated_disclosure.as_ref().is_some_and(|ag| ag.has_ai_generated_media);
-            (paid, ai)
-         });
+      let (paid_promotion, ai_generated) =
+         raw.content_disclosure
+            .as_ref()
+            .map_or((false, false), |cd| {
+               let paid = cd
+                  .advertising_disclosure
+                  .as_ref()
+                  .is_some_and(|ad| ad.is_paid_promotion);
+               let ai = cd
+                  .ai_generated_disclosure
+                  .as_ref()
+                  .is_some_and(|ag| ag.has_ai_generated_media);
+               (paid, ai)
+            });
 
       // Parse edit history IDs
       let history = raw
@@ -446,12 +452,12 @@ impl TryFrom<&TweetData> for Tweet {
                .unwrap_or_default();
 
             card = Some(Card {
-               kind:  CardKind::Article,
-               url:   format!("/{}/article/{id}", user.username),
+               kind: CardKind::Article,
+               url: format!("/{}/article/{id}", user.username),
                title: title.to_owned(),
                image,
-               text:  description,
-               dest:  format!("Article · @{}", user.username),
+               text: description,
+               dest: format!("Article · @{}", user.username),
                ..Card::default()
             });
             true

@@ -64,7 +64,8 @@ async fn main() -> eyre::Result<()> {
       .init();
 
    // Load configuration
-   let config_path = env::var("TEAPOT_CONF_FILE").unwrap_or_else(|_| "config/teapot.toml".to_owned());
+   let config_path =
+      env::var("TEAPOT_CONF_FILE").unwrap_or_else(|_| "config/teapot.toml".to_owned());
    let config = Config::load(&config_path)?;
    let config = Arc::new(config);
 

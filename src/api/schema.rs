@@ -62,7 +62,10 @@ pub struct SelfThread {
 // ── Edit control ───────────────────────────────────────────────────────
 
 #[derive(Deserialize, Default)]
-#[expect(clippy::partial_pub_fields, reason = "serde struct with one public accessor")]
+#[expect(
+   clippy::partial_pub_fields,
+   reason = "serde struct with one public accessor"
+)]
 pub struct EditControl {
    edit_control_initial: Option<EditControlInner>,
    pub edit_tweet_ids:   Option<Vec<String>>,
@@ -440,8 +443,8 @@ pub struct ListData {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ContentDisclosure {
-   pub advertising_disclosure:   Option<AdvertisingDisclosure>,
-   pub ai_generated_disclosure:  Option<AiGeneratedDisclosure>,
+   pub advertising_disclosure:  Option<AdvertisingDisclosure>,
+   pub ai_generated_disclosure: Option<AiGeneratedDisclosure>,
 }
 
 #[derive(Deserialize, Default)]

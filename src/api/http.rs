@@ -184,11 +184,13 @@ impl HttpClient {
       let target_host = parsed
          .host()
          .ok_or_else(|| Error::Internal("no host in URI".into()))?;
-      let target_port = parsed.port_u16().unwrap_or(if parsed.scheme_str() == Some("https") {
-         443
-      } else {
-         80
-      });
+      let target_port = parsed
+         .port_u16()
+         .unwrap_or(if parsed.scheme_str() == Some("https") {
+            443
+         } else {
+            80
+         });
       let is_https = parsed.scheme_str() == Some("https");
 
       // TCP connect to proxy
@@ -198,7 +200,9 @@ impl HttpClient {
 
       if is_https {
          // CONNECT handshake
-         let mut connect_req = format!("CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\n");
+         let mut connect_req = format!(
+            "CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\n"
+         );
          if let Some(auth) = &proxy.auth {
             connect_req.push_str(&format!("Proxy-Authorization: Basic {auth}\r\n"));
          }
@@ -221,11 +225,7 @@ impl HttpClient {
                return Err(Error::Internal("proxy closed during CONNECT".into()));
             }
             filled += n;
-            if filled >= 4
-               && buf[..filled]
-                  .windows(4)
-                  .any(|w| w == b"\r\n\r\n")
-            {
+            if filled >= 4 && buf[..filled].windows(4).any(|w| w == b"\r\n\r\n") {
                break;
             }
             if filled >= buf.len() {
@@ -238,7 +238,9 @@ impl HttpClient {
          if !response_line.starts_with("HTTP/1.1 200") && !response_line.starts_with("HTTP/1.0 200")
          {
             let first_line = response_line.lines().next().unwrap_or("(empty)");
-            return Err(Error::Internal(format!("proxy CONNECT rejected: {first_line}")));
+            return Err(Error::Internal(format!(
+               "proxy CONNECT rejected: {first_line}"
+            )));
          }
 
          // TLS handshake over the tunnel

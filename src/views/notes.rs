@@ -1,5 +1,7 @@
-use std::collections::HashMap;
-use std::mem;
+use std::{
+   collections::HashMap,
+   mem,
+};
 
 use maud::{
    Markup,
@@ -7,6 +9,7 @@ use maud::{
    html,
 };
 
+use super::renderutils;
 use crate::{
    config::Config,
    types::{
@@ -21,8 +24,6 @@ use crate::{
    },
    utils::formatters,
 };
-
-use super::renderutils;
 
 /// Two stacked squares (clipboard copy icon).
 const COPY_ICON_SVG: &str = r#"<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>"#;
@@ -313,12 +314,7 @@ fn render_text_with_entities(para: &ArticleParagraph, article: &Article) -> Mark
 }
 
 /// Render a range of text with inline style ranges applied.
-fn render_styled_text(
-   para: &ArticleParagraph,
-   chars: &[char],
-   start: usize,
-   end: usize,
-) -> Markup {
+fn render_styled_text(para: &ArticleParagraph, chars: &[char], start: usize, end: usize) -> Markup {
    if para.inline_style_ranges.is_empty() {
       let text: String = chars
          .get(start..end)

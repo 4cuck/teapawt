@@ -40,7 +40,11 @@ use crate::{
 /// Get the link to a tweet (with `#m` anchor for scroll target).
 fn get_link(tweet: &Tweet) -> String {
    let link = super::renderutils::tweet_link(tweet);
-   if link.is_empty() { link } else { format!("{link}#m") }
+   if link.is_empty() {
+      link
+   } else {
+      format!("{link}#m")
+   }
 }
 
 /// Thread context for visual thread line rendering.
@@ -75,15 +79,15 @@ pub const fn thread_context(index: usize, total: usize, is_definite_end: bool) -
    reason = "TweetRenderer is the canonical name used across the codebase"
 )]
 pub struct TweetRenderer<'a> {
-   tweet:        &'a Tweet,
-   config:       &'a Config,
-   is_main:      bool,
-   pinned:       bool,
-   prefs:        Option<&'a Prefs>,
-   thread_ctx:   ThreadContext,
-   extra_class:  &'a str,
-   index:        usize,
-   sort_toggle:  Option<&'a Markup>,
+   tweet:       &'a Tweet,
+   config:      &'a Config,
+   is_main:     bool,
+   pinned:      bool,
+   prefs:       Option<&'a Prefs>,
+   thread_ctx:  ThreadContext,
+   extra_class: &'a str,
+   index:       usize,
+   sort_toggle: Option<&'a Markup>,
 }
 
 impl<'a> TweetRenderer<'a> {

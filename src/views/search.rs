@@ -148,8 +148,16 @@ fn render_search_tabs(query: &str, active: &str) -> Markup {
    let tabs: &[(&str, &str, &str)] = &[
       ("top", "Top", &format!("/search?q={encoded_query}&f=top")),
       ("tweets", "Latest", &format!("/search?q={encoded_query}")),
-      ("media", "Media", &format!("/search?q={encoded_query}&f=media")),
-      ("users", "Users", &format!("/search?q={encoded_query}&f=users")),
+      (
+         "media",
+         "Media",
+         &format!("/search?q={encoded_query}&f=media"),
+      ),
+      (
+         "users",
+         "Users",
+         &format!("/search?q={encoded_query}&f=users"),
+      ),
    ];
    html! {
        ul class="tab" {

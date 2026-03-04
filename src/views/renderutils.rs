@@ -198,10 +198,7 @@ pub fn parse_location(location: &str) -> (String, String) {
 
 /// Render a community note (Birdwatch).
 /// Used by both `render_tweet_complete` and `render_quote` in tweet.rs.
-pub fn render_community_note(
-   note: Option<&CommunityNote>,
-   hide_notes: bool,
-) -> Markup {
+pub fn render_community_note(note: Option<&CommunityNote>, hide_notes: bool) -> Markup {
    let Some(note) = note else {
       return html! {};
    };

@@ -75,11 +75,11 @@ pub struct AppConfig {
    #[serde(default, rename = "disableTid")]
    pub disable_tid:         bool,
    #[serde(default = "default_max_concurrent_reqs", rename = "maxConcurrentReqs")]
-   pub max_concurrent_reqs:    u32,
+   pub max_concurrent_reqs: u32,
    #[serde(default = "default_paid_emoji", rename = "paidEmoji")]
-   pub paid_emoji:             String,
+   pub paid_emoji:          String,
    #[serde(default = "default_ai_emoji", rename = "aiEmoji")]
-   pub ai_emoji:               String,
+   pub ai_emoji:            String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -150,17 +150,15 @@ impl Config {
              config"
          );
       }
-      let scheme = if config.server.https {
-         "https"
-      } else {
-         "http"
-      };
+      let scheme = if config.server.https { "https" } else { "http" };
       let default_port = if config.server.https { 443 } else { 80 };
       if config.server.port == default_port || config.server.hostname.contains(':') {
          config.url_prefix = format!("{scheme}://{}", config.server.hostname);
       } else {
-         config.url_prefix =
-            format!("{scheme}://{}:{}", config.server.hostname, config.server.port);
+         config.url_prefix = format!(
+            "{scheme}://{}:{}",
+            config.server.hostname, config.server.port
+         );
       }
       Ok(config)
    }

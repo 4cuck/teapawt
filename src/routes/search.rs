@@ -176,10 +176,7 @@ async fn search(
    if let Some(ref qs) = raw_qs {
       let clean: Vec<&str> = qs
          .split('&')
-         .filter(|pair| {
-            pair.split_once('=')
-               .is_none_or(|(_, val)| !val.is_empty())
-         })
+         .filter(|pair| pair.split_once('=').is_none_or(|(_, val)| !val.is_empty()))
          .collect();
       if clean.len() < qs.split('&').count() {
          let url = if clean.is_empty() {
