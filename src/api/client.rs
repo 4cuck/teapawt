@@ -337,11 +337,27 @@ impl ApiClient {
 
    /// Get tweet by ID.
    ///
-   /// Uses the TweetDetail endpoint (same as conversation) because
-   /// TweetResultByIdQuery returns 404 for many tweets.
+   /// Uses the `TweetDetail` endpoint (same as conversation) because
+   /// `TweetResultByIdQuery` returns 404 for many tweets.
    pub async fn get_tweet(&self, tweet_id: &str) -> Result<Tweet> {
       let convo = self.get_conversation(tweet_id, None, "Relevance").await?;
       Ok(convo.tweet)
+   }
+
+   /// Re-fetch unavailable quote tweets (e.g. blocked-quoter tombstones).
+   /// The tweet still exists — it's just hidden from the quoter's context.
+   pub async fn resolve_unavailable_quote(&self, tweet: &mut Tweet) {
+      let should_resolve = tweet
+         .quote
+         .as_ref()
+         .is_some_and(|qt| !qt.available && qt.id != 0);
+      if !should_resolve {
+         return;
+      }
+      let quote_id = tweet.quote.as_ref().unwrap().id.to_string();
+      if let Ok(resolved) = self.get_tweet(&quote_id).await {
+         tweet.quote = Some(Box::new(resolved));
+      }
    }
 
    /// Get conversation/thread for a tweet.

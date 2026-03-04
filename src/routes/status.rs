@@ -138,16 +138,25 @@ async fn status(
          Ok(cached)
       } else {
          let result = state.api.get_conversation(&id, None, sort).await;
-         if let Ok(ref conv) = result {
-            state.cache.set(&cache_key, conv, ttl::DEFAULT);
+         if let Ok(mut conv) = result {
+            state.api.resolve_unavailable_quote(&mut conv.tweet).await;
+            state.cache.set(&cache_key, &conv, ttl::DEFAULT);
+            Ok(conv)
+         } else {
+            result
          }
-         result
       }
    } else {
-      state
+      let result = state
          .api
          .get_conversation(&id, query.cursor.as_deref(), sort)
-         .await
+         .await;
+      if let Ok(mut conv) = result {
+         state.api.resolve_unavailable_quote(&mut conv.tweet).await;
+         Ok(conv)
+      } else {
+         result
+      }
    };
 
    match conv_result {
@@ -429,16 +438,25 @@ async fn status_by_id(
          Ok(cached)
       } else {
          let result = state.api.get_conversation(&id, None, sort).await;
-         if let Ok(ref conv) = result {
-            state.cache.set(&cache_key, conv, ttl::DEFAULT);
+         if let Ok(mut conv) = result {
+            state.api.resolve_unavailable_quote(&mut conv.tweet).await;
+            state.cache.set(&cache_key, &conv, ttl::DEFAULT);
+            Ok(conv)
+         } else {
+            result
          }
-         result
       }
    } else {
-      state
+      let result = state
          .api
          .get_conversation(&id, query.cursor.as_deref(), sort)
-         .await
+         .await;
+      if let Ok(mut conv) = result {
+         state.api.resolve_unavailable_quote(&mut conv.tweet).await;
+         Ok(conv)
+      } else {
+         result
+      }
    };
 
    match conv_result {
