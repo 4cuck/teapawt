@@ -62,7 +62,12 @@ pub fn parse_conversation(
       for entry in instruction.entries.as_deref().unwrap_or_default() {
          let entry_id = entry.entry_id_str();
 
-         if entry_id.contains("promoted") {
+         // Skip promoted content and injected suggestions (who-to-follow, etc.)
+         if entry_id.contains("promoted")
+            || entry_id.starts_with("who-to-follow")
+            || entry_id.starts_with("tweetdetailrelatedtweets")
+            || entry_id.starts_with("label-")
+         {
             continue;
          }
          if entry_id.starts_with("tweet-") {
