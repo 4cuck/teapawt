@@ -88,16 +88,9 @@
               toolchain
               pkgs.rust-analyzer
               pkgs.pkg-config
+              pkgs.mold
+              pkgs.clang
             ];
-
-            shellHook = ''
-              echo "teapot development shell"
-              echo ""
-              echo "Quick start:"
-              echo "  1. cp config/teapot.example.toml config/teapot.toml"
-              echo "  2. Create sessions.jsonl with your tokens"
-              echo "  3. cargo run"
-            '';
           };
         }
       );
