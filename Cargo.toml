@@ -53,7 +53,7 @@ tokio = { features = [
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
 toml = "1.0.3"
 tower = "0.5.3"
-tower-http = { features = [ "fs", "cors", "compression-gzip" ], version = "0.6.8" }
+tower-http = { features = [ "fs", "cors", "compression-gzip", "set-header" ], version = "0.6.8" }
 tracing = "0.1.44"
 tracing-subscriber = { features = [ "env-filter" ], version = "0.3.22" }
 xitter-txid = { default-features = false, version = "0.1.0" }

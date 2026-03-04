@@ -15,12 +15,17 @@ use std::{
 
 use axum::{
    Router,
+   http::header::HeaderValue,
    middleware,
 };
+use hyper::header;
 use tokio::net::TcpListener;
-use tower_http::services::{
-   ServeDir,
-   ServeFile,
+use tower_http::{
+   services::{
+      ServeDir,
+      ServeFile,
+   },
+   set_header::SetResponseHeaderLayer,
 };
 use tracing_subscriber::{
    fmt,
@@ -110,6 +115,10 @@ async fn main() -> eyre::Result<()> {
         .route_service("/robots.txt", ServeFile::new(format!("{static_dir}/robots.txt")))
         .route_service("/opensearch.xml", ServeFile::new(format!("{static_dir}/opensearch.xml")))
         .layer(middleware::from_fn(routes::prefs_middleware))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ))
         .with_state(state);
 
    // Start server
