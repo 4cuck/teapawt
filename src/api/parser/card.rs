@@ -137,7 +137,14 @@ impl TryFrom<&CardData> for Card {
          CardKind::Player => {
             let player_url = bv.string("player_url");
             if !player_url.is_empty() {
-               card_url = player_url.replace("/embed/", "/watch?v=");
+               // Convert YouTube embed URLs to watch URLs.
+               // e.g. /embed/VIDEO_ID?list=LIST → /watch?v=VIDEO_ID&list=LIST
+               let mut url = player_url.replace("/embed/", "/watch?v=");
+               // Fix double query string: ?v=X?param → ?v=X&param
+               if let Some(second_q) = url[1..].find('?') {
+                  url.replace_range(second_q + 1..second_q + 2, "&");
+               }
+               card_url = url;
             }
          },
          _ => {},
@@ -415,6 +422,9 @@ impl TryFrom<&CardData> for Poll {
       let mut options = Vec::new();
       let mut values = Vec::new();
 
+      let has_choice_images = name.contains("image");
+      let mut choice_images = Vec::new();
+
       for idx in 1..=4 {
          let label = bv.string(&format!("choice{idx}_label"));
          if label.is_empty() {
@@ -427,6 +437,13 @@ impl TryFrom<&CardData> for Poll {
             .parse()
             .unwrap_or(0);
          values.push(count);
+
+         if has_choice_images {
+            let img = bv.image(&format!("choice{idx}_image_large"));
+            if !img.is_empty() {
+               choice_images.push(img.to_owned());
+            }
+         }
       }
 
       let votes = values.iter().sum();
@@ -463,6 +480,7 @@ impl TryFrom<&CardData> for Poll {
          leader,
          end_time,
          image,
+         choice_images,
       })
    }
 }
