@@ -37,36 +37,6 @@
     padding: 0px 8px;
     margin: unset;
   }
-}
-
-.unavailable-quote {
-  padding: 12px;
-  text-align: center;
-  color: var(--grey);
-}
-
-.unavailable-actions {
-  margin-top: 8px;
-  font-size: 0.85em;
-
-  & a {
-    color: var(--accent);
-    z-index: 2;
-    position: relative;
-  }
-}
-
-.quote-link {
-  width: 100%;
-  height: 100%;
-  left: 0;
-  top: 0;
-  position: absolute;
-}
-
-.quote-media-container {
-  max-height: 300px;
-  display: flex;
 
   & .card {
     margin: unset;
@@ -103,4 +73,29 @@
   & .still-image img {
     max-height: 250px;
   }
+}
+
+.unavailable-quote {
+  padding: 12px;
+  text-align: center;
+  color: var(--grey);
+}
+
+.unavailable-actions {
+  margin-top: 8px;
+  font-size: 0.85em;
+
+  & a {
+    color: var(--accent);
+    z-index: 2;
+    position: relative;
+  }
+}
+
+.quote-link {
+  width: 100%;
+  height: 100%;
+  left: 0;
+  top: 0;
+  position: absolute;
 }

@@ -471,31 +471,6 @@ fn render_mini_avatar(user: &User, config: &Config, prefs: Option<&Prefs>) -> Ma
    }
 }
 
-/// Render media within a quote tweet.
-fn render_quote_media(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> Markup {
-   html! {
-       div class="quote-media-container" {
-           @if !quote.photos.is_empty() {
-               (render_photos(&quote.photos, config))
-           }
-           @if let Some(ref video) = quote.video {
-               (render_video(video, config, prefs))
-           } @else if let Some(ref gif) = quote.gif {
-               div class="attachments media-gif" {
-                   div class="gallery-gif" style="max-height: unset" {
-                       div class="attachment" {
-                           @let gif_url = formatters::get_vid_url(&gif.url, &config.config.hmac_key, config.config.base64_media);
-                           video autoplay="" loop="" muted="" playsinline="" {
-                               source src=(gif_url) type="video/mp4";
-                           }
-                       }
-                   }
-               }
-           }
-       }
-   }
-}
-
 /// Render a quote tweet with dedicated structure.
 fn render_quote(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> Markup {
    if !quote.available {
@@ -528,18 +503,7 @@ fn render_quote(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> Markup
    }
 
    let quote_link = format!("/{}/status/{}", quote.user.username, quote.id);
-
-   // Pre-render quote text as HTML string
-   let text_html = if quote.text.is_empty() {
-      String::new()
-   } else {
-      let processed = if quote.entities.is_empty() {
-         expand_with_regex(&quote.text)
-      } else {
-         expand_entities(&quote.text, &quote.entities)
-      };
-      formatters::replace_urls(&processed, config)
-   };
+   let text_html = render_tweet_text_html(&quote.text, &quote.entities, "", config);
 
    html! {
        div class="quote quote-big" {
@@ -572,9 +536,34 @@ fn render_quote(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> Markup
                }
            }
 
-           // Quote media (before show-thread)
-           @if !quote.photos.is_empty() || quote.video.is_some() || quote.gif.is_some() {
-               (render_quote_media(quote, config, prefs))
+           // Card preview in quote
+           @if let Some(ref card) = quote.card {
+               (render_card(card, config, prefs))
+           }
+
+           // Media
+           @if !quote.photos.is_empty() {
+               (render_photos(&quote.photos, config))
+           }
+           @if let Some(ref video) = quote.video {
+               (render_video(video, config, prefs))
+           }
+           @if let Some(ref gif) = quote.gif {
+               @let gif_url = formatters::get_vid_url(&gif.url, &config.config.hmac_key, config.config.base64_media);
+               div class="attachments media-gif" {
+                   div class="gallery-gif" style="max-height: unset" {
+                       div class="attachment" {
+                           video autoplay="" loop="" muted="" playsinline="" {
+                               source src=(gif_url) type="video/mp4";
+                           }
+                       }
+                   }
+               }
+           }
+
+           // Poll
+           @if let Some(ref poll) = quote.poll {
+               (render_poll(poll, config))
            }
 
            // Community note for quoted tweet
