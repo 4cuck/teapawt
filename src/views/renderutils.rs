@@ -201,7 +201,6 @@ pub fn parse_location(location: &str) -> (String, String) {
 pub fn render_community_note(
    note: Option<&CommunityNote>,
    hide_notes: bool,
-   config: &Config,
 ) -> Markup {
    let Some(note) = note else {
       return html! {};
@@ -216,11 +215,10 @@ pub fn render_community_note(
    html! {
        div class="community-note" {
            div class="community-note-header" {
-               (icon("group", "", "", "", ""))
-               span { "Community note" }
+               span { "Readers added context they thought people might want to know" }
            }
            div class="community-note-text" dir="auto" {
-               (maud::PreEscaped(&formatters::replace_urls(&note_html, config)))
+               (maud::PreEscaped(&note_html))
            }
        }
    }

@@ -243,6 +243,38 @@ a.tweet-stat {
   z-index: 2;
 }
 
+.community-note {
+  margin-top: 10px;
+  border: solid 1px var(--dark_grey);
+  border-radius: 12px;
+  overflow: hidden;
+  z-index: 2;
+  position: relative;
+  pointer-events: all;
+}
+
+.community-note-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background-color: var(--dark_grey);
+  color: var(--fg_color);
+  font-weight: 700;
+  font-size: 0.9em;
+}
+
+.community-note-text {
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  line-height: 1.4;
+
+  & a {
+    color: var(--accent);
+  }
+}
+
 .tweet-link {
   height: 100%;
   width: 100%;

@@ -87,6 +87,7 @@ pub struct BirdwatchSubtitle {
 }
 
 #[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct BirdwatchEntity {
    pub from_index: Option<u64>,
    pub to_index:   Option<u64>,
