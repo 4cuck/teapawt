@@ -207,7 +207,14 @@ fn get_title(tweet: &Tweet, retweet_username: &str) -> String {
 
    let text = strip_html(&tweet.text);
    if !text.is_empty() {
-      return format!("{}{}", prefix, escape_xml(&text));
+      const MAX_CHARS: usize = 140;
+      let truncated: String = text.chars().take(MAX_CHARS + 1).collect();
+      let body = if truncated.chars().count() > MAX_CHARS {
+         format!("{}\u{2026}", truncated.chars().take(MAX_CHARS).collect::<String>())
+      } else {
+         truncated
+      };
+      return format!("{}{}", prefix, escape_xml(&body));
    }
 
    // Fallback to media type
@@ -241,7 +248,8 @@ fn render_rss_tweet(tweet: &Tweet, config: &Config) -> String {
             r#"<img src="{url_prefix}{pic_url}" style="max-width:250px;" />"#
          );
       }
-   } else if let Some(ref video) = tweet.video {
+   }
+   if let Some(ref video) = tweet.video {
       // Video: linked thumbnail with "Video" label
       if !video.thumb.is_empty() {
          let thumb_url = get_pic_url(&video.thumb, config);
@@ -254,7 +262,8 @@ fn render_rss_tweet(tweet: &Tweet, config: &Config) -> String {
 </a>"#
          );
       }
-   } else if let Some(ref gif) = tweet.gif {
+   }
+   if let Some(ref gif) = tweet.gif {
       // GIF: <video> element
       let thumb = format!("{}{}", url_prefix, get_pic_url(&gif.thumb, config));
       let url = format!("{}{}", url_prefix, get_pic_url(&gif.url, config));
@@ -263,7 +272,8 @@ fn render_rss_tweet(tweet: &Tweet, config: &Config) -> String {
          r#"<video poster="{thumb}" autoplay muted loop style="max-width:250px;">
   <source src="{url}" type="video/mp4"></video>"#
       );
-   } else if let Some(ref card) = tweet.card {
+   }
+   if let Some(ref card) = tweet.card {
       // Card image
       if !card.image.is_empty() {
          let card_url = get_pic_url(&card.image, config);
@@ -321,7 +331,20 @@ fn render_tweet_item(tweet: &Tweet, url_prefix: &str, config: &Config) -> String
       .map(formatters::format_rfc822_time)
       .unwrap_or_default();
 
-   let link = format!("{url_prefix}{}", get_link(display_tweet));
+   // For retweets, always link to the original tweet using the inner tweet's
+   // id and username even when the tweet is age-gated or otherwise unavailable.
+   // `get_link` falls back to `/i/status/{id}` when the username is empty, so
+   // any non-zero id produces a navigable URL regardless of availability.
+   let link = if tweet.retweet.is_some() && display_tweet.id != 0 {
+      let username = if display_tweet.user.username.is_empty() {
+         "i"
+      } else {
+         &display_tweet.user.username
+      };
+      format!("{url_prefix}/{username}/status/{}", display_tweet.id)
+   } else {
+      format!("{url_prefix}{}", get_link(display_tweet))
+   };
    let title = formatters::sanitize_xml(&get_title(display_tweet, retweet_username));
    let description = formatters::sanitize_xml(&render_rss_tweet(display_tweet, config));
 
