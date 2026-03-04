@@ -317,7 +317,7 @@ impl<'a> TweetRenderer<'a> {
                   }
 
                   // Community note
-                  (render_community_note(display_tweet.note.as_ref(), prefs.is_some_and(|pref| pref.hide_community_notes), config))
+                  (render_community_note(display_tweet.note.as_ref(), prefs.is_some_and(|pref| pref.hide_community_notes)))
 
                   // Published time for main tweet
                   @if is_main {
@@ -478,43 +478,28 @@ fn render_quote_media(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> 
 /// Render a quote tweet with dedicated structure.
 fn render_quote(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> Markup {
    if !quote.available {
-      let quote_href = if quote.id != 0 {
-         format!(
-            "/{}/status/{}",
-            if quote.user.username.is_empty() {
-               "i"
-            } else {
-               &quote.user.username
-            },
-            quote.id
-         )
+      let has_id = quote.id != 0;
+      let user = if quote.user.username.is_empty() {
+         "i"
       } else {
-         String::new()
-      };
-      let x_url = if quote.id != 0 {
-         let user = if quote.user.username.is_empty() {
-            "i"
-         } else {
-            &quote.user.username
-         };
-         format!("https://x.com/{user}/status/{}", quote.id)
-      } else {
-         String::new()
+         &quote.user.username
       };
       return html! {
           div class="quote unavailable" {
-              a class="unavailable-quote" href=(quote_href) {
+              div class="unavailable-quote" {
                   @if !quote.tombstone.is_empty() {
                       (quote.tombstone)
                   } @else if !quote.text.is_empty() {
                       (quote.text)
                   } @else {
-                      "This tweet is unavailable"
+                      "This quoted post is unavailable."
                   }
-              }
-              @if !x_url.is_empty() {
-                  a class="quote-link" href=(x_url) title="View original on X" {
-                      (x_url)
+                  @if has_id {
+                      div class="unavailable-actions" {
+                          a href=(format!("/{user}/status/{}", quote.id)) { "Try viewing anyway" }
+                          " · "
+                          a href=(format!("https://x.com/{user}/status/{}", quote.id)) { "View on X" }
+                      }
                   }
               }
           }
@@ -572,7 +557,7 @@ fn render_quote(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> Markup
            }
 
            // Community note for quoted tweet
-           (render_community_note(quote.note.as_ref(), prefs.is_some_and(|pref| pref.hide_community_notes), config))
+           (render_community_note(quote.note.as_ref(), prefs.is_some_and(|pref| pref.hide_community_notes)))
 
            @if quote.has_thread {
                a class="show-thread" href=(&quote_link) {

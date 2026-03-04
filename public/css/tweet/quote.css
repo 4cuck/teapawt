@@ -41,6 +41,19 @@
 
 .unavailable-quote {
   padding: 12px;
+  text-align: center;
+  color: var(--grey);
+}
+
+.unavailable-actions {
+  margin-top: 8px;
+  font-size: 0.85em;
+
+  & a {
+    color: var(--accent);
+    z-index: 2;
+    position: relative;
+  }
 }
 
 .quote-link {
