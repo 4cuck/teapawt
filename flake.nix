@@ -58,6 +58,7 @@
             ];
 
             doCheck = false;
+            stripAllList = [ "bin" ];
 
             postInstall = ''
               mkdir -p $out/share/teapot
