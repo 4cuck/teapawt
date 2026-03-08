@@ -50,7 +50,7 @@ body {
 
   background-color: var(--bg_color);
   color: var(--fg_color);
-  font-family: sans-serif, fontello;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, fontello;
   font-size: 15px;
   line-height: 1.3;
   margin: 0;

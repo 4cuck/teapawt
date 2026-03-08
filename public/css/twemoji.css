@@ -4,5 +4,5 @@
   font-display: swap;
 }
 body {
-  font-family: sans-serif, Twemoji, fontello;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, Twemoji, fontello;
 }
