@@ -205,8 +205,10 @@ impl<'a> PageLayout<'a> {
               }
               body class=(body_class) style=(font_size) {
                   (render_navbar_full(self.config, self.rss, self.canonical, self.referer))
-                  div class="container" {
-                      (self.body)
+                  main {
+                      div class="container" {
+                          (self.body)
+                      }
                   }
               }
           }
@@ -238,7 +240,7 @@ pub fn render_navbar_full(config: &Config, rss: &str, canonical: &str, referer: 
                    a class="site-name" href="/" { (config.server.title) }
                }
                a href="/" {
-                   img class="site-logo" src="/logo.svg" alt="Logo";
+                   img class="site-logo" src="/logo.svg" alt=(format!("{} logo", config.server.title));
                }
                div class="nav-item right" {
                    (icon("search", "", "Search", "", "/search"))
