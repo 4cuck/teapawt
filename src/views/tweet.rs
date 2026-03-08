@@ -182,7 +182,13 @@ impl<'a> TweetRenderer<'a> {
 
       // Build CSS class based on context.
       // Only "thread-last" for the final tweet; no start/middle classes.
-      let mut classes = vec!["timeline-item"];
+      // Includes .author-{user} and .retweet-{user} for adblock filtering.
+      let author_class = format!("author-{}", display_tweet.user.username);
+      let retweet_class = retweet_by.map(|u| format!("retweet-{}", u.username));
+      let mut classes = vec!["timeline-item", &author_class];
+      if let Some(ref rc) = retweet_class {
+         classes.push(rc);
+      }
       if !extra_class.is_empty() {
          classes.push(extra_class);
       }
