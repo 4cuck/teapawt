@@ -137,6 +137,10 @@ pub mod keys {
    pub fn rss_list_slug(username: &str, slug: &str) -> String {
       rss(&format!("listslug:{}:{slug}", username.to_lowercase()))
    }
+
+   pub fn rss_thread(tweet_id: &str) -> String {
+      rss(&format!("thread:{tweet_id}"))
+   }
 }
 
 /// Cache TTL constants (in seconds).

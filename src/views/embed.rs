@@ -520,9 +520,12 @@ pub fn render_status_page(
            type="application/json+oembed";
    };
 
+   let rss_url = format!("/{username}/status/{id}/rss");
+
    super::layout::PageLayout::new(config, &title, content.clone())
       .description(&description)
       .prefs(prefs)
+      .rss(&rss_url)
       .canonical(&canonical)
       .referer(&referer)
       .head_extra(&head_extra)

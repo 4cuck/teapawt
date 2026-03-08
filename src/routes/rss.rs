@@ -37,6 +37,7 @@ pub fn router() -> Router<AppState> {
       .route("/{username}/with_replies/rss", get(user_replies_rss))
       .route("/{username}/media/rss", get(user_media_rss))
       .route("/{username}/search/rss", get(user_search_rss))
+      .route("/{username}/status/{id}/rss", get(thread_rss))
       .route("/{username}/lists/{slug}/rss", get(list_by_slug_rss))
       .route("/search/rss", get(search_rss))
       .route("/i/lists/{id}/rss", get(list_rss))
@@ -199,6 +200,41 @@ async fn user_search_rss(
       &state.config,
    );
 
+   cache_rss(&state, &rss_cache_key, &rss);
+   Ok(rss_response(rss, &tweets))
+}
+
+/// RSS feed for a conversation thread (main tweet + self-thread).
+async fn thread_rss(
+   State(state): State<AppState>,
+   Path((_username, id)): Path<(String, String)>,
+) -> Result<Response> {
+   check_rss_enabled(&state)?;
+
+   let rss_cache_key = cache_keys::rss_thread(&id);
+   if let Some(cached) = check_rss_cache(&state, &rss_cache_key) {
+      return Ok(cached);
+   }
+
+   let conversation = state.api.get_conversation(&id, None, "Relevance").await?;
+
+   // Collect thread tweets: before → main → after (self-thread continuation)
+   let mut tweets = Vec::new();
+   for t in &conversation.before.content {
+      if t.available {
+         tweets.push(t.clone());
+      }
+   }
+   if conversation.tweet.available {
+      tweets.push(conversation.tweet.clone());
+   }
+   for t in &conversation.after.content {
+      if t.available {
+         tweets.push(t.clone());
+      }
+   }
+
+   let rss = rss_view::render_thread_rss(&conversation.tweet, &tweets, &state.config);
    cache_rss(&state, &rss_cache_key, &rss);
    Ok(rss_response(rss, &tweets))
 }
