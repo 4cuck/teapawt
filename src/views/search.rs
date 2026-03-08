@@ -228,9 +228,10 @@ pub fn render_search_panel_with_action(
        form method="get" action=(action) class="search-field" autocomplete="off" {
            input type="hidden" name="f" value="tweets";
            div class="pref-group pref-input pref-inline" {
-               input type="text" name="q" value=(query) placeholder="Enter search...";
+               label for="search-query" class="sr-only" { "Search" }
+               input id="search-query" type="text" name="q" value=(query) placeholder="Enter search...";
            }
-           button type="submit" { span class="icon-search" {} }
+           button type="submit" aria-label="Search" { span class="icon-search" {} }
 
            input id="search-panel-toggle" type="checkbox" checked[is_open];
            label for="search-panel-toggle" {
@@ -266,12 +267,14 @@ pub fn render_search_panel_with_action(
                        span class="search-title" { "Time range" }
                        div class="date-range" {
                            span class="date-input" {
-                               input type="date" name="since" value=(filt.since);
+                               label for="search-since" class="sr-only" { "Since date" }
+                               input id="search-since" type="date" name="since" value=(filt.since);
                                span class="icon-container" { span class="icon-calendar" {} }
                            }
                            span class="search-title" { "-" }
                            span class="date-input" {
-                               input type="date" name="until" value=(filt.until);
+                               label for="search-until" class="sr-only" { "Until date" }
+                               input id="search-until" type="date" name="until" value=(filt.until);
                                span class="icon-container" { span class="icon-calendar" {} }
                            }
                        }
@@ -279,7 +282,8 @@ pub fn render_search_panel_with_action(
                    div {
                        span class="search-title" { "Minimum likes" }
                        div class="pref-group pref-input" {
-                           input type="number" name="min_faves" value=(filt.min_faves) placeholder="Number...";
+                           label for="search-min-faves" class="sr-only" { "Minimum likes" }
+                           input id="search-min-faves" type="number" name="min_faves" value=(filt.min_faves) placeholder="Number...";
                        }
                    }
                }
@@ -290,10 +294,11 @@ pub fn render_search_panel_with_action(
 
 /// Generate a search checkbox.
 fn gen_search_checkbox(name: &str, label: &str, checked: bool) -> Markup {
+   let id = format!("search-{name}");
    html! {
-       label class="pref-group checkbox-container" {
+       label class="pref-group checkbox-container" for=(id) {
            (label)
-           input type="checkbox" name=(name) value="on" checked[checked];
+           input id=(id) type="checkbox" name=(name) value="on" checked[checked];
            span class="checkbox" {}
        }
    }

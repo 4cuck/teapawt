@@ -8,10 +8,11 @@ use crate::types::Prefs;
 
 /// Render a checkbox preference row with title tooltip.
 fn gen_checkbox(name: &str, label: &str, checked: bool) -> Markup {
+   let id = format!("pref-{name}");
    html! {
-       label class="pref-group checkbox-container" title=(name) {
+       label class="pref-group checkbox-container" title=(name) for=(id) {
            (label)
-           input type="checkbox" name=(name) checked[checked];
+           input id=(id) type="checkbox" name=(name) checked[checked];
            span class="checkbox" {}
        }
    }
@@ -19,10 +20,11 @@ fn gen_checkbox(name: &str, label: &str, checked: bool) -> Markup {
 
 /// Render a text input preference row with title tooltip.
 fn gen_input(name: &str, label: &str, value: &str, placeholder: &str) -> Markup {
+   let id = format!("pref-{name}");
    html! {
        div class="pref-group pref-input" title=(name) {
-           label { (label) }
-           input type="text" name=(name) placeholder=(placeholder) value=(value);
+           label for=(id) { (label) }
+           input id=(id) type="text" name=(name) placeholder=(placeholder) value=(value);
        }
    }
 }
@@ -38,8 +40,8 @@ fn gen_font_size_select(selected: &str) -> Markup {
    ];
    html! {
        div class="pref-group pref-input" title="fontSize" {
-           label { "Font size" }
-           select name="fontSize"
+           label for="pref-fontSize" { "Font size" }
+           select id="pref-fontSize" name="fontSize"
                onchange="document.body.style.fontSize=this.selectedOptions[0].dataset.px||''" {
                @for &(value, display, px) in options {
                    @let is_selected = value.eq_ignore_ascii_case(selected)
@@ -54,10 +56,11 @@ fn gen_font_size_select(selected: &str) -> Markup {
 /// Render a select preference row with title tooltip.
 /// `options` is a list of `(value, display_label)` pairs.
 fn gen_select(name: &str, label: &str, selected: &str, options: &[(&str, &str)]) -> Markup {
+   let id = format!("pref-{name}");
    html! {
        div class="pref-group pref-input" title=(name) {
-           label { (label) }
-           select name=(name) {
+           label for=(id) { (label) }
+           select id=(id) name=(name) {
                @for &(value, display) in options {
                    @let is_selected = value.eq_ignore_ascii_case(selected)
                        || value.to_lowercase().replace(' ', "_") == selected.to_lowercase();
