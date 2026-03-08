@@ -472,7 +472,21 @@ impl ApiClient {
             None,
          )
          .await?;
-      Ok(super::parse_search_timeline(&data))
+      let mut timeline = super::parse_search_timeline(&data);
+
+      // When no more items are available the API returns the last page again.
+      // Detect this by comparing the first 64 chars of the input and output cursors.
+      if let Some(after) = cursor
+         && let Some(ref bottom) = timeline.bottom
+         && after.len() >= 64
+         && bottom.len() >= 64
+         && after[..64] == bottom[..64]
+      {
+         timeline.content.clear();
+         timeline.bottom = None;
+      }
+
+      Ok(timeline)
    }
 
    /// Search users.
