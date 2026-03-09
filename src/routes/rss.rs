@@ -5,7 +5,11 @@ use axum::{
       Query,
       State,
    },
-   response::Response,
+   http::header,
+   response::{
+      IntoResponse as _,
+      Response,
+   },
    routing::get,
 };
 use serde::Deserialize;
@@ -23,6 +27,7 @@ use crate::{
       Error,
       Result,
    },
+   types::Tweet,
    views::rss as rss_view,
 };
 
@@ -85,8 +90,12 @@ async fn user_rss_handler(
    let user = get_cached_user(state, username).await?;
 
    let timeline = match kind {
-      UserRssKind::Tweets | UserRssKind::Replies => {
-         state.api.get_user_tweets(&user.id, cursor).await?
+      UserRssKind::Tweets => state.api.get_user_tweets(&user.id, cursor).await?,
+      UserRssKind::Replies => {
+         state
+            .api
+            .get_user_tweets_and_replies(&user.id, cursor)
+            .await?
       },
       UserRssKind::Media => state.api.get_user_media(&user.id, cursor).await?,
    };
@@ -218,25 +227,37 @@ async fn thread_rss(
 
    let conversation = state.api.get_conversation(&id, None, "Relevance").await?;
 
-   // Collect thread tweets: before → main → after (self-thread continuation)
-   let mut tweets = Vec::new();
-   for t in &conversation.before.content {
-      if t.available {
-         tweets.push(t.clone());
+   // Collect thread tweet references: before → main → after
+   let mut tweets: Vec<&Tweet> = Vec::new();
+   for tweet in &conversation.before.content {
+      if tweet.available {
+         tweets.push(tweet);
       }
    }
    if conversation.tweet.available {
-      tweets.push(conversation.tweet.clone());
+      tweets.push(&conversation.tweet);
    }
-   for t in &conversation.after.content {
-      if t.available {
-         tweets.push(t.clone());
+   for tweet in &conversation.after.content {
+      if tweet.available {
+         tweets.push(tweet);
       }
    }
 
    let rss = rss_view::render_thread_rss(&conversation.tweet, &tweets, &state.config);
    cache_rss(&state, &rss_cache_key, &rss);
-   Ok(rss_response(rss, &tweets))
+   let min_id = tweets.iter().map(|tweet| tweet.id).min();
+   let mut response = (
+      [(header::CONTENT_TYPE, "application/rss+xml; charset=utf-8")],
+      rss,
+   )
+      .into_response();
+   if let Some(min) = min_id {
+      response.headers_mut().insert(
+         header::HeaderName::from_static("min-id"),
+         header::HeaderValue::from(min),
+      );
+   }
+   Ok(response)
 }
 
 async fn list_rss(

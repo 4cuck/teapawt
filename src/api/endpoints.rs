@@ -88,6 +88,10 @@ pub fn user_media_v2_vars(user_id: &str, cursor: Option<&str>) -> String {
    vars(json!({ "rest_id": user_id, "cursor": cursor, "count": 20 }))
 }
 
+pub fn user_tweets_and_replies_v2_vars(user_id: &str, cursor: Option<&str>) -> String {
+   vars(json!({ "rest_id": user_id, "cursor": cursor, "count": 20 }))
+}
+
 pub fn user_by_screen_name_vars(screen_name: &str) -> String {
    vars(json!({ "screen_name": screen_name, "withSafetyModeUserFields": true }))
 }
