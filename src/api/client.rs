@@ -201,7 +201,11 @@ impl ApiClient {
                &session.oauth_token,
                &session.oauth_secret,
             );
-            headers.insert(header::AUTHORIZATION, auth.parse().unwrap());
+            headers.insert(
+               header::AUTHORIZATION,
+               auth.parse()
+                  .map_err(|_| Error::Internal("invalid OAuth header value".into()))?,
+            );
          },
          SessionKind::Cookie => {
             let api_path = format!("/i/api/graphql/{endpoint}");
@@ -215,18 +219,25 @@ impl ApiClient {
 
             headers.insert(
                header::AUTHORIZATION,
-               header::HeaderValue::from_str(bearer).unwrap(),
+               header::HeaderValue::from_str(bearer)
+                  .map_err(|_| Error::Internal("invalid bearer token value".into()))?,
             );
             headers.insert(
                "x-twitter-auth-type",
                header::HeaderValue::from_static("OAuth2Session"),
             );
-            headers.insert("x-csrf-token", session.ct0.parse().unwrap());
+            headers.insert(
+               "x-csrf-token",
+               session
+                  .ct0
+                  .parse()
+                  .map_err(|_| Error::Internal("invalid ct0 header value".into()))?,
+            );
             headers.insert(
                header::COOKIE,
                format!("auth_token={}; ct0={}", session.auth_token, session.ct0)
                   .parse()
-                  .unwrap(),
+                  .map_err(|_| Error::Internal("invalid cookie header value".into()))?,
             );
             headers.insert(
                header::ORIGIN,
@@ -254,8 +265,10 @@ impl ApiClient {
                header::HeaderValue::from_static("same-site"),
             );
 
-            if let Some(tid) = tid {
-               headers.insert("x-client-transaction-id", tid.parse().unwrap());
+            if let Some(tid) = tid
+               && let Ok(val) = tid.parse()
+            {
+               headers.insert("x-client-transaction-id", val);
             }
          },
       }
@@ -320,10 +333,10 @@ impl ApiClient {
       // Mark the session as limited on token errors so the retry picks
       // a different one.
       let api_check = Self::check_api_errors(&bytes);
-      if let Err(Error::TwitterApi(ref msg)) = api_check {
-         if msg.starts_with("Invalid token") {
-            self.sessions.mark_limited(session.id).await;
-         }
+      if let Err(Error::TwitterApi(ref msg)) = api_check
+         && msg.starts_with("Invalid token")
+      {
+         self.sessions.mark_limited(session.id).await;
       }
       api_check?;
 
@@ -515,9 +528,9 @@ impl ApiClient {
       // Detect this by comparing the first 64 chars of the input and output cursors.
       if let Some(after) = cursor
          && let Some(ref bottom) = timeline.bottom
-         && after.len() >= 64
-         && bottom.len() >= 64
-         && after[..64] == bottom[..64]
+         && let Some(after_prefix) = after.get(..64)
+         && let Some(bottom_prefix) = bottom.get(..64)
+         && after_prefix == bottom_prefix
       {
          timeline.content.clear();
          timeline.bottom = None;
@@ -639,7 +652,7 @@ impl ApiClient {
          SessionKind::OAuth => {
             (
                endpoints::GRAPH_USER_TWEETS_AND_REPLIES_V2,
-               endpoints::user_media_v2_vars(user_id, cursor),
+               endpoints::user_tweets_and_replies_v2_vars(user_id, cursor),
                None,
             )
          },
