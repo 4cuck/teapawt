@@ -584,7 +584,7 @@ pub struct UserLegacy {
    pub verified_type:           Option<String>,
    pub pinned_tweet_ids_str:    Option<Vec<String>>,
    #[serde(default, deserialize_with = "deser_user_url_entities")]
-   pub url_entities:            Vec<UrlEntity>,
+   pub entities:                Vec<UrlEntity>,
 }
 
 #[derive(Deserialize, Default)]

@@ -66,7 +66,7 @@ impl TryFrom<&UserData> for User {
       let location = legacy.location.clone().unwrap_or_default();
 
       let website = legacy
-         .url_entities
+         .entities
          .first()
          .and_then(|url_item| url_item.expanded_url.as_deref())
          .unwrap_or_default()
