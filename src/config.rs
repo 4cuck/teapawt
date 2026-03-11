@@ -33,6 +33,8 @@ pub struct ServerConfig {
    pub address:              String,
    #[serde(default = "default_port")]
    pub port:                 u16,
+   #[serde(default, rename = "publicPort")]
+   pub public_port:          Option<u16>,
    #[serde(default)]
    pub https:                bool,
    #[serde(
@@ -152,12 +154,13 @@ impl Config {
       }
       let scheme = if config.server.https { "https" } else { "http" };
       let default_port = if config.server.https { 443 } else { 80 };
-      if config.server.port == default_port || config.server.hostname.contains(':') {
+      let url_port = config.server.public_port.unwrap_or(config.server.port);
+      if url_port == default_port || config.server.hostname.contains(':') {
          config.url_prefix = format!("{scheme}://{}", config.server.hostname);
       } else {
          config.url_prefix = format!(
             "{scheme}://{}:{}",
-            config.server.hostname, config.server.port
+            config.server.hostname, url_port
          );
       }
       Ok(config)

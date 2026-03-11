@@ -122,7 +122,7 @@
                   config = cfg.config // {
                     hmacKey = "@hmac@";
                   };
-                  server = cfg.server // {
+                  server = lib.filterAttrs (_: v: v != null) cfg.server // {
                     staticDir = "${cfg.package}/share/teapot/public";
                   };
                 } cfg.settings
@@ -176,6 +176,11 @@
                 type = lib.types.port;
                 default = 8080;
                 description = "The port to listen on.";
+              };
+              publicPort = lib.mkOption {
+                type = lib.types.nullOr lib.types.port;
+                default = null;
+                description = "Port used for generating public URLs. Defaults to the listen port.";
               };
               https = lib.mkOption {
                 type = lib.types.bool;
