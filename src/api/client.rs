@@ -477,6 +477,14 @@ impl ApiClient {
       // First get user info
       let user = self.get_user(screen_name).await?;
 
+      // Protected/suspended accounts don't expose tweets
+      if user.protected || user.suspended {
+         return Ok(Profile {
+            user,
+            ..Profile::default()
+         });
+      }
+
       // Fetch tweets and photo rail in parallel (only for first page)
       let (tweets, photo_rail) = if cursor.is_none() {
          let tweets_future = self.get_user_tweets(&user.id, None);
