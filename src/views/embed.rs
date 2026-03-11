@@ -36,7 +36,7 @@ fn aspect_ratio(width: i32, height: i32) -> f32 {
 
 // ── OG/embed media helpers (extracted from Tweet methods) ──────────────
 
-/// Get images for `OpenGraph` meta tags (photos > video thumb > gif thumb).
+/// Get images for `OpenGraph` meta tags (photos > video thumb > gif thumb > card image).
 pub fn og_images(tweet: &Tweet) -> Vec<&str> {
    if !tweet.photos.is_empty() {
       return tweet
@@ -50,6 +50,12 @@ pub fn og_images(tweet: &Tweet) -> Vec<&str> {
       .as_ref()
       .map(|vid| vid.thumb.as_str())
       .or_else(|| tweet.gif.as_ref().map(|gif| gif.thumb.as_str()))
+      .or_else(|| {
+         tweet
+            .card
+            .as_ref()
+            .map(|card| card.image.as_str())
+      })
       .filter(|th| !th.is_empty());
    thumb.into_iter().collect()
 }
