@@ -13,7 +13,10 @@ use super::{
    tweet::TweetRenderer,
 };
 use crate::{
-   config::Config,
+   config::{
+      Config,
+      GifTranscodingMode,
+   },
    types::{
       Gif,
       Prefs,
@@ -87,14 +90,6 @@ pub fn og_images_with_quote(tweet: &Tweet) -> Vec<&str> {
       .map_or_else(Vec::new, og_images)
 }
 
-/// Check if this tweet has video/gif, including from quote.
-pub fn has_video_with_quote(tweet: &Tweet) -> bool {
-   with_quote_fallback(tweet, |tw| {
-      (tw.video.is_some() || tw.gif.is_some()).then_some(())
-   })
-   .is_some()
-}
-
 /// Get the video, falling back to quote tweet.
 pub fn video_with_quote(tweet: &Tweet) -> Option<&Video> {
    with_quote_fallback(tweet, |tw| tw.video.as_ref())
@@ -157,27 +152,32 @@ pub fn build_embed_description(tweet: &Tweet) -> String {
 /// Shared between `render_tweet_embed` and `render_status_page`.
 fn render_media_meta_tags(tweet: &Tweet, config: &Config, url_prefix: &str) -> Markup {
    let images = og_images_with_quote(tweet);
-   let has_video = has_video_with_quote(tweet);
+   let has_video = video_with_quote(tweet).is_some();
+   // GIF tweets provide their own og:image (the transcoded .gif URL)
+   // in the GIF branch below, so skip the thumbnail from the image loop.
+   let has_gif = gif_with_quote(tweet).is_some();
 
    html! {
        @if has_video {
-           meta property="og:type" content="video";
+           meta property="og:type" content="video.other";
        } @else if !images.is_empty() {
            meta property="og:type" content="photo";
        } @else {
            meta property="og:type" content="article";
        }
 
-       // Image meta tags
-       @for image in &images {
-           @let pic_url = formatters::get_pic_url(image, config.config.base64_media);
-           @let full_pic_url = format!("{url_prefix}{pic_url}");
-           meta property="og:image" content=(full_pic_url);
+       // Image meta tags (skip for GIF tweets — GIF branch provides og:image)
+       @if !has_gif {
+           @for image in &images {
+               @let pic_url = formatters::get_pic_url(image, config.config.base64_media);
+               @let full_pic_url = format!("{url_prefix}{pic_url}");
+               meta property="og:image" content=(full_pic_url);
+           }
        }
 
        @if has_video {
            meta property="twitter:image" content="0";
-       } @else {
+       } @else if !has_gif {
            @for image in &images {
                @let pic_url = formatters::get_pic_url(image, config.config.base64_media);
                @let full_pic_url = format!("{url_prefix}{pic_url}");
@@ -209,25 +209,29 @@ fn render_media_meta_tags(tweet: &Tweet, config: &Config, url_prefix: &str) -> M
                meta name="twitter:player:stream:content_type" content="video/mp4";
            }
        } @else if let Some(gif) = gif_with_quote(tweet) {
-           @let vid_url = formatters::get_vid_url(&gif.url, &config.config.hmac_key, config.config.base64_media);
-           @let full_gif_url = format!("{url_prefix}{vid_url}");
-           @let thumb_url = formatters::get_pic_url(&gif.thumb, config.config.base64_media);
-           @let full_thumb_url = format!("{url_prefix}{thumb_url}");
-           @let embed_url = formatters::get_video_embed_url(config, tweet.id);
-
-           meta property="og:video" content=(full_gif_url);
-           meta property="og:video:secure_url" content=(full_gif_url);
-           meta property="og:video:type" content="video/mp4";
-           meta property="og:video:width" content="480";
-           meta property="og:video:height" content="480";
-           meta property="og:image" content=(full_thumb_url);
-
-           meta name="twitter:card" content="player";
-           meta name="twitter:player" content=(embed_url);
-           meta name="twitter:player:width" content="480";
-           meta name="twitter:player:height" content="480";
-           meta name="twitter:player:stream" content=(full_gif_url);
-           meta name="twitter:player:stream:content_type" content="video/mp4";
+           // GIF tweets: point og:image directly at the transcoded GIF.
+           // Discord's image proxy will fetch it, get image/gif content,
+           // and render it animated.
+           @match config.gif_transcoding.mode {
+               GifTranscodingMode::Local => {
+                   @let gif_url = formatters::get_gif_url(&gif.url, &config.config.hmac_key, config.config.base64_media);
+                   @let full_gif_url = format!("{url_prefix}{gif_url}");
+                   meta property="og:image" content=(full_gif_url);
+                   meta property="twitter:image" content=(full_gif_url);
+               },
+               GifTranscodingMode::External => {
+                   @let ext_gif_url = formatters::get_external_gif_url(&gif.url, &config.gif_transcoding.external_domain);
+                   meta property="og:image" content=(ext_gif_url);
+                   meta property="twitter:image" content=(ext_gif_url);
+               },
+               GifTranscodingMode::Off => {
+                   @let thumb_url = formatters::get_pic_url(&gif.thumb, config.config.base64_media);
+                   @let full_thumb_url = format!("{url_prefix}{thumb_url}");
+                   meta property="og:image" content=(full_thumb_url);
+                   meta property="twitter:image" content=(full_thumb_url);
+               },
+           }
+           meta name="twitter:card" content="summary_large_image";
        } @else if !images.is_empty() {
            meta name="twitter:card" content="summary_large_image";
        } @else {
