@@ -360,7 +360,12 @@ pub const fn scale_dimensions_for_embed(width: i32, height: i32) -> (i32, i32) {
 }
 
 /// Format engagement metrics for oEmbed `author_name` field.
-pub fn format_engagement_text(likes: i64, retweets: i64, replies: i64) -> String {
+pub fn format_engagement_text(
+   likes: i64,
+   retweets: i64,
+   replies: i64,
+   views: i64,
+) -> String {
    let mut parts = Vec::new();
    if likes > 0 {
       parts.push(format!("\u{2764} {}", format_with_commas(likes)));
@@ -370,6 +375,9 @@ pub fn format_engagement_text(likes: i64, retweets: i64, replies: i64) -> String
    }
    if replies > 0 {
       parts.push(format!("\u{1F4AC} {}", format_with_commas(replies)));
+   }
+   if views > 0 {
+      parts.push(format!("\u{1F441} {}", format_with_commas(views)));
    }
    if parts.is_empty() {
       String::new()

@@ -246,6 +246,7 @@ fn build_oembed_url(tweet: &Tweet, url_prefix: &str) -> String {
       tweet.stats.likes,
       tweet.stats.retweets,
       tweet.stats.replies,
+      tweet.stats.views,
    );
    format!(
       "{url_prefix}/owoembed?text={}&author={}&status={}",
@@ -511,7 +512,15 @@ pub fn render_status_page(
    let canonical = format!("https://x.com/{username}/status/{id}");
    let referer = format!("/{username}/status/{id}");
 
+   let avatar_url = formatters::get_pic_url(&tweet.user.user_pic, config.config.base64_media);
+
    let head_extra = html! {
+       // Theme color for Discord embed accent
+       meta name="theme-color" content="#1F1F1F";
+
+       // Profile pic as author icon in Discord embeds
+       link rel="apple-touch-icon" href=(format!("{url_prefix}{avatar_url}"));
+
        // Override OG title/description with tweet-specific values
        meta property="og:title" content=(og_title);
        meta property="og:description" content=(description);
