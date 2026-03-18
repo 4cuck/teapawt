@@ -111,8 +111,19 @@ async fn activity_pub_status(
       .and_then(|hv| hv.to_str().ok())
       .unwrap_or("");
 
-   // Check if client wants ActivityPub JSON
-   if accept.contains("application/activity+json") || accept.contains("application/ld+json") {
+   let user_agent = headers
+      .get(header::USER_AGENT)
+      .and_then(|hv| hv.to_str().ok())
+      .unwrap_or("");
+
+   // Serve Mastodon-format JSON for Discord (doesn't send Accept header)
+   // and for explicit ActivityPub requests. Discord uses this for the
+   // footer timestamp and rich content formatting.
+   let is_discord = user_agent.contains("Discordbot");
+   if is_discord
+      || accept.contains("application/activity+json")
+      || accept.contains("application/ld+json")
+   {
       // Fetch tweet from API
       let tweet = state.api.get_tweet(&id).await?;
 
@@ -122,7 +133,7 @@ async fn activity_pub_status(
       return Ok((
          [(
             header::CONTENT_TYPE,
-            "application/activity+json; charset=utf-8",
+            "application/json; charset=utf-8",
          )],
          Json(activity),
       )

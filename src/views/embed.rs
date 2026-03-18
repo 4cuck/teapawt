@@ -105,14 +105,14 @@ pub fn gif_with_quote(tweet: &Tweet) -> Option<&Gif> {
 pub fn build_embed_description(tweet: &Tweet) -> String {
    let mut desc = strip_html(&tweet.text);
 
-   // Append quote tweet text with blockquote formatting for Discord
+   // Append quote tweet text
    if let Some(ref quote) = tweet.quote {
       let _ = write!(
          desc,
-         "\n\n> **Quoting {} (@{})**\n> {}",
+         "\n\nQuoting {} (@{}):\n\u{201C}{}\u{201D}",
          quote.user.fullname,
          quote.user.username,
-         strip_html(&quote.text).replace('\n', "\n> ")
+         strip_html(&quote.text)
       );
    }
 
@@ -358,32 +358,41 @@ pub fn render_video_embed(tweet: &Tweet, config: &Config) -> Markup {
    }
 }
 
-/// Build `ActivityPub` JSON for Discord multi-image support.
+/// Mastodon API v1-compatible status for Discord embed support.
+/// Discord uses `created_at` for the footer timestamp and `content`
+/// for rich text rendering (blockquotes for quoted tweets).
 #[derive(Debug, Serialize)]
 pub struct ActivityPubNote {
-   #[serde(rename = "@context")]
-   pub context:       String,
-   #[serde(rename = "type")]
-   pub type_:         String,
-   pub id:            String,
-   #[serde(rename = "attributedTo")]
-   pub attributed_to: String,
-   pub content:       String,
-   pub published:     String,
-   pub attachment:    Vec<MediaAttachment>,
+   pub id:                String,
+   pub url:               String,
+   pub uri:               String,
+   pub created_at:        String,
+   pub content:           String,
+   pub visibility:        String,
+   pub media_attachments: Vec<MediaAttachment>,
+   pub account:           MastodonAccount,
+   pub emojis:            Vec<()>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MastodonAccount {
+   pub id:           String,
+   pub display_name: String,
+   pub username:     String,
+   pub acct:         String,
+   pub url:          String,
+   pub avatar:       String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct MediaAttachment {
+   pub id:          String,
    #[serde(rename = "type")]
    pub type_:       String,
    pub url:         String,
-   pub preview_url: String,
-   #[serde(rename = "mediaType")]
-   pub media_type:  String,
-   #[serde(skip_serializing_if = "Option::is_none")]
+   pub preview_url: Option<String>,
+   pub remote_url:  Option<String>,
    pub description: Option<String>,
-   #[serde(skip_serializing_if = "Option::is_none")]
    pub meta:        Option<MediaMeta>,
 }
 
@@ -400,93 +409,119 @@ pub struct MediaDimensions {
    pub aspect: Option<f32>,
 }
 
+/// Create a Mastodon-compatible media attachment.
+fn make_attachment(type_: &str, url: String, preview: Option<String>, width: i32, height: i32) -> MediaAttachment {
+   MediaAttachment {
+      id:          "0".to_owned(),
+      type_:       type_.to_owned(),
+      url,
+      preview_url: preview,
+      remote_url:  None,
+      description: None,
+      meta:        Some(MediaMeta {
+         original: MediaDimensions {
+            width,
+            height,
+            aspect: Some(aspect_ratio(width, height)),
+         },
+      }),
+   }
+}
+
 /// Build media attachments for a single tweet's photos/video/gif.
 fn build_media_attachments(tweet: &Tweet, url_prefix: &str) -> Vec<MediaAttachment> {
    let mut attachments = Vec::new();
 
    for photo in &tweet.photos {
-      attachments.push(MediaAttachment {
-         type_:       "Image".to_owned(),
-         url:         format!("{url_prefix}/pic/orig/{}", photo.url),
-         preview_url: format!("{url_prefix}/pic/{}", photo.url),
-         media_type:  "image/jpeg".to_owned(),
-         description: None,
-         meta:        Some(MediaMeta {
-            original: MediaDimensions {
-               width:  1200,
-               height: 675,
-               aspect: Some(1200.0 / 675.0),
-            },
-         }),
-      });
+      attachments.push(make_attachment(
+         "image",
+         format!("{url_prefix}/pic/orig/{}", photo.url),
+         Some(format!("{url_prefix}/pic/{}", photo.url)),
+         1200,
+         675,
+      ));
    }
 
    if let Some(ref video) = tweet.video {
       let (width, height) = video.best_dimensions();
       if let Some(mp4_url) = video.best_mp4_url() {
-         attachments.push(MediaAttachment {
-            type_:       "Video".to_owned(),
-            url:         format!("{url_prefix}/video/{mp4_url}"),
-            preview_url: format!("{url_prefix}/pic/{}", video.thumb),
-            media_type:  "video/mp4".to_owned(),
-            description: None,
-            meta:        Some(MediaMeta {
-               original: MediaDimensions {
-                  width,
-                  height,
-                  aspect: Some(aspect_ratio(width, height)),
-               },
-            }),
-         });
+         attachments.push(make_attachment(
+            "video",
+            format!("{url_prefix}/video/{mp4_url}"),
+            Some(format!("{url_prefix}/pic/{}", video.thumb)),
+            width,
+            height,
+         ));
       }
    }
 
    if let Some(ref gif) = tweet.gif {
-      attachments.push(MediaAttachment {
-         type_:       "Video".to_owned(),
-         url:         format!("{url_prefix}/pic/{}", gif.url),
-         preview_url: format!("{url_prefix}/pic/{}", gif.thumb),
-         media_type:  "video/mp4".to_owned(),
-         description: None,
-         meta:        Some(MediaMeta {
-            original: MediaDimensions {
-               width:  480,
-               height: 480,
-               aspect: Some(1.0),
-            },
-         }),
-      });
+      attachments.push(make_attachment(
+         "video",
+         format!("{url_prefix}/pic/{}", gif.url),
+         Some(format!("{url_prefix}/pic/{}", gif.thumb)),
+         480,
+         480,
+      ));
    }
 
    attachments
 }
 
-/// Build `ActivityPub` JSON from a tweet.
+/// Build rich HTML content with quote tweet formatting.
+fn build_mastodon_content(tweet: &Tweet) -> String {
+   let mut content = tweet.text.replace('\n', "<br>");
+
+   if let Some(ref quote) = tweet.quote {
+      let _ = write!(
+         content,
+         "<br><br><blockquote><b>Quoting {} (@{})</b><br>{}</blockquote>",
+         quote.user.fullname,
+         quote.user.username,
+         quote.text.replace('\n', "<br>")
+      );
+   }
+
+   content
+}
+
+/// Build Mastodon API v1-compatible status JSON for Discord.
 pub fn build_activity_pub(tweet: &Tweet, config: &Config) -> ActivityPubNote {
    let url_prefix = config.url_prefix();
 
    let mut attachments = build_media_attachments(tweet, url_prefix);
 
-   // Inherit quote tweet media when the parent has no media
    if !tweet.has_media()
       && let Some(ref quote) = tweet.quote
    {
       attachments.extend(build_media_attachments(quote, url_prefix));
    }
 
-   let published = tweet.time.map_or_else(
+   let created_at = tweet.time.map_or_else(
       || time::OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
       |ts| ts.format(&Rfc3339).unwrap(),
    );
 
+   let status_url = format!("{url_prefix}/{}/status/{}", tweet.user.username, tweet.id);
+   let avatar_url = formatters::get_pic_url(&tweet.user.user_pic, config.config.base64_media);
+
    ActivityPubNote {
-      context: "https://www.w3.org/ns/activitystreams".to_owned(),
-      type_: "Note".to_owned(),
-      id: format!("{url_prefix}/{}/status/{}", tweet.user.username, tweet.id),
-      attributed_to: format!("{url_prefix}/users/{}", tweet.user.username),
-      content: tweet.text.clone(),
-      published,
-      attachment: attachments,
+      id:                status_url.clone(),
+      url:               status_url.clone(),
+      uri:               status_url,
+      created_at,
+      content:           build_mastodon_content(tweet),
+      visibility:        "public".to_owned(),
+      media_attachments: attachments,
+      account:           MastodonAccount {
+         id:           tweet.user.id.to_string(),
+         display_name: tweet.user.fullname.clone(),
+         username:     tweet.user.username.clone(),
+         acct:         tweet.user.username.clone(),
+         url:          format!("{url_prefix}/{}", tweet.user.username),
+         avatar:       format!("{url_prefix}{avatar_url}"),
+      },
+      emojis:            vec![],
    }
 }
 
