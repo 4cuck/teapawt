@@ -107,6 +107,7 @@ pub fn router() -> Router<AppState> {
       .route("/i/status/{id}", get(status_by_id))
       .route("/i/web/status/{id}", get(status_by_id))
       .route("/i/user/{id}", get(user_by_id))
+      .route("/translate/{id}", get(translate))
 }
 
 async fn thread_redirect(Path((username, id)): Path<(String, String)>) -> Response {
@@ -479,6 +480,38 @@ async fn status_by_id(
             Html(markup.into_string()),
          )
             .into_response())
+      },
+   }
+}
+
+/// Translate a tweet — returns an HTML fragment for htmx swap.
+async fn translate(
+   State(state): State<AppState>,
+   Path(id): Path<String>,
+) -> Result<Response> {
+   if id.len() > 19 || !id.chars().all(|ch| ch.is_ascii_digit()) {
+      return Ok(StatusCode::BAD_REQUEST.into_response());
+   }
+
+   match state.api.translate_tweet(&id).await {
+      Ok(tl) if !tl.text.is_empty() => {
+         let markup = html! {
+            div class="translation" dir="auto" {
+               div class="translation-header" {
+                  "Translated from " (tl.source_lang_display)
+               }
+               div class="translation-text" { (tl.text) }
+            }
+         };
+         Ok(Html(markup.into_string()).into_response())
+      },
+      Ok(_) => Ok(StatusCode::NO_CONTENT.into_response()),
+      Err(err) => {
+         tracing::debug!("Translation failed for {id}: {err}");
+         let markup = html! {
+            span class="translation-error" { "Translation unavailable" }
+         };
+         Ok(Html(markup.into_string()).into_response())
       },
    }
 }

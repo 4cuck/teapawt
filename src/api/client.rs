@@ -41,6 +41,7 @@ use crate::{
       Profile,
       SessionKind,
       Timeline,
+      Translation,
       Tweet,
       User,
    },
@@ -730,6 +731,109 @@ impl ApiClient {
 
       let article = parser::parse_article(tweet_data)?;
       Ok((tweet, article))
+   }
+
+   /// Translate a tweet using the Strato translation API.
+   pub async fn translate_tweet(&self, tweet_id: &str) -> Result<Translation> {
+      let url = endpoints::translate_url(tweet_id);
+      let session = self
+         .sessions
+         .get_session(endpoints::GRAPH_TWEET_DETAIL)
+         .await?;
+
+      // Strato endpoint only works with cookie sessions
+      if !matches!(session.kind, SessionKind::Cookie) {
+         return Err(Error::Internal("Translation requires cookie session".into()));
+      }
+
+      let api_path = format!(
+         "/i/api/1.1/strato/column/None/tweetId={tweet_id},destinationLanguage=None,\
+          translationSource=Some(Google),feature=None,timeout=None,\
+          onlyCached=None/translation/service/translateTweet"
+      );
+      let (bearer, tid) = self
+         .tid
+         .generate(&api_path)
+         .await
+         .map_or((endpoints::BEARER_TOKEN_NO_TID, None), |tid_val| {
+            (endpoints::BEARER_TOKEN, Some(tid_val))
+         });
+
+      let mut headers = header::HeaderMap::new();
+      headers.insert(
+         header::AUTHORIZATION,
+         header::HeaderValue::from_str(bearer)
+            .map_err(|_| Error::Internal("invalid bearer token value".into()))?,
+      );
+      headers.insert(
+         "x-twitter-auth-type",
+         header::HeaderValue::from_static("OAuth2Session"),
+      );
+      headers.insert(
+         "x-csrf-token",
+         session
+            .ct0
+            .parse()
+            .map_err(|_| Error::Internal("invalid ct0 header value".into()))?,
+      );
+      headers.insert(
+         header::COOKIE,
+         format!("auth_token={}; ct0={}", session.auth_token, session.ct0)
+            .parse()
+            .map_err(|_| Error::Internal("invalid cookie header value".into()))?,
+      );
+      headers.insert(
+         header::ORIGIN,
+         header::HeaderValue::from_static("https://x.com"),
+      );
+      headers.insert(header::ACCEPT, header::HeaderValue::from_static("*/*"));
+      headers.insert(
+         "x-twitter-active-user",
+         header::HeaderValue::from_static("yes"),
+      );
+      headers.insert(
+         "x-twitter-client-language",
+         header::HeaderValue::from_static("en"),
+      );
+
+      if let Some(tid) = tid
+         && let Ok(val) = tid.parse()
+      {
+         headers.insert("x-client-transaction-id", val);
+      }
+
+      let response = self.client.get_with_headers(&url, &headers).await?;
+
+      if !response.status().is_success() {
+         let status = response.status();
+         let body = response.text().await.unwrap_or_default();
+         return Err(Error::Internal(format!(
+            "Translation API error {status}: {body}"
+         )));
+      }
+
+      #[expect(clippy::items_after_statements, reason = "local response type near its use")]
+      #[derive(Deserialize)]
+      struct TranslationResponse {
+         translation:     Option<String>,
+         #[serde(rename = "sourceLanguage")]
+         source_language: Option<String>,
+         #[serde(rename = "destinationLanguage")]
+         dest_language:   Option<String>,
+         #[serde(rename = "localizedSourceLanguage")]
+         localized_source_language: Option<String>,
+      }
+
+      let bytes = response.bytes().await?;
+      let resp: TranslationResponse = serde_json::from_slice(&bytes)
+         .map_err(|err| Error::Internal(format!("Translation parse error: {err}")))?;
+
+      Ok(Translation {
+         text:                resp.translation.unwrap_or_default(),
+         source_lang:         resp.source_language.unwrap_or_default(),
+         dest_lang:           resp.dest_language.unwrap_or_default(),
+         source_lang_display: resp.localized_source_language.unwrap_or_default(),
+      })
    }
 
    /// Get session pool health statistics.

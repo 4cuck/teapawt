@@ -488,6 +488,7 @@ pub struct TweetData {
    pub edit_control:            Option<EditControl>,
    pub article:                 Option<ArticleWrapper>,
    pub content_disclosure:      Option<ContentDisclosure>,
+   pub is_translatable:         Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -513,6 +514,7 @@ pub struct TweetLegacy {
    pub quoted_status_id_str:      Option<String>,
    pub is_quote_status:           Option<bool>,
    pub created_at_ms:             Option<i64>,
+   pub lang:                      Option<String>,
    pub entities:                  Option<Entities>,
    pub extended_entities:         Option<ExtendedEntities>,
 }

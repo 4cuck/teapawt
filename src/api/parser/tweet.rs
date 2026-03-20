@@ -494,6 +494,12 @@ impl TryFrom<&TweetData> for Tweet {
          }
       });
 
+      let lang = legacy
+         .lang
+         .as_deref()
+         .unwrap_or_default()
+         .to_owned();
+
       Ok(Self {
          id,
          thread_id,
@@ -523,6 +529,7 @@ impl TryFrom<&TweetData> for Tweet {
          ai_generated,
          history,
          entities,
+         lang,
       })
    }
 }

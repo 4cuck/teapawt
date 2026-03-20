@@ -299,6 +299,18 @@ pub struct Tweet {
    pub history:        Vec<i64>,
    /// Text entities for expansion (mentions, hashtags, URLs).
    pub entities:       Vec<Entity>,
+   /// BCP-47 language code from Twitter's language detection.
+   pub lang:           String,
+}
+
+/// Translation of a tweet's text via Twitter's Strato translation API.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Translation {
+   pub text:                String,
+   pub source_lang:         String,
+   pub dest_lang:           String,
+   pub source_lang_display: String,
 }
 
 impl Tweet {
