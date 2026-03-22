@@ -276,8 +276,8 @@ impl<'a> TweetRenderer<'a> {
                       (PreEscaped(&text_html))
                   }
 
-                  // "Translate post" button for non-English tweets
-                  @if display_tweet.lang != "en" && display_tweet.lang != "und" && !display_tweet.lang.is_empty() {
+                  // "Translate post" button for translatable tweets
+                  @if display_tweet.is_translatable {
                       button class="translate-btn"
                           hx-get=(format!("/translate/{}", display_tweet.id))
                           hx-swap="outerHTML"

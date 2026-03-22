@@ -117,6 +117,15 @@ pub fn render_preferences_form(
                    (gen_input("replaceYouTube", "YouTube -> Piped/Invidious", &prefs.replace_youtube, "Piped hostname"))
                    (gen_input("replaceReddit", "Reddit -> Teddit/Libreddit", &prefs.replace_reddit, "Teddit hostname"))
 
+                   // Translation section
+                   legend { "Translation" }
+                   (gen_input("kagiToken", "Kagi session token", &prefs.kagi_token, "Paste session token here"))
+                   p class="bookmark-note" {
+                       "Uses Kagi Translate instead of Twitter. "
+                       a href="https://kagi.com/settings?p=user_details" target="_blank" { "Get your token here" }
+                       " (Session Link → copy token)"
+                   }
+
                    // Bookmark section
                    legend { "Bookmark" }
                    p class="bookmark-note" {

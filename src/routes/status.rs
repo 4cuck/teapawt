@@ -119,6 +119,10 @@ async fn status_media_redirect(Path((username, id)): Path<(String, String)>) -> 
    Redirect::to(&format!("/{username}/status/{id}")).into_response()
 }
 
+#[expect(
+   clippy::cognitive_complexity,
+   reason = "status handler has many conditional branches for caching, scrolling, pagination, and translation"
+)]
 async fn status(
    State(state): State<AppState>,
    jar: CookieJar,
@@ -161,9 +165,21 @@ async fn status(
    };
 
    match conv_result {
-      Ok(conversation) => {
+      Ok(mut conversation) => {
          let is_scroll = query.scroll.as_ref().is_some_and(|val| val == "true");
          let has_cursor = query.cursor.is_some();
+
+         // Auto-translate for embeds (OG tags / ActivityPub show translated text)
+         if !is_scroll && !has_cursor && conversation.tweet.is_translatable {
+            let tid = conversation.tweet.id.to_string();
+            let kagi = &state.config.config.kagi_token;
+            let token = (!kagi.is_empty()).then_some(kagi.as_str());
+            if let Ok(tl) = state.api.translate_auto(&tid, token).await
+               && !tl.text.is_empty()
+            {
+               conversation.tweet.translation = Some(tl);
+            }
+         }
 
          // For AJAX scroll requests, return only the replies HTML fragment.
          // Check this first — paginated responses don't include the main tweet.
@@ -457,7 +473,19 @@ async fn status_by_id(
    };
 
    match conv_result {
-      Ok(conversation) => {
+      Ok(mut conversation) => {
+         // Auto-translate for embeds (OG tags / ActivityPub show translated text)
+         if conversation.tweet.is_translatable {
+            let tid = conversation.tweet.id.to_string();
+            let kagi = &state.config.config.kagi_token;
+            let token = (!kagi.is_empty()).then_some(kagi.as_str());
+            if let Ok(tl) = state.api.translate_auto(&tid, token).await
+               && !tl.text.is_empty()
+            {
+               conversation.tweet.translation = Some(tl);
+            }
+         }
+
          let username = conversation.tweet.user.username.clone();
          Ok(render_conversation(
             &conversation,
@@ -485,15 +513,33 @@ async fn status_by_id(
 }
 
 /// Translate a tweet — returns an HTML fragment for htmx swap.
+/// Uses Kagi Translate if the user has a token set, otherwise Twitter's Strato
+/// API.
 async fn translate(
    State(state): State<AppState>,
+   jar: CookieJar,
    Path(id): Path<String>,
 ) -> Result<Response> {
    if id.len() > 19 || !id.chars().all(|ch| ch.is_ascii_digit()) {
       return Ok(StatusCode::BAD_REQUEST.into_response());
    }
 
-   match state.api.translate_tweet(&id).await {
+   // Priority: user cookie > server config > Twitter Strato
+   let kagi_token = jar
+      .get("kagiToken")
+      .map(|cookie| cookie.value().to_owned())
+      .filter(|val| !val.is_empty())
+      .or_else(|| {
+         let server_token = &state.config.config.kagi_token;
+         (!server_token.is_empty()).then(|| server_token.clone())
+      });
+
+   let result = state
+      .api
+      .translate_auto(&id, kagi_token.as_deref())
+      .await;
+
+   match result {
       Ok(tl) if !tl.text.is_empty() => {
          let markup = html! {
             div class="translation" dir="auto" {
@@ -508,10 +554,7 @@ async fn translate(
       Ok(_) => Ok(StatusCode::NO_CONTENT.into_response()),
       Err(err) => {
          tracing::debug!("Translation failed for {id}: {err}");
-         let markup = html! {
-            span class="translation-error" { "Translation unavailable" }
-         };
-         Ok(Html(markup.into_string()).into_response())
+         Ok(StatusCode::NO_CONTENT.into_response())
       },
    }
 }

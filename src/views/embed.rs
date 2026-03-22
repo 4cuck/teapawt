@@ -99,7 +99,19 @@ pub fn gif_with_quote(tweet: &Tweet) -> Option<&Gif> {
 /// Build a rich embed description from a tweet, including quote tweets and
 /// polls.
 pub fn build_embed_description(tweet: &Tweet) -> String {
-   let mut desc = strip_html(&tweet.text);
+   let mut desc = tweet.translation.as_ref().map_or_else(
+      || strip_html(&tweet.text),
+      |tl| {
+         let mut translated = tl.text.clone();
+         let _ = write!(
+            translated,
+            "\n\n[{}]\n{}",
+            tl.source_lang_display,
+            strip_html(&tweet.text)
+         );
+         translated
+      },
+   );
 
    // Append quote tweet text
    if let Some(ref quote) = tweet.quote {
@@ -472,7 +484,17 @@ fn build_media_attachments(tweet: &Tweet, url_prefix: &str) -> Vec<MediaAttachme
 
 /// Build rich HTML content with quote tweet formatting.
 fn build_mastodon_content(tweet: &Tweet) -> String {
-   let mut content = tweet.text.replace('\n', "<br>");
+   let mut content = tweet.translation.as_ref().map_or_else(
+      || tweet.text.replace('\n', "<br>"),
+      |tl| {
+         format!(
+            "{}<br><br><i>[{}]</i><br>{}",
+            tl.text.replace('\n', "<br>"),
+            tl.source_lang_display,
+            tweet.text.replace('\n', "<br>")
+         )
+      },
+   );
 
    if let Some(ref quote) = tweet.quote {
       let _ = write!(

@@ -526,6 +526,8 @@ impl TryFrom<&TweetData> for Tweet {
          history,
          entities,
          lang,
+         is_translatable: raw.is_translatable.unwrap_or(false),
+         translation: None,
       })
    }
 }

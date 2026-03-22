@@ -124,6 +124,12 @@ pub struct AppConfig {
    pub paid_emoji:          String,
    #[serde(default = "default_ai_emoji", rename = "aiEmoji")]
    pub ai_emoji:            String,
+   /// Kagi session token for server-side translation (inline value).
+   #[serde(default, rename = "kagiToken")]
+   pub kagi_token:          String,
+   /// Path to a file containing the Kagi session token.
+   #[serde(default, rename = "kagiTokenFile")]
+   pub kagi_token_file:     String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -216,6 +222,25 @@ impl Config {
             }
          },
          GifTranscodingMode::Off => {},
+      }
+
+      // Resolve Kagi token: file takes precedence over inline value
+      if !config.config.kagi_token_file.is_empty() {
+         match fs::read_to_string(&config.config.kagi_token_file) {
+            Ok(token) => {
+               token.trim().clone_into(&mut config.config.kagi_token);
+               tracing::info!("Loaded Kagi token from {}", config.config.kagi_token_file);
+            },
+            Err(err) => {
+               tracing::error!(
+                  "Failed to read kagiTokenFile '{}': {err}",
+                  config.config.kagi_token_file
+               );
+            },
+         }
+      }
+      if !config.config.kagi_token.is_empty() {
+         tracing::info!("Kagi Translate enabled for server-side translations");
       }
 
       let scheme = if config.server.https { "https" } else { "http" };

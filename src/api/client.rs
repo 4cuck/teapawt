@@ -842,6 +842,123 @@ impl ApiClient {
       })
    }
 
+   /// Translate a tweet using Kagi Translate API.
+   pub async fn kagi_translate(
+      &self,
+      tweet_id: &str,
+      kagi_token: &str,
+   ) -> Result<Translation> {
+      use http_body_util::Full;
+      use hyper_rustls::HttpsConnectorBuilder;
+      use hyper_util::{
+         client::legacy::Client as LegacyClient,
+         rt::TokioExecutor,
+      };
+      use percent_encoding::{
+         NON_ALPHANUMERIC,
+         utf8_percent_encode,
+      };
+
+      #[derive(Deserialize)]
+      struct KagiResponse {
+         translation:       Option<String>,
+         detected_language: Option<KagiDetectedLang>,
+      }
+
+      #[derive(Deserialize)]
+      struct KagiDetectedLang {
+         label: Option<String>,
+      }
+
+      // First fetch the tweet text
+      let tweet = self.get_tweet(tweet_id).await?;
+      if tweet.text.is_empty() {
+         return Err(Error::Internal("Tweet has no text to translate".into()));
+      }
+
+      let payload = serde_json::json!({
+         "text": tweet.text,
+         "source_lang": tweet.lang,
+         "target_lang": "en",
+         "skip_definition": true,
+         "model": "standard"
+      });
+
+      let url = format!(
+         "https://translate.kagi.com/api/translate?token={}",
+         utf8_percent_encode(kagi_token, NON_ALPHANUMERIC)
+      );
+
+      let body = payload.to_string();
+      let uri: hyper::Uri = url
+         .parse()
+         .map_err(|err| Error::Internal(format!("invalid Kagi URL: {err}")))?;
+
+      let connector = HttpsConnectorBuilder::new()
+         .with_native_roots()
+         .map_err(|err| Error::Internal(format!("TLS setup error: {err}")))?
+         .https_only()
+         .enable_http1()
+         .build();
+
+      let client = LegacyClient::builder(TokioExecutor::new()).build(connector);
+
+      let request = hyper::Request::builder()
+         .method(hyper::Method::POST)
+         .uri(&uri)
+         .header(header::HOST, "translate.kagi.com")
+         .header(header::CONTENT_TYPE, "application/json")
+         .body(Full::new(bytes::Bytes::from(body)))
+         .map_err(|err| Error::Internal(format!("build Kagi request: {err}")))?;
+
+      let resp = client
+         .request(request)
+         .await
+         .map_err(|err| Error::Internal(format!("Kagi request failed: {err}")))?;
+
+      let status = resp.status();
+      let body_bytes = http_body_util::BodyExt::collect(resp.into_body())
+         .await
+         .map_err(|err| Error::Internal(format!("Kagi body read error: {err}")))?
+         .to_bytes();
+
+      if !status.is_success() {
+         let body_text = String::from_utf8_lossy(&body_bytes);
+         return Err(Error::Internal(format!(
+            "Kagi API error {status}: {body_text}"
+         )));
+      }
+
+      let kagi: KagiResponse = serde_json::from_slice(&body_bytes)
+         .map_err(|err| Error::Internal(format!("Kagi parse error: {err}")))?;
+
+      let source_display = kagi
+         .detected_language
+         .and_then(|dl| dl.label)
+         .unwrap_or_else(|| tweet.lang.clone());
+
+      Ok(Translation {
+         text:                kagi.translation.unwrap_or_default(),
+         source_lang:         tweet.lang,
+         dest_lang:           "en".to_owned(),
+         source_lang_display: source_display,
+      })
+   }
+
+   /// Translate a tweet using the best available backend.
+   /// Uses Kagi when a token is provided, otherwise falls back to Strato.
+   pub async fn translate_auto(
+      &self,
+      tweet_id: &str,
+      kagi_token: Option<&str>,
+   ) -> Result<Translation> {
+      if let Some(token) = kagi_token {
+         self.kagi_translate(tweet_id, token).await
+      } else {
+         self.translate_tweet(tweet_id).await
+      }
+   }
+
    /// Get session pool health statistics.
    pub async fn get_session_health(&self) -> super::HealthResponse {
       self.sessions.get_health().await

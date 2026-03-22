@@ -33,6 +33,7 @@ pub struct Prefs {
    pub replace_twitter:      String,
    pub replace_youtube:      String,
    pub replace_reddit:       String,
+   pub kagi_token:           String,
 }
 
 impl Prefs {
@@ -59,6 +60,7 @@ impl Prefs {
          replace_twitter:      config.preferences.replace_twitter.clone(),
          replace_youtube:      config.preferences.replace_youtube.clone(),
          replace_reddit:       config.preferences.replace_reddit.clone(),
+         kagi_token:           String::new(),
       }
    }
 
@@ -95,6 +97,7 @@ impl Prefs {
          replace_twitter:      str_pref("replaceTwitter", defaults.replace_twitter),
          replace_youtube:      str_pref("replaceYouTube", defaults.replace_youtube),
          replace_reddit:       str_pref("replaceReddit", defaults.replace_reddit),
+         kagi_token:           str_pref("kagiToken", defaults.kagi_token),
       }
    }
 
@@ -120,5 +123,6 @@ impl Prefs {
       "replaceTwitter",
       "replaceYouTube",
       "replaceReddit",
+      "kagiToken",
    ];
 }

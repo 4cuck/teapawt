@@ -41,6 +41,12 @@ disableTid = false
 # Max requests per session to avoid race conditions
 maxConcurrentReqs = 2
 
+# Kagi Translate: server-side translation for non-English tweets
+# Set either kagiToken (inline) or kagiTokenFile (path to file)
+# Get your token from kagi.com/settings → Session Link
+kagiToken = ""
+kagiTokenFile = ""
+
 [gifTranscoding]
 # Transcode Twitter GIF MP4s to actual GIF format for Discord inline playback
 # Modes: "off" (default), "local" (ffmpeg on server), "external" (URL rewrite)

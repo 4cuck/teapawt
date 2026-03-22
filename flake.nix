@@ -121,6 +121,7 @@
                   inherit (cfg) cache preferences gifTranscoding;
                   config = cfg.config // {
                     hmacKey = "@hmac@";
+                    kagiToken = "@kagi@";
                   };
                   server = lib.filterAttrs (_: v: v != null) cfg.server // {
                     staticDir = "${cfg.package}/share/teapot/public";
@@ -134,6 +135,7 @@
             import secrets
 
             state_dir = os.environ.get("STATE_DIRECTORY")
+            creds_dir = os.environ.get("CREDENTIALS_DIRECTORY", "")
             if not os.path.isfile(f"{state_dir}/hmac"):
                 hmac = secrets.token_hex(32)
                 with open(f"{state_dir}/hmac", "w") as f:
@@ -142,10 +144,19 @@
                 with open(f"{state_dir}/hmac", "r") as f:
                     hmac = f.read()
 
+            kagi = ""
+            kagi_cred = os.path.join(creds_dir, "kagiToken") if creds_dir else ""
+            if kagi_cred and os.path.isfile(kagi_cred):
+                with open(kagi_cred, "r") as f:
+                    kagi = f.read().strip()
+
             configFile = "${configFile}"
             with open(configFile, "r") as f_in:
+                content = f_in.read()
+                content = content.replace("@hmac@", hmac)
+                content = content.replace("@kagi@", kagi)
                 with open(f"{state_dir}/teapot.toml", "w") as f_out:
-                    f_out.write(f_in.read().replace("@hmac@", hmac))
+                    f_out.write(content)
           '';
         in
         {
@@ -330,6 +341,18 @@
               '';
             };
 
+            kagiTokenFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.path;
+              default = null;
+              description = ''
+                Path to a file containing a Kagi session token for server-side
+                translation. When set, non-English tweets are translated via
+                Kagi Translate instead of Twitter's Strato API.
+
+                Get your token from kagi.com/settings → Session Link.
+              '';
+            };
+
             openFirewall = lib.mkOption {
               type = lib.types.bool;
               default = false;
@@ -346,7 +369,9 @@
               path = lib.mkIf (cfg.gifTranscoding.mode == "local") [ pkgs.ffmpeg-headless ];
               serviceConfig = {
                 DynamicUser = true;
-                LoadCredential = "sessionsFile:${cfg.sessionsFile}";
+                LoadCredential = [
+                  "sessionsFile:${cfg.sessionsFile}"
+                ] ++ lib.optional (cfg.kagiTokenFile != null) "kagiToken:${cfg.kagiTokenFile}";
                 StateDirectory = "teapot";
                 Environment = [
                   "TEAPOT_CONF_FILE=/var/lib/teapot/teapot.toml"

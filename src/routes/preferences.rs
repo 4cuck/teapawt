@@ -71,6 +71,7 @@ fn prefs_to_cookies(prefs: &Prefs) -> Vec<Cookie<'static>> {
       str_cookie("replaceTwitter", &prefs.replace_twitter),
       str_cookie("replaceYouTube", &prefs.replace_youtube),
       str_cookie("replaceReddit", &prefs.replace_reddit),
+      str_cookie("kagiToken", &prefs.kagi_token),
    ]
 }
 
@@ -122,6 +123,7 @@ fn encode_prefs(prefs: &Prefs, config: &Config) -> String {
    enc_string!("replaceTwitter", replace_twitter);
    enc_string!("replaceYouTube", replace_youtube);
    enc_string!("replaceReddit", replace_reddit);
+   enc_string!("kagiToken", kagi_token);
 
    pairs.join(",")
 }
@@ -184,6 +186,8 @@ pub struct PrefsForm {
    pub replace_youtube:      Option<String>,
    #[serde(rename = "replaceReddit")]
    pub replace_reddit:       Option<String>,
+   #[serde(rename = "kagiToken")]
+   pub kagi_token:           Option<String>,
 }
 
 impl PrefsForm {
@@ -214,6 +218,7 @@ impl PrefsForm {
          replace_twitter:      parse_str(&self.replace_twitter, defaults.replace_twitter),
          replace_youtube:      parse_str(&self.replace_youtube, defaults.replace_youtube),
          replace_reddit:       parse_str(&self.replace_reddit, defaults.replace_reddit),
+         kagi_token:           parse_str(&self.kagi_token, defaults.kagi_token),
       }
    }
 }

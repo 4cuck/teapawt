@@ -301,6 +301,10 @@ pub struct Tweet {
    pub entities:       Vec<Entity>,
    /// BCP-47 language code from Twitter's language detection.
    pub lang:           String,
+   /// Whether Twitter considers this tweet translatable.
+   pub is_translatable: bool,
+   /// Pre-fetched translation for embeds (OG tags, `ActivityPub`).
+   pub translation:     Option<Translation>,
 }
 
 /// Translation of a tweet's text via Twitter's Strato translation API.
