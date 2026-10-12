@@ -172,7 +172,7 @@ async fn activity_response(state: &AppState, activity: ActivityId) -> Result<Res
    if tweet.is_translatable {
       let kagi = &state.config.config.kagi_token;
       let token = (!kagi.is_empty()).then_some(kagi.as_str());
-      if let Ok(translation) = get_cached_translation(state, &tweet, token).await
+      if let Ok(translation) = get_cached_translation(state, &tweet, token, false).await
          && !translation.text.is_empty()
       {
          tweet.translation = Some(translation);

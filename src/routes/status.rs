@@ -231,7 +231,7 @@ async fn render_status(
          if !is_discord && !is_scroll && !has_cursor && conversation.tweet.is_translatable {
             let kagi = &state.config.config.kagi_token;
             let token = (!kagi.is_empty()).then_some(kagi.as_str());
-            if let Ok(tl) = get_cached_translation(&state, &conversation.tweet, token).await
+            if let Ok(tl) = get_cached_translation(&state, &conversation.tweet, token, false).await
                && !tl.text.is_empty()
             {
                conversation.tweet.translation = Some(tl);
@@ -561,7 +561,7 @@ async fn status_by_id(
          if !discord_activity && conversation.tweet.is_translatable {
             let kagi = &state.config.config.kagi_token;
             let token = (!kagi.is_empty()).then_some(kagi.as_str());
-            if let Ok(tl) = get_cached_translation(&state, &conversation.tweet, token).await
+            if let Ok(tl) = get_cached_translation(&state, &conversation.tweet, token, false).await
                && !tl.text.is_empty()
             {
                conversation.tweet.translation = Some(tl);
@@ -613,7 +613,7 @@ async fn translate(
       });
 
    let result = match get_cached_tweet(&state, &id).await {
-      Ok(tweet) => get_cached_translation(&state, &tweet, kagi_token.as_deref()).await,
+      Ok(tweet) => get_cached_translation(&state, &tweet, kagi_token.as_deref(), true).await,
       Err(err) => Err(err),
    };
 
@@ -631,8 +631,24 @@ async fn translate(
       },
       Ok(_) => Ok(StatusCode::NO_CONTENT.into_response()),
       Err(err) => {
-         tracing::debug!("Translation failed for {id}: {err}");
-         Ok(StatusCode::NO_CONTENT.into_response())
+         tracing::warn!("Translation failed for {id}: {err}");
+         let message = if err.is_upstream_limit() {
+            "Translation is busy right now. Try again in a moment."
+         } else {
+            "Couldn't translate this post."
+         };
+         let markup = html! {
+            div class="translation-error" dir="auto" {
+               (message)
+               button class="translate-btn"
+                  hx-get=(format!("/translate/{id}"))
+                  hx-swap="outerHTML"
+                  hx-indicator="closest .translate-btn" {
+                  "Translate post"
+               }
+            }
+         };
+         Ok(Html(markup.into_string()).into_response())
       },
    }
 }

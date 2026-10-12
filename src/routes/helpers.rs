@@ -464,6 +464,7 @@ pub async fn get_cached_translation(
    state: &AppState,
    tweet: &Tweet,
    kagi_token: Option<&str>,
+   interactive: bool,
 ) -> Result<Translation> {
    let backend = if kagi_token.is_some() {
       "kagi"
@@ -474,7 +475,11 @@ pub async fn get_cached_translation(
    if let Some(translation) = state.cache.get::<Translation>(&key) {
       return Ok(translation);
    }
-   let _permit = state.translation_limiter.acquire().await?;
+   let _permit = if interactive {
+      state.translation_limiter.acquire_interactive().await?
+   } else {
+      state.translation_limiter.acquire().await?
+   };
    let translation = state.api.translate_auto(tweet, kagi_token).await?;
    if !translation.text.is_empty() {
       state.cache.set(&key, &translation, ttl::TRANSLATION);

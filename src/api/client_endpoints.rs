@@ -6,7 +6,7 @@ use super::{
    Conversation, ConversationData, Deserialize, EditHistory, EditHistoryData, Error, List,
    ListByIdData, ListBySlugData, ListMembersData, ListTimelineData, LiveStreamStatus,
    PaginatedResult, PhotoRail, Profile, Result, RetweetersData, SearchTimelineData, SessionKind,
-   Timeline, Translation, Tweet, User, UserResultData, UserTimelineData, article_tweet_data,
+   SessionLease, Timeline, Translation, Tweet, User, UserResultData, UserTimelineData, article_tweet_data,
    audio_space_host, audio_space_status, broadcast_id_from_url, broadcast_status,
    clamp_community_value, endpoints, header, hosted_by, parser, space_id_from_url, timeout,
 };
@@ -839,12 +839,58 @@ impl ApiClient {
    }
 
    /// Translate a tweet using the Strato translation API.
+   ///
+   /// One account's window is about 187 calls. When that account is out, try
+   /// another instead of failing the click.
    pub async fn translate_tweet(&self, tweet_id: &str) -> Result<Translation> {
-      let url = endpoints::translate_url(tweet_id);
-      let session = self
-         .charged_session(endpoints::STRATO_TRANSLATE, Some(SessionKind::Cookie))
-         .await?;
+      let mut excluded = None;
+      let mut last = Err(Error::NoSessions);
+      for attempt in 0..=super::RATE_LIMIT_REPLACEMENTS {
+         let session = if attempt == 0 {
+            self.charged_session(endpoints::STRATO_TRANSLATE, Some(SessionKind::Cookie))
+               .await?
+         } else {
+            let previous = excluded.unwrap_or(0);
+            if !self
+               .sessions
+               .has_unlimited(endpoints::STRATO_TRANSLATE, Some(SessionKind::Cookie), previous)
+               .await
+            {
+               break;
+            }
+            self.charge(endpoints::STRATO_TRANSLATE).await?;
+            match self
+               .sessions
+               .acquire_excluding(
+                  endpoints::STRATO_TRANSLATE,
+                  Some(SessionKind::Cookie),
+                  excluded,
+               )
+               .await
+            {
+               Ok(session) => session,
+               Err(err) => {
+                  self.refund(endpoints::STRATO_TRANSLATE).await;
+                  return last.and(Err(err));
+               },
+            }
+         };
+         let session_id = session.id;
+         last = self.translate_with_session(&session, tweet_id).await;
+         if !matches!(last, Err(Error::RateLimited)) {
+            return last;
+         }
+         excluded = Some(session_id);
+      }
+      last
+   }
 
+   async fn translate_with_session(
+      &self,
+      session: &SessionLease,
+      tweet_id: &str,
+   ) -> Result<Translation> {
+      let url = endpoints::translate_url(tweet_id);
       let api_path = format!(
          "/i/api/1.1/strato/column/None/tweetId={tweet_id},destinationLanguage=None,\
           translationSource=Some(Google),feature=None,timeout=None,onlyCached=None/translation/\
@@ -918,7 +964,6 @@ impl ApiClient {
          localized_source_language: Option<String>,
       }
 
-      drop(session);
       let resp: TranslationResponse = serde_json::from_slice(&bytes)
          .map_err(|err| Error::Internal(format!("Translation parse error: {err}")))?;
 
