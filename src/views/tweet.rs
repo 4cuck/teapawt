@@ -262,15 +262,10 @@ impl<'a> TweetRenderer<'a> {
                               div class="fullname-and-username" {
                                   (link_user(&display_tweet.user, "fullname"))
                                   (verified_icon(&display_tweet.user))
-                                  (link_user(&display_tweet.user, "username"))
-                                  (render_tweet_account_signal(&display_tweet.user))
-                              }
-
-                              span class="tweet-date" {
-                                  @if let Some(time) = display_tweet.time {
-                                      a href=(&tweet_link) title=(formatters::format_tweet_time(time)) {
-                                          (formatters::format_relative_time(time))
-                                      }
+                                  span class="tweet-author-meta" {
+                                      (link_user(&display_tweet.user, "username"))
+                                      (render_tweet_date(display_tweet.time, &tweet_link))
+                                      (render_tweet_account_signal(&display_tweet.user))
                                   }
                               }
                           }
@@ -556,15 +551,10 @@ fn render_quote(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> Markup
                    (render_mini_avatar(&quote.user, config, prefs))
                    (link_user(&quote.user, "fullname"))
                    (verified_icon(&quote.user))
-                   (link_user(&quote.user, "username"))
-                   (render_tweet_account_signal(&quote.user))
-               }
-
-               span class="tweet-date" {
-                   @if let Some(time) = quote.time {
-                       a href=(&quote_link) title=(formatters::format_tweet_time(time)) {
-                           (formatters::format_relative_time(time))
-                       }
+                   span class="tweet-author-meta" {
+                       (link_user(&quote.user, "username"))
+                       (render_tweet_date(quote.time, &quote_link))
+                       (render_tweet_account_signal(&quote.user))
                    }
                }
            }
@@ -769,6 +759,20 @@ fn render_card(card: &Card, config: &Config, prefs: Option<&Prefs>) -> Markup {
                        (render_card_content(card))
                    }
                }
+           }
+       }
+   }
+}
+
+/// Timestamp on the handle line. The full clock time stays on the link tooltip.
+fn render_tweet_date(time: Option<time::OffsetDateTime>, href: &str) -> Markup {
+   let Some(time) = time else {
+      return html! {};
+   };
+   html! {
+       span class="tweet-date" {
+           a href=(href) title=(formatters::format_tweet_time(time)) {
+               (formatters::format_relative_time(time))
            }
        }
    }

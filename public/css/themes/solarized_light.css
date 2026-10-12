@@ -1,0 +1,52 @@
+/* Solarized light */
+body {
+    --bg_color: #fdf6e3;
+    --fg_color: #657b83;
+    --fg_faded: #839496;
+    --fg_dark: #268bd2;
+    --fg_nav: #268bd2;
+
+    --bg_panel: #eee8d5;
+    --bg_elements: #fdf6e3;
+    --bg_overlays: #e4ddc8;
+    --bg_hover: #e4ddc8;
+
+    --grey: #93a1a1;
+    --dark_grey: #ddd6c1;
+    --darker_grey: #eee8d5;
+    --darkest_grey: #fdf6e3;
+    --border_grey: #ddd6c1;
+
+    --accent: #268bd2;
+    --accent_light: #2aa198;
+    --accent_dark: #1b668f;
+    --accent_border: #268bd296;
+
+    --play_button: #cb4b16;
+    --play_button_hover: #dc322f;
+    --more_replies_dots: #2aa198;
+    --error_red: #dc322f;
+
+    --verified_blue: #268bd2;
+    --verified_business: #b58900;
+    --verified_government: #586e75;
+    --icon_text: #fdf6e3;
+
+    --tab: #657b83;
+    --tab_selected: #268bd2;
+    --profile_stat: #586e75;
+
+    --shadow: rgba(0, 43, 54, 0.1);
+    --shadow_dark: rgba(0, 43, 54, 0.2);
+
+    --tp-accent-red: #dc322f;
+    --tp-accent-green: #859900;
+    --tp-accent-yellow: #b58900;
+    --tp-accent-blue: #268bd2;
+    --tp-accent-magenta: #6c71c4;
+    --tp-accent-cyan: #2aa198;
+    --tp-error: #dc322f;
+
+    background-color: var(--bg_color);
+    color: var(--fg_color);
+}

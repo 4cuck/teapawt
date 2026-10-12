@@ -5,8 +5,8 @@ use regex::Regex;
 
 use crate::{config::Config, types::Prefs};
 
-pub const STYLE_CSS: &str = "/css/style.css?teapawt7";
-pub const CLEAN_CSS: &str = "/css/clean.css?teapawt16";
+pub const STYLE_CSS: &str = "/css/style.css?teapawt8";
+pub const CLEAN_CSS: &str = "/css/clean.css?teapawt17";
 pub const FONTELLO_CSS: &str = "/css/fontello.css";
 
 /// Builder for rendering a full page layout.
@@ -134,7 +134,7 @@ impl<'a> PageLayout<'a> {
       let theme_href = match theme {
          Some(theme_name) if !theme_name.is_empty() && theme_name.to_lowercase() != "teapot" => {
             Some(format!(
-               "/css/themes/{}.css",
+               "/css/themes/{}.css?teapawt17",
                theme_name.to_lowercase().replace(' ', "_")
             ))
          },

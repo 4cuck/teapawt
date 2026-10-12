@@ -1,0 +1,49 @@
+/* Catppuccin Frappé */
+body {
+    --bg_color: #292c3c;
+    --fg_color: #c6d0f5;
+    --fg_faded: #a5adce;
+    --fg_dark: #8caaee;
+    --fg_nav: #8caaee;
+
+    --bg_panel: #303446;
+    --bg_elements: #232634;
+    --bg_overlays: #414559;
+    --bg_hover: #414559;
+
+    --grey: #737994;
+    --dark_grey: #51576d;
+    --darker_grey: #414559;
+    --darkest_grey: #292c3c;
+    --border_grey: #414559;
+
+    --accent: #8caaee;
+    --accent_light: #babbf1;
+    --accent_dark: #81c8be;
+    --accent_border: #8caaee96;
+
+    --play_button: #e78284;
+    --play_button_hover: #eebebe;
+    --more_replies_dots: #8caaee;
+    --error_red: #e78284;
+
+    --verified_blue: #8caaee;
+    --verified_business: #e5c890;
+    --verified_government: #a5adce;
+    --icon_text: #232634;
+
+    --tab: #a5adce;
+    --tab_selected: #8caaee;
+    --profile_stat: #c6d0f5;
+
+    --shadow: rgba(35, 38, 52, 0.4);
+    --shadow_dark: rgba(35, 38, 52, 0.6);
+
+    --tp-accent-red: #e78284;
+    --tp-accent-green: #a6d189;
+    --tp-accent-yellow: #e5c890;
+    --tp-accent-blue: #8caaee;
+    --tp-accent-magenta: #ca9ee6;
+    --tp-accent-cyan: #81c8be;
+    --tp-error: #e78284;
+}

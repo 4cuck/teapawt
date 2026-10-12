@@ -1,10 +1,10 @@
-@import "tweet/base.css?teapawt1";
-@import "profile/base.css";
+@import "tweet/base.css?teapawt2";
+@import "profile/base.css?teapawt1";
 @import "general.css";
 @import "navbar.css";
 @import "inputs.css";
 @import "timeline.css?teapawt5";
-@import "search.css";
+@import "search.css?teapawt1";
 
 @import "variables.css";
 

@@ -28,7 +28,7 @@ body {
     --error_red: #ff5555;
 
     --verified_blue: var(--accent);
-    --icon_text: ##F8F8F2;
+    --icon_text: #F8F8F2;
 
     --tab: #6272a4;
     --tab_selected: var(--accent);

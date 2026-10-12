@@ -1,0 +1,49 @@
+/* Tokyo Night */
+body {
+    --bg_color: #16161e;
+    --fg_color: #c0caf5;
+    --fg_faded: #9aa5ce;
+    --fg_dark: #7aa2f7;
+    --fg_nav: #7aa2f7;
+
+    --bg_panel: #1a1b26;
+    --bg_elements: #1f2335;
+    --bg_overlays: #292e42;
+    --bg_hover: #292e42;
+
+    --grey: #565f89;
+    --dark_grey: #3b4261;
+    --darker_grey: #292e42;
+    --darkest_grey: #1a1b26;
+    --border_grey: #292e42;
+
+    --accent: #7aa2f7;
+    --accent_light: #7dcfff;
+    --accent_dark: #3d59a1;
+    --accent_border: #7aa2f796;
+
+    --play_button: #f7768e;
+    --play_button_hover: #ff9e64;
+    --more_replies_dots: #7aa2f7;
+    --error_red: #f7768e;
+
+    --verified_blue: #7aa2f7;
+    --verified_business: #e0af68;
+    --verified_government: #9aa5ce;
+    --icon_text: #1a1b26;
+
+    --tab: #9aa5ce;
+    --tab_selected: #7aa2f7;
+    --profile_stat: #c0caf5;
+
+    --shadow: rgba(0, 0, 0, 0.45);
+    --shadow_dark: rgba(0, 0, 0, 0.65);
+
+    --tp-accent-red: #f7768e;
+    --tp-accent-green: #9ece6a;
+    --tp-accent-yellow: #e0af68;
+    --tp-accent-blue: #7aa2f7;
+    --tp-accent-magenta: #bb9af7;
+    --tp-accent-cyan: #7dcfff;
+    --tp-error: #f7768e;
+}

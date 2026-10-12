@@ -1,0 +1,52 @@
+/* Rosé Pine Dawn */
+body {
+    --bg_color: #faf4ed;
+    --fg_color: #575279;
+    --fg_faded: #797593;
+    --fg_dark: #907aa9;
+    --fg_nav: #907aa9;
+
+    --bg_panel: #fffaf3;
+    --bg_elements: #f2e9e1;
+    --bg_overlays: #f2e9e1;
+    --bg_hover: #f2e9e1;
+
+    --grey: #9893a5;
+    --dark_grey: #dfdad9;
+    --darker_grey: #f2e9e1;
+    --darkest_grey: #faf4ed;
+    --border_grey: #dfdad9;
+
+    --accent: #907aa9;
+    --accent_light: #b4637a;
+    --accent_dark: #797593;
+    --accent_border: #907aa996;
+
+    --play_button: #b4637a;
+    --play_button_hover: #d7827e;
+    --more_replies_dots: #907aa9;
+    --error_red: #b4637a;
+
+    --verified_blue: #56949f;
+    --verified_business: #ea9d34;
+    --verified_government: #797593;
+    --icon_text: #fffaf3;
+
+    --tab: #797593;
+    --tab_selected: #907aa9;
+    --profile_stat: #575279;
+
+    --shadow: rgba(87, 82, 121, 0.1);
+    --shadow_dark: rgba(87, 82, 121, 0.18);
+
+    --tp-accent-red: #b4637a;
+    --tp-accent-green: #286983;
+    --tp-accent-yellow: #ea9d34;
+    --tp-accent-blue: #56949f;
+    --tp-accent-magenta: #907aa9;
+    --tp-accent-cyan: #56949f;
+    --tp-error: #b4637a;
+
+    background-color: var(--bg_color);
+    color: var(--fg_color);
+}

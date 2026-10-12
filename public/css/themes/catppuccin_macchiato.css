@@ -1,0 +1,49 @@
+/* Catppuccin Macchiato */
+body {
+    --bg_color: #1e2030;
+    --fg_color: #cad3f5;
+    --fg_faded: #a5adcb;
+    --fg_dark: #8aadf4;
+    --fg_nav: #8aadf4;
+
+    --bg_panel: #24273a;
+    --bg_elements: #181926;
+    --bg_overlays: #363a4f;
+    --bg_hover: #363a4f;
+
+    --grey: #6e738d;
+    --dark_grey: #494d64;
+    --darker_grey: #363a4f;
+    --darkest_grey: #1e2030;
+    --border_grey: #363a4f;
+
+    --accent: #8aadf4;
+    --accent_light: #b7bdf8;
+    --accent_dark: #7dc4e4;
+    --accent_border: #8aadf496;
+
+    --play_button: #ed8796;
+    --play_button_hover: #f0c6c6;
+    --more_replies_dots: #8aadf4;
+    --error_red: #ed8796;
+
+    --verified_blue: #8aadf4;
+    --verified_business: #eed49f;
+    --verified_government: #a5adcb;
+    --icon_text: #181926;
+
+    --tab: #a5adcb;
+    --tab_selected: #8aadf4;
+    --profile_stat: #cad3f5;
+
+    --shadow: rgba(24, 25, 38, 0.45);
+    --shadow_dark: rgba(24, 25, 38, 0.65);
+
+    --tp-accent-red: #ed8796;
+    --tp-accent-green: #a6da95;
+    --tp-accent-yellow: #eed49f;
+    --tp-accent-blue: #8aadf4;
+    --tp-accent-magenta: #c6a0f6;
+    --tp-accent-cyan: #8bd5ca;
+    --tp-error: #ed8796;
+}

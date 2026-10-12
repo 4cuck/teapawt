@@ -1,0 +1,49 @@
+/* Classic Nitter / Shitter palette. */
+body {
+    --bg_color: #0f0f0f;
+    --fg_color: #f8f8f2;
+    --fg_faded: #b9b9b4;
+    --fg_dark: #ff6c60;
+    --fg_nav: #ff6c60;
+
+    --bg_panel: #161616;
+    --bg_elements: #121212;
+    --bg_overlays: #1f1f1f;
+    --bg_hover: #1a1a1a;
+
+    --grey: #888889;
+    --dark_grey: #404040;
+    --darker_grey: #282828;
+    --darkest_grey: #222222;
+    --border_grey: #3e3e35;
+
+    --accent: #ff6c60;
+    --accent_light: #ffaca0;
+    --accent_dark: #8a3731;
+    --accent_border: #ff6c6091;
+
+    --play_button: #d8574d;
+    --play_button_hover: #ff6c60;
+    --more_replies_dots: #ad433b;
+    --error_red: #420a05;
+
+    --verified_blue: #1da1f2;
+    --verified_business: #fac82b;
+    --verified_government: #c1b6a4;
+    --icon_text: #1a0d0c;
+
+    --tab: #f8f8f2;
+    --tab_selected: #ff6c60;
+    --profile_stat: #f8f8f2;
+
+    --shadow: rgba(0, 0, 0, 0.6);
+    --shadow_dark: rgba(0, 0, 0, 0.35);
+
+    --tp-accent-red: #ff6c60;
+    --tp-accent-green: #8ec07c;
+    --tp-accent-yellow: #fac82b;
+    --tp-accent-blue: #1da1f2;
+    --tp-accent-magenta: #d3869b;
+    --tp-accent-cyan: #8ec07c;
+    --tp-error: #ff6c60;
+}

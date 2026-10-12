@@ -1,0 +1,49 @@
+/* Gruvbox dark */
+body {
+    --bg_color: #1d2021;
+    --fg_color: #ebdbb2;
+    --fg_faded: #a89984;
+    --fg_dark: #fe8019;
+    --fg_nav: #fe8019;
+
+    --bg_panel: #282828;
+    --bg_elements: #32302f;
+    --bg_overlays: #3c3836;
+    --bg_hover: #3c3836;
+
+    --grey: #928374;
+    --dark_grey: #504945;
+    --darker_grey: #3c3836;
+    --darkest_grey: #282828;
+    --border_grey: #3c3836;
+
+    --accent: #fe8019;
+    --accent_light: #fabd2f;
+    --accent_dark: #d65d0e;
+    --accent_border: #fe801996;
+
+    --play_button: #fb4934;
+    --play_button_hover: #fe8019;
+    --more_replies_dots: #fe8019;
+    --error_red: #fb4934;
+
+    --verified_blue: #83a598;
+    --verified_business: #fabd2f;
+    --verified_government: #a89984;
+    --icon_text: #1d2021;
+
+    --tab: #a89984;
+    --tab_selected: #fe8019;
+    --profile_stat: #ebdbb2;
+
+    --shadow: rgba(0, 0, 0, 0.45);
+    --shadow_dark: rgba(0, 0, 0, 0.65);
+
+    --tp-accent-red: #fb4934;
+    --tp-accent-green: #b8bb26;
+    --tp-accent-yellow: #fabd2f;
+    --tp-accent-blue: #83a598;
+    --tp-accent-magenta: #d3869b;
+    --tp-accent-cyan: #8ec07c;
+    --tp-error: #fb4934;
+}

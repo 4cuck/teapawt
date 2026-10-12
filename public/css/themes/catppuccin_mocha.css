@@ -1,0 +1,49 @@
+/* Catppuccin Mocha — https://github.com/catppuccin/catppuccin */
+body {
+    --bg_color: #181825;
+    --fg_color: #cdd6f4;
+    --fg_faded: #a6adc8;
+    --fg_dark: #89b4fa;
+    --fg_nav: #89b4fa;
+
+    --bg_panel: #1e1e2e;
+    --bg_elements: #11111b;
+    --bg_overlays: #313244;
+    --bg_hover: #313244;
+
+    --grey: #6c7086;
+    --dark_grey: #45475a;
+    --darker_grey: #313244;
+    --darkest_grey: #181825;
+    --border_grey: #313244;
+
+    --accent: #89b4fa;
+    --accent_light: #b4befe;
+    --accent_dark: #74c7ec;
+    --accent_border: #89b4fa96;
+
+    --play_button: #f38ba8;
+    --play_button_hover: #eba0ac;
+    --more_replies_dots: #89b4fa;
+    --error_red: #f38ba8;
+
+    --verified_blue: #89b4fa;
+    --verified_business: #f9e2af;
+    --verified_government: #a6adc8;
+    --icon_text: #11111b;
+
+    --tab: #a6adc8;
+    --tab_selected: #89b4fa;
+    --profile_stat: #cdd6f4;
+
+    --shadow: rgba(17, 17, 27, 0.45);
+    --shadow_dark: rgba(17, 17, 27, 0.65);
+
+    --tp-accent-red: #f38ba8;
+    --tp-accent-green: #a6e3a1;
+    --tp-accent-yellow: #f9e2af;
+    --tp-accent-blue: #89b4fa;
+    --tp-accent-magenta: #cba6f7;
+    --tp-accent-cyan: #94e2d5;
+    --tp-error: #f38ba8;
+}
