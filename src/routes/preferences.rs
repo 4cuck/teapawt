@@ -137,6 +137,7 @@ pub fn router() -> Router<AppState> {
       .route("/resetprefs", post(reset_prefs))
       .route("/enablemp4", post(enable_mp4))
       .route("/enablehls", post(enable_hls))
+      .route("/ignorefirefoxwarning", post(ignore_firefox_warning))
 }
 
 #[derive(Debug, Deserialize)]
@@ -243,10 +244,14 @@ async fn settings(
 ) -> Result<Response> {
    let prefs = Prefs::from_cookies(&jar, &state.config);
    let themes = find_themes(&state.config.server.static_dir);
-   let firefox = headers
-      .get(axum::http::header::USER_AGENT)
-      .and_then(|value| value.to_str().ok())
-      .is_some_and(crate::views::preferences::is_firefox);
+   let warning_hidden = jar
+      .get("hideFirefoxWarning")
+      .is_some_and(|cookie| cookie.value() == "on");
+   let firefox = !warning_hidden
+      && headers
+         .get(axum::http::header::USER_AGENT)
+         .and_then(|value| value.to_str().ok())
+         .is_some_and(crate::views::preferences::is_firefox);
 
    let referer = local_redirect_target(query.referer.as_deref(), "/");
    let prefs_code = encode_prefs(&prefs, &state.config);
@@ -299,6 +304,23 @@ async fn reset_prefs(jar: CookieJar, Form(form): Form<ResetPrefsForm>) -> Result
 
    // Redirect to referer or settings page
    let redirect_to = local_redirect_target(form.referer.as_deref(), "/settings");
+   Ok((updated_jar, Redirect::to(&redirect_to)).into_response())
+}
+
+async fn ignore_firefox_warning(
+   State(state): State<AppState>,
+   jar: CookieJar,
+   Form(form): Form<ResetPrefsForm>,
+) -> Result<Response> {
+   let cookie = make_cookie(
+      "hideFirefoxWarning",
+      "on",
+      Duration::days(365),
+      state.config.server.https,
+      false,
+   );
+   let updated_jar = jar.add(cookie);
+   let redirect_to = local_redirect_target(form.referer.as_deref(), "/");
    Ok((updated_jar, Redirect::to(&redirect_to)).into_response())
 }
 

@@ -6,7 +6,7 @@ use regex::Regex;
 use crate::{config::Config, types::Prefs};
 
 pub const STYLE_CSS: &str = "/css/style.css?teapawt8";
-pub const CLEAN_CSS: &str = "/css/clean.css?teapawt20";
+pub const CLEAN_CSS: &str = "/css/clean.css?teapawt21";
 pub const FONTELLO_CSS: &str = "/css/fontello.css";
 
 /// Builder for rendering a full page layout.

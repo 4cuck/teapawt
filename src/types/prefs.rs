@@ -164,6 +164,7 @@ impl Prefs {
       "mediaView",
       "gallerySize",
       "compactGallery",
+      "hideFirefoxWarning",
    ];
 
    /// Preference names accepted from shareable URL preference imports.

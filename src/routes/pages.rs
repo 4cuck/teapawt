@@ -3,8 +3,8 @@
 use axum::{
    Router,
    extract::State,
-   http::HeaderMap,
-   response::{Html, IntoResponse, Redirect},
+   http::{HeaderMap, HeaderValue, header},
+   response::{Html, IntoResponse, Redirect, Response},
    routing::get,
 };
 use axum_extra::extract::CookieJar;
@@ -78,12 +78,15 @@ async fn home(
    State(state): State<AppState>,
    jar: CookieJar,
    headers: HeaderMap,
-) -> impl IntoResponse {
+) -> Response {
    let prefs = Prefs::from_cookies(&jar, &state.config);
    let firefox = headers
-      .get(axum::http::header::USER_AGENT)
+      .get(header::USER_AGENT)
       .and_then(|value| value.to_str().ok())
       .is_some_and(crate::views::preferences::is_firefox);
+   let warning_hidden = jar
+      .get("hideFirefoxWarning")
+      .is_some_and(|cookie| cookie.value() == "on");
    let hub = html! {
        section class="landing-hub" aria-label="Popular profiles" {
            h2 { "Browse public profiles" }
@@ -104,7 +107,7 @@ async fn home(
            }
        }
    };
-   let notice = (firefox && !prefs.proxy_media).then(|| {
+   let notice = (firefox && !prefs.proxy_media && !warning_hidden).then(|| {
       crate::views::preferences::firefox_media_warning(false)
    });
    let content = search_view::render_search_page(notice, Some(hub));
@@ -121,7 +124,14 @@ async fn home(
       .referer("/")
       .head_extra(&head)
       .render();
-   Html(markup.into_string())
+   let mut response = Html(markup.into_string()).into_response();
+   // The warning depends on the browser and a dismiss cookie, so a shared cache
+   // must not store one visitor's copy for everyone else.
+   response.headers_mut().insert(
+      header::CACHE_CONTROL,
+      HeaderValue::from_static("private, no-store"),
+   );
+   response
 }
 
 async fn about(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {

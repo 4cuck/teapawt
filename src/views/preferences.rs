@@ -74,9 +74,26 @@ pub fn is_firefox(user_agent: &str) -> bool {
    ua.contains("firefox/") || ua.contains("fxios/")
 }
 
-/// Shown to Firefox visitors. On the homepage it links to settings; in settings
-/// it sits next to the proxy checkbox.
+/// Homepage warning plus its dismiss form. Settings renders the two pieces
+/// separately so the form is not nested inside the preferences form.
 pub fn firefox_media_warning(in_settings: bool) -> Markup {
+   html! {
+       (firefox_media_warning_body(in_settings))
+       (firefox_ignore_form(in_settings))
+   }
+}
+
+fn firefox_ignore_form(in_settings: bool) -> Markup {
+   let return_to = if in_settings { "/settings" } else { "/" };
+   html! {
+       form id="ignore-firefox-warning" method="post" action="/ignorefirefoxwarning" class="firefox-warning-ignore" {
+           input type="hidden" name="referer" value=(return_to);
+           script src="/js/firefoxWarning.js" defer {}
+       }
+   }
+}
+
+fn firefox_media_warning_body(in_settings: bool) -> Markup {
    html! {
        aside class="firefox-media-warning" {
            strong { "Firefox can block photos and videos." }
@@ -89,6 +106,7 @@ pub fn firefox_media_warning(in_settings: bool) -> Markup {
                    " and they load from this site instead."
                }
            }
+           button type="submit" form="ignore-firefox-warning" { "Ignore warning" }
        }
    }
 }
@@ -113,6 +131,9 @@ pub fn render_preferences_form(
                    p { "Customize your teapawt experience" }
                }
 
+               @if firefox {
+                   (firefox_ignore_form(true))
+               }
                form method="post" action="/saveprefs" autocomplete="off" class="preferences-form" id="saveprefs-form" {
                    input type="hidden" name="referer" value=(referer);
 
@@ -140,7 +161,7 @@ pub fn render_preferences_form(
                    div class="pref-section" data-section="media" {
                        legend { "Media" }
                        @if firefox {
-                           (firefox_media_warning(true))
+                           (firefox_media_warning_body(true))
                        }
                        div class="pref-grid" {
                            (gen_checkbox("proxyMedia", "Proxy media streaming through the server", prefs.proxy_media))

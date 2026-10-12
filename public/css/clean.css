@@ -1096,6 +1096,21 @@ input[type="text"], input[type="date"], input[type="number"], select {
 }
 .firefox-media-warning strong { display: block; margin-bottom: 4px; }
 .firefox-media-warning p { margin: 0; }
+.firefox-warning-ignore { display: none; }
+.firefox-media-warning button {
+  min-height: 0;
+  margin-top: 8px;
+  padding: 2px 8px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 650;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+.firefox-media-warning button:hover {
+  background: var(--accent);
+  color: var(--icon_text);
+}
 .preferences .firefox-media-warning { width: auto; margin: 0 0 8px; }
 
 .preferences-panel {
