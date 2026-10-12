@@ -67,12 +67,37 @@ fn gen_select(name: &str, label: &str, selected: &str, options: &[(&str, &str)])
    }
 }
 
-/// Render the preferences/settings form.
+/// Firefox Enhanced Tracking Protection classifies every `twimg.com` host as a
+/// social tracker, including image and video CDNs.
+pub fn is_firefox(user_agent: &str) -> bool {
+   let ua = user_agent.to_ascii_lowercase();
+   ua.contains("firefox/") || ua.contains("fxios/")
+}
+
+/// Shown to Firefox visitors. On the homepage it links to settings; in settings
+/// it sits next to the proxy checkbox.
+pub fn firefox_media_warning(in_settings: bool) -> Markup {
+   html! {
+       aside class="firefox-media-warning" {
+           strong { "Firefox can block photos and videos." }
+           p {
+               "Firefox's tracking protection lists pbs.twimg.com and video.twimg.com as social trackers, so pictures and video loaded directly from X get flagged or blocked. This is a Firefox bug, not the files themselves. "
+               @if in_settings {
+                   "Turn on “Proxy media streaming through the server” below and they load from this site instead."
+               } @else {
+                   a href="/settings" { "Turn on proxying media" }
+                   " and they load from this site instead."
+               }
+           }
+       }
+   }
+}
 pub fn render_preferences_form(
    prefs: &Prefs,
    themes: &[String],
    referer: &str,
    prefs_url: &str,
+   firefox: bool,
 ) -> Markup {
    html! {
        div class="overlay-panel preferences-panel" {
@@ -114,8 +139,11 @@ pub fn render_preferences_form(
                    // Media section
                    div class="pref-section" data-section="media" {
                        legend { "Media" }
+                       @if firefox {
+                           (firefox_media_warning(true))
+                       }
                        div class="pref-grid" {
-                           (gen_checkbox("proxyMedia", "Proxy media streaming through the server (might be slow)", prefs.proxy_media))
+                           (gen_checkbox("proxyMedia", "Proxy media streaming through the server", prefs.proxy_media))
                            (gen_checkbox("hlsPlayback", "Enable HLS video streaming (requires JavaScript)", prefs.hls_playback))
                            (gen_checkbox("mp4Playback", "Enable mp4 video playback", prefs.mp4_playback))
                            (gen_checkbox("muteVideos", "Mute videos by default", prefs.mute_videos))

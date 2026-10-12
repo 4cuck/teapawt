@@ -3,6 +3,7 @@
 use axum::{
    Router,
    extract::State,
+   http::HeaderMap,
    response::{Html, IntoResponse, Redirect},
    routing::get,
 };
@@ -73,8 +74,16 @@ pub fn router() -> Router<AppState> {
       .route("/help", get(|| async { Redirect::to("/about") }))
 }
 
-async fn home(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
+async fn home(
+   State(state): State<AppState>,
+   jar: CookieJar,
+   headers: HeaderMap,
+) -> impl IntoResponse {
    let prefs = Prefs::from_cookies(&jar, &state.config);
+   let firefox = headers
+      .get(axum::http::header::USER_AGENT)
+      .and_then(|value| value.to_str().ok())
+      .is_some_and(crate::views::preferences::is_firefox);
    let hub = html! {
        section class="landing-hub" aria-label="Popular profiles" {
            h2 { "Browse public profiles" }
@@ -95,9 +104,10 @@ async fn home(State(state): State<AppState>, jar: CookieJar) -> impl IntoRespons
            }
        }
    };
-   let content = html! {
-       (search_view::render_search_page(Some(hub)))
-   };
+   let notice = (firefox && !prefs.proxy_media).then(|| {
+      crate::views::preferences::firefox_media_warning(false)
+   });
+   let content = search_view::render_search_page(notice, Some(hub));
    let head = html! {
        meta property="og:type" content="website";
        script type="application/ld+json" {

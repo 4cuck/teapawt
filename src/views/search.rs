@@ -28,9 +28,12 @@ fn search_tab_url(query: &str, tab: &str, view: &str) -> String {
 }
 
 /// Render the empty search page (home search bar).
-pub fn render_search_page(extra: Option<Markup>) -> Markup {
+pub fn render_search_page(notice: Option<Markup>, extra: Option<Markup>) -> Markup {
    html! {
        section class="landing-page" aria-labelledby="landing-title" {
+           @if let Some(notice) = notice {
+               (notice)
+           }
            div class="landing-copy" {
                span class="landing-kicker" { "Private by default" }
                h1 id="landing-title" { "Find what people are talking about." }

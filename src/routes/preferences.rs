@@ -238,16 +238,21 @@ pub struct SettingsQuery {
 async fn settings(
    State(state): State<AppState>,
    jar: CookieJar,
+   headers: HeaderMap,
    Query(query): Query<SettingsQuery>,
 ) -> Result<Response> {
    let prefs = Prefs::from_cookies(&jar, &state.config);
    let themes = find_themes(&state.config.server.static_dir);
+   let firefox = headers
+      .get(axum::http::header::USER_AGENT)
+      .and_then(|value| value.to_str().ok())
+      .is_some_and(crate::views::preferences::is_firefox);
 
    let referer = local_redirect_target(query.referer.as_deref(), "/");
    let prefs_code = encode_prefs(&prefs, &state.config);
    let encoded_prefs = utf8_percent_encode(&prefs_code, NON_ALPHANUMERIC).to_string();
    let prefs_url = format!("{}/?prefs={encoded_prefs}", state.config.url_prefix());
-   let content = pref_view::render_preferences_form(&prefs, &themes, &referer, &prefs_url);
+   let content = pref_view::render_preferences_form(&prefs, &themes, &referer, &prefs_url, firefox);
    let markup = layout::PageLayout::new(&state.config, "Settings", content)
       .description("Customize your teapawt experience")
       .prefs(&prefs)

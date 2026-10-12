@@ -1083,6 +1083,21 @@ input[type="text"], input[type="date"], input[type="number"], select {
 }
 .landing-hub-more a { color: var(--accent); }
 
+.firefox-media-warning {
+  width: min(100%, 640px);
+  margin: 0 auto 18px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  color: var(--text);
+  text-align: left;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.firefox-media-warning strong { display: block; margin-bottom: 4px; }
+.firefox-media-warning p { margin: 0; }
+.preferences .firefox-media-warning { width: auto; margin: 0 0 8px; }
+
 .preferences-panel {
   position: relative;
   max-width: 600px;
@@ -1118,8 +1133,18 @@ input[type="text"], input[type="date"], input[type="number"], select {
   height: 17px;
 }
 .preferences .pref-input {
-  gap: 2px;
-  padding: 0 0 6px;
+  position: relative;
+  min-height: 22px;
+  margin-bottom: 6px;
+  padding: 0;
+  gap: 0;
+}
+.preferences .pref-input label {
+  display: block;
+  padding-right: 190px;
+  color: var(--text);
+  font-weight: 400;
+  line-height: 22px;
 }
 .preferences select,
 .preferences input[type="text"],
@@ -1127,13 +1152,16 @@ input[type="text"], input[type="date"], input[type="number"], select {
   min-height: 0;
   border-radius: 0;
 }
-.preferences select {
-  height: 22px;
-  padding: 0 4px;
-}
+.preferences select,
 .preferences input[type="text"] {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: auto;
+  max-width: 52%;
   height: 22px;
-  padding: 1px 4px;
+  margin: 0;
+  padding: 0 6px;
 }
 .preferences-actions { padding: 8px 0; background: transparent; }
 .preferences-actions button { padding: 3px 8px; }
