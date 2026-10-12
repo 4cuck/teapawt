@@ -1,13 +1,7 @@
-use std::{
-   borrow::Cow,
-   sync::LazyLock,
-};
+use std::{borrow::Cow, sync::LazyLock};
 
 use data_encoding::BASE64URL_NOPAD;
-use percent_encoding::{
-   NON_ALPHANUMERIC,
-   utf8_percent_encode,
-};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use regex::Regex;
 
 use crate::config::Config;

@@ -1,27 +1,21 @@
 use std::{
-   path::{
-      Path,
-      PathBuf,
-   },
+   path::{Path, PathBuf},
    sync::Arc,
    time::SystemTime,
 };
 
 use indexmap::IndexMap;
-use tokio::{
-   fs,
-   sync::RwLock,
-};
+use tokio::{fs, sync::RwLock};
 
 struct GifCacheEntry {
-   file_size:   u64,
+   file_size: u64,
    last_access: SystemTime,
 }
 
 pub struct GifCache {
-   dir:       PathBuf,
+   dir: PathBuf,
    max_bytes: u64,
-   entries:   Arc<RwLock<IndexMap<String, GifCacheEntry>>>,
+   entries: Arc<RwLock<IndexMap<String, GifCacheEntry>>>,
 }
 
 impl GifCache {
@@ -38,13 +32,16 @@ impl GifCache {
             && let Some(stem) = path.file_stem().and_then(|st| st.to_str())
             && let Ok(meta) = entry.metadata().await
          {
-            entries.insert(stem.to_owned(), GifCacheEntry {
-               file_size:   meta.len(),
-               last_access: meta
-                  .accessed()
-                  .or_else(|_| meta.modified())
-                  .unwrap_or_else(|_| SystemTime::now()),
-            });
+            entries.insert(
+               stem.to_owned(),
+               GifCacheEntry {
+                  file_size: meta.len(),
+                  last_access: meta
+                     .accessed()
+                     .or_else(|_| meta.modified())
+                     .unwrap_or_else(|_| SystemTime::now()),
+               },
+            );
          }
       }
 
@@ -95,10 +92,13 @@ impl GifCache {
       let file_size = data.len() as u64;
 
       let mut entries = self.entries.write().await;
-      entries.insert(hash.to_owned(), GifCacheEntry {
-         file_size,
-         last_access: SystemTime::now(),
-      });
+      entries.insert(
+         hash.to_owned(),
+         GifCacheEntry {
+            file_size,
+            last_access: SystemTime::now(),
+         },
+      );
       Self::evict(&self.dir, &mut entries, self.max_bytes).await;
       drop(entries);
 

@@ -1,19 +1,10 @@
 use super::tweet::parse_tweet_object;
 use crate::{
    api::schema::{
-      Entry,
-      Instruction,
-      InstructionType,
-      ListTimelineData,
-      SearchTimelineData,
-      UserTimelineData,
+      Entry, Instruction, InstructionType, ListTimelineData, SearchTimelineData, UserTimelineData,
    },
    error::Result,
-   types::{
-      Query,
-      Timeline,
-      Tweets,
-   },
+   types::{Query, Timeline, Tweets},
 };
 
 /// Parse a user timeline (tweets, media, tweets-and-replies).
@@ -41,7 +32,7 @@ pub fn parse_list_timeline(data: &ListTimelineData) -> Result<Timeline> {
    parse_timeline_instructions(instructions)
 }
 
-fn parse_timeline_instructions(raw_instructions: &[Instruction]) -> Result<Timeline> {
+pub(crate) fn parse_timeline_instructions(raw_instructions: &[Instruction]) -> Result<Timeline> {
    let mut tweets: Vec<Tweets> = Vec::new();
    let mut top_cursor = None;
    let mut bottom_cursor = None;
@@ -106,11 +97,11 @@ fn parse_timeline_instructions(raw_instructions: &[Instruction]) -> Result<Timel
    }
 
    Ok(Timeline {
-      content:   tweets,
-      top:       top_cursor,
-      bottom:    bottom_cursor,
+      content: tweets,
+      top: top_cursor,
+      bottom: bottom_cursor,
       beginning: false,
-      query:     Query::default(),
+      query: Query::default(),
    })
 }
 
@@ -195,10 +186,10 @@ pub fn parse_search_timeline(data: &SearchTimelineData) -> Timeline {
    }
 
    Timeline {
-      content:   tweets,
-      top:       None,
-      bottom:    bottom_cursor,
+      content: tweets,
+      top: None,
+      bottom: bottom_cursor,
       beginning: false,
-      query:     Query::default(),
+      query: Query::default(),
    }
 }

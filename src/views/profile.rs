@@ -1,32 +1,12 @@
-use maud::{
-   Markup,
-   PreEscaped,
-   html,
-};
+use maud::{Markup, PreEscaped, html};
 
-use super::timeline::{
-   render_timeline_tabs,
-   render_timeline_with_pinned_and_prefs,
-   tab_to_kind,
-};
+use super::timeline::{render_timeline_tabs, render_timeline_with_pinned_and_prefs, tab_to_kind};
 use crate::{
    config::Config,
-   types::{
-      GalleryPhoto,
-      Prefs,
-      Profile,
-      TimelineKind,
-      User,
-   },
+   types::{GalleryPhoto, Prefs, Profile, TimelineKind, User},
    utils::formatters,
    views::renderutils::{
-      gen_img,
-      get_avatar_class,
-      icon,
-      link_user,
-      parse_location,
-      render_bio_html,
-      short_link,
+      gen_img, get_avatar_class, icon, link_user, parse_location, render_bio_html, short_link,
       verified_icon,
    },
 };

@@ -1,16 +1,8 @@
-use std::{
-   fs,
-   net::IpAddr,
-   path::Path,
-   process::Command,
-};
+use std::{fs, net::IpAddr, path::Path, process::Command};
 
 use serde::Deserialize;
 
-use crate::error::{
-   Error,
-   Result,
-};
+use crate::error::{Error, Result};
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -24,11 +16,11 @@ pub enum GifTranscodingMode {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GifTranscodingConfig {
    #[serde(default)]
-   pub mode:            GifTranscodingMode,
+   pub mode: GifTranscodingMode,
    #[serde(default = "default_gif_cache_dir", rename = "cacheDir")]
-   pub cache_dir:       String,
+   pub cache_dir: String,
    #[serde(default = "default_gif_cache_max_mb", rename = "cacheMaxMb")]
-   pub cache_max_mb:    u64,
+   pub cache_max_mb: u64,
    #[serde(default, rename = "externalDomain")]
    pub external_domain: String,
 }
@@ -36,9 +28,9 @@ pub struct GifTranscodingConfig {
 impl Default for GifTranscodingConfig {
    fn default() -> Self {
       Self {
-         mode:            GifTranscodingMode::Local,
-         cache_dir:       default_gif_cache_dir(),
-         cache_max_mb:    default_gif_cache_max_mb(),
+         mode: GifTranscodingMode::Local,
+         cache_dir: default_gif_cache_dir(),
+         cache_max_mb: default_gif_cache_max_mb(),
          external_domain: String::new(),
       }
    }
@@ -61,39 +53,39 @@ const fn default_gif_cache_max_mb() -> u64 {
    reason = "config field in Config mirrors TOML structure"
 )]
 pub struct Config {
-   pub server:          ServerConfig,
-   pub cache:           CacheConfig,
-   pub config:          AppConfig,
+   pub server: ServerConfig,
+   pub cache: CacheConfig,
+   pub config: AppConfig,
    #[serde(default)]
-   pub preferences:     PreferencesConfig,
+   pub preferences: PreferencesConfig,
    #[serde(default, rename = "gifTranscoding")]
    pub gif_transcoding: GifTranscodingConfig,
    /// Precomputed `{scheme}://{hostname}` value set in `Config::load`.
    #[serde(skip)]
-   pub url_prefix:      String,
+   pub url_prefix: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
    #[serde(default = "default_hostname")]
-   pub hostname:             String,
+   pub hostname: String,
    #[serde(default = "default_title")]
-   pub title:                String,
+   pub title: String,
    #[serde(default = "default_address")]
-   pub address:              String,
+   pub address: String,
    #[serde(default = "default_port")]
-   pub port:                 u16,
+   pub port: u16,
    #[serde(default, rename = "publicPort")]
-   pub public_port:          Option<u16>,
+   pub public_port: Option<u16>,
    #[serde(default)]
-   pub https:                bool,
+   pub https: bool,
    #[serde(
       default = "default_http_max_connections",
       rename = "httpMaxConnections"
    )]
    pub http_max_connections: u32,
    #[serde(default = "default_static_dir", rename = "staticDir")]
-   pub static_dir:           String,
+   pub static_dir: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,9 +93,9 @@ pub struct CacheConfig {
    #[serde(default = "default_list_minutes", rename = "listMinutes")]
    pub list_minutes: u64,
    #[serde(default = "default_rss_minutes", rename = "rssMinutes")]
-   pub rss_minutes:  u64,
+   pub rss_minutes: u64,
    #[serde(default = "default_max_entries", rename = "maxEntries")]
-   pub max_entries:  usize,
+   pub max_entries: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -113,71 +105,71 @@ pub struct CacheConfig {
 )]
 pub struct AppConfig {
    #[serde(rename = "hmacKey")]
-   pub hmac_key:                String,
+   pub hmac_key: String,
    #[serde(default, rename = "base64Media")]
-   pub base64_media:            bool,
+   pub base64_media: bool,
    #[serde(default = "default_true", rename = "enableRSS")]
-   pub enable_rss:              bool,
+   pub enable_rss: bool,
    #[serde(default = "default_client_budget", rename = "clientBudget")]
-   pub client_budget:           bool,
+   pub client_budget: bool,
    #[serde(default, rename = "trustedProxies")]
-   pub trusted_proxies:         Vec<String>,
+   pub trusted_proxies: Vec<String>,
    #[serde(default, rename = "rateLimitedMessage")]
-   pub rate_limited_message:    Vec<String>,
+   pub rate_limited_message: Vec<String>,
    #[serde(default, rename = "clientBudgetMessage")]
-   pub client_budget_message:   Vec<String>,
+   pub client_budget_message: Vec<String>,
    #[serde(default, rename = "internalErrorMessage")]
-   pub internal_error_message:  Vec<String>,
+   pub internal_error_message: Vec<String>,
    #[serde(default, rename = "enableDebug")]
-   pub enable_debug:            bool,
+   pub enable_debug: bool,
    #[serde(default, rename = "debugToken")]
-   pub debug_token:             String,
+   pub debug_token: String,
    #[serde(default)]
-   pub proxy:                   String,
+   pub proxy: String,
    #[serde(default, rename = "proxyAuth")]
-   pub proxy_auth:              String,
+   pub proxy_auth: String,
    #[serde(default, rename = "apiProxy")]
-   pub api_proxy:               String,
+   pub api_proxy: String,
    /// `host:port:user:pass` SOCKS5 list used for X API calls.
    #[serde(default, rename = "socksProxiesFile")]
-   pub socks_proxies_file:      String,
+   pub socks_proxies_file: String,
    /// Exits used in turn, one per request, only after the direct address
    /// gets an HTML 429. Lines are `http://user:pass@host:port`,
    /// `socks5h://user:pass@host:port`, or `host:port:user:pass` (HTTP).
    #[serde(default, rename = "fallbackProxiesFile")]
-   pub fallback_proxies_file:   String,
+   pub fallback_proxies_file: String,
    /// session id → SOCKS5 port pins so each account keeps the same exit IP.
    #[serde(default, rename = "sessionProxiesFile")]
-   pub session_proxies_file:    String,
+   pub session_proxies_file: String,
    #[serde(default, rename = "disableTid")]
-   pub disable_tid:             bool,
+   pub disable_tid: bool,
    /// Read about-account data from X-Posed's public cache before asking X.
    #[serde(default, rename = "xPosedCommunityCache")]
    pub x_posed_community_cache: bool,
    #[serde(default = "default_max_concurrent_reqs", rename = "maxConcurrentReqs")]
-   pub max_concurrent_reqs:     u32,
+   pub max_concurrent_reqs: u32,
    #[serde(default = "default_paid_emoji", rename = "paidEmoji")]
-   pub paid_emoji:              String,
+   pub paid_emoji: String,
    #[serde(default = "default_ai_emoji", rename = "aiEmoji")]
-   pub ai_emoji:                String,
+   pub ai_emoji: String,
    /// Kagi session token for server-side translation (inline value).
    #[serde(default, rename = "kagiToken")]
-   pub kagi_token:              String,
+   pub kagi_token: String,
    /// Path to a file containing the Kagi session token.
    #[serde(default, rename = "kagiTokenFile")]
-   pub kagi_token_file:         String,
+   pub kagi_token_file: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct PreferencesConfig {
    #[serde(default = "default_theme")]
-   pub theme:           String,
+   pub theme: String,
    #[serde(default, rename = "replaceTwitter")]
    pub replace_twitter: String,
    #[serde(default, rename = "replaceYouTube")]
    pub replace_youtube: String,
    #[serde(default, rename = "replaceReddit")]
-   pub replace_reddit:  String,
+   pub replace_reddit: String,
    #[serde(default, rename = "infiniteScroll")]
    pub infinite_scroll: bool,
 }

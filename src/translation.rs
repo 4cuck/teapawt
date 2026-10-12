@@ -1,21 +1,11 @@
-use std::{
-   collections::VecDeque,
-   time::Duration,
-};
+use std::{collections::VecDeque, time::Duration};
 
 use tokio::{
-   sync::{
-      Mutex,
-      Semaphore,
-      SemaphorePermit,
-   },
+   sync::{Mutex, Semaphore, SemaphorePermit},
    time::Instant,
 };
 
-use crate::error::{
-   Error,
-   Result,
-};
+use crate::error::{Error, Result};
 
 const MAX_TRANSLATIONS_PER_WINDOW: usize = 60;
 const WINDOW: Duration = Duration::from_secs(60);
@@ -23,14 +13,14 @@ const MAX_CONCURRENT_TRANSLATIONS: usize = 2;
 
 /// Global guard for translation backends.
 pub struct TranslationLimiter {
-   recent:     Mutex<VecDeque<Instant>>,
+   recent: Mutex<VecDeque<Instant>>,
    concurrent: Semaphore,
 }
 
 impl TranslationLimiter {
    pub fn new() -> Self {
       Self {
-         recent:     Mutex::new(VecDeque::new()),
+         recent: Mutex::new(VecDeque::new()),
          concurrent: Semaphore::new(MAX_CONCURRENT_TRANSLATIONS),
       }
    }

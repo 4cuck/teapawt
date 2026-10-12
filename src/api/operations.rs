@@ -8,37 +8,21 @@
 //! first read and the operations the web client does not have.
 
 use std::{
-   collections::{
-      BTreeMap,
-      HashMap,
-      HashSet,
-   },
-   sync::{
-      Arc,
-      LazyLock,
-   },
+   collections::{BTreeMap, HashMap, HashSet},
+   sync::{Arc, LazyLock},
 };
 
 use axum::http::HeaderMap;
 use regex::Regex;
-use serde::{
-   Deserialize,
-   Serialize,
-};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
    fs,
-   sync::{
-      RwLock,
-      Semaphore,
-   },
+   sync::{RwLock, Semaphore},
    task::JoinSet,
 };
 
-use super::http::{
-   Egress,
-   HttpClient,
-};
+use super::http::{Egress, HttpClient};
 
 /// Operations sent from cookie sessions that the web client also sends.
 /// `UserResultByIdQuery`, `MediaTimelineV2`, `AboutAccountQuery` and the
@@ -58,6 +42,9 @@ const WEB_OPERATIONS: &[&str] = &[
    "ListLatestTweetsTimeline",
    "ListMembers",
    "AudioSpaceById",
+   "CommunityQuery",
+   "CommunityTweetsTimeline",
+   "CommunityMediaTimeline",
 ];
 
 const CLIENT_WEB: &str = "https://abs.twimg.com/responsive-web/client-web";
@@ -86,26 +73,26 @@ static CHUNK_ENTRY_RE: LazyLock<Regex> =
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Operation {
-   id:       String,
+   id: String,
    /// Feature names, in the order the web client sends them.
-   names:    Vec<String>,
+   names: Vec<String>,
    /// The `features` query value: `names` with the homepage's values.
    #[serde(default)]
    features: String,
    /// Lazy chunk id and URL it was found in. `None` means the main bundle.
    #[serde(default, skip_serializing_if = "Option::is_none")]
-   chunk:    Option<(String, String)>,
+   chunk: Option<(String, String)>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Book {
    /// Main bundle the entries were read from.
-   bundle:     String,
+   bundle: String,
    operations: BTreeMap<String, Operation>,
    /// Operations no chunk of this build had. They are not searched for again
    /// until X deploys.
    #[serde(default)]
-   absent:     Vec<String>,
+   absent: Vec<String>,
 }
 
 /// Live query ids and features, shared by every request.
@@ -118,8 +105,8 @@ pub struct Operations {
 impl Operations {
    /// Restore what an earlier run read, so a restart starts on live ids.
    pub fn load() -> Self {
-      let path = std::env::var("TEAPOT_GRAPHQL_OPS_FILE")
-         .unwrap_or_else(|_| "graphql-ops.json".to_owned());
+      let path =
+         std::env::var("TEAPOT_GRAPHQL_OPS_FILE").unwrap_or_else(|_| "graphql-ops.json".to_owned());
       let book = std::fs::read_to_string(&path)
          .ok()
          .and_then(|text| serde_json::from_str(&text).ok())
@@ -133,19 +120,25 @@ impl Operations {
    /// `endpoint` (`id/Name`) and its features as the web client sends them
    /// now, or `None` while this operation has not been read from X's client.
    pub async fn resolve(&self, endpoint: &str) -> Option<(String, String)> {
-      let name = endpoint
-         .rsplit_once('/')
-         .map_or(endpoint, |(_, name)| name);
+      let name = endpoint.rsplit_once('/').map_or(endpoint, |(_, name)| name);
       let book = self.book.read().await;
       let operation = book.operations.get(name)?;
-      Some((format!("{}/{name}", operation.id), operation.features.clone()))
+      Some((
+         format!("{}/{name}", operation.id),
+         operation.features.clone(),
+      ))
    }
 
    /// Read the operations from X's client, given the logged-in homepage.
    ///
    /// Script chunks are fetched only when X has deployed since the last read;
    /// otherwise only the feature values are refreshed.
-   pub async fn learn(&self, scripts: &HttpClient, egress: &Egress, home: &str) -> Result<(), String> {
+   pub async fn learn(
+      &self,
+      scripts: &HttpClient,
+      egress: &Egress,
+      home: &str,
+   ) -> Result<(), String> {
       let bundle = MAIN_BUNDLE_RE
          .find(home)
          .map(|found| found.as_str().to_owned())
@@ -155,7 +148,11 @@ impl Operations {
 
       let (previous, mut absent, same_build) = {
          let book = self.book.read().await;
-         (book.operations.clone(), book.absent.clone(), book.bundle == bundle)
+         (
+            book.operations.clone(),
+            book.absent.clone(),
+            book.bundle == bundle,
+         )
       };
       let mut operations = previous.clone();
 
@@ -176,14 +173,12 @@ impl Operations {
 
       // A lazy entry stands while its chunk is the same file.
       let mut hint = HashSet::new();
-      operations.retain(|_, operation| {
-         match &operation.chunk {
-            None => true,
-            Some((id, url)) => {
-               hint.insert(id.clone());
-               chunks.get(id) == Some(url)
-            },
-         }
+      operations.retain(|_, operation| match &operation.chunk {
+         None => true,
+         Some((id, url)) => {
+            hint.insert(id.clone());
+            chunks.get(id) == Some(url)
+         },
       });
 
       let missing: Vec<&str> = WEB_OPERATIONS
@@ -386,7 +381,10 @@ fn feature_values(home: &str) -> Option<HashMap<String, bool>> {
       .ok()?;
    let switches = state.get("featureSwitch")?;
    let mut values = HashMap::new();
-   for config in [switches.get("defaultConfig"), switches.pointer("/user/config")] {
+   for config in [
+      switches.get("defaultConfig"),
+      switches.pointer("/user/config"),
+   ] {
       let Some(Value::Object(config)) = config else {
          continue;
       };
@@ -432,11 +430,14 @@ mod tests {
       let operations = operations_in(MAIN);
       let search = &operations["SearchTimeline"];
       assert_eq!(search.id, "ph2fARFabkwfxqmSKQ1OPw");
-      assert_eq!(search.names, vec![
-         "rweb_video_screen_enabled",
-         "rweb_conversational_replies_downvote_enabled",
-         "articles_preview_enabled",
-      ]);
+      assert_eq!(
+         search.names,
+         vec![
+            "rweb_video_screen_enabled",
+            "rweb_conversational_replies_downvote_enabled",
+            "articles_preview_enabled",
+         ]
+      );
       assert!(operations["UserByScreenName"].names.is_empty());
    }
 

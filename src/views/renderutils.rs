@@ -1,30 +1,14 @@
-use std::{
-   borrow::Cow,
-   fmt::Write as _,
-};
+use std::{borrow::Cow, fmt::Write as _};
 
-use maud::{
-   Markup,
-   PreEscaped,
-   html,
-};
+use maud::{Markup, PreEscaped, html};
 
 use crate::{
    api::schema::CommunityNote,
    config::Config,
-   types::{
-      Prefs,
-      Tweet,
-      User,
-      VerifiedType,
-   },
+   types::{Prefs, Tweet, User, VerifiedType},
    utils::{
-      entity_expander::{
-         expand_with_regex,
-         short_url,
-      },
-      formatters,
-      html_escape,
+      entity_expander::{expand_with_regex, short_url},
+      formatters, html_escape,
    },
 };
 
@@ -295,7 +279,7 @@ mod tests {
    #[test]
    fn community_note_escapes_plain_text() {
       let note = CommunityNote {
-         text:  "<img src=x onerror=alert(1)>".to_owned(),
+         text: "<img src=x onerror=alert(1)>".to_owned(),
          links: Vec::new(),
       };
 
@@ -307,7 +291,7 @@ mod tests {
    #[test]
    fn community_note_escapes_text_around_links() {
       let note = CommunityNote {
-         text:  "<b>link</b>".to_owned(),
+         text: "<b>link</b>".to_owned(),
          links: vec![(3, 7, r#"https://example.com/?q="x""#.to_owned())],
       };
 

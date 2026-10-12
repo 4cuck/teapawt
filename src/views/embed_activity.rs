@@ -1,9 +1,5 @@
 use std::{
-   fmt::{
-      self,
-      Display,
-      Formatter,
-   },
+   fmt::{self, Display, Formatter},
    str::FromStr,
 };
 
@@ -937,10 +933,7 @@ pub fn build_activity_pub_with_reply(
 
 #[cfg(test)]
 mod tests {
-   use super::{
-      ActivityId,
-      application_name,
-   };
+   use super::{ActivityId, application_name};
 
    #[test]
    fn activity_id_keeps_the_photo_across_discord_followup() {

@@ -3,38 +3,18 @@
 use std::net::SocketAddr;
 
 use axum::{
-   extract::{
-      ConnectInfo,
-      Path,
-      Request,
-      State,
-   },
-   http::{
-      HeaderValue,
-      header,
-   },
+   extract::{ConnectInfo, Path, Request, State},
+   http::{HeaderValue, header},
    middleware::Next,
-   response::{
-      IntoResponse as _,
-      Redirect,
-      Response,
-   },
+   response::{IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::{
    CookieJar,
-   cookie::{
-      Cookie,
-      SameSite,
-   },
+   cookie::{Cookie, SameSite},
 };
 use time::Duration;
 
-use crate::{
-   AppState,
-   api::budget,
-   error::Error,
-   types::Prefs,
-};
+use crate::{AppState, api::budget, error::Error, types::Prefs};
 
 /// Refuse any route whose `{id}` cannot be a snowflake before a handler spends
 /// cookies, prefs or a session on it.
@@ -172,11 +152,7 @@ mod tests {
    use axum::{
       Router,
       body::Body,
-      http::{
-         Request,
-         StatusCode,
-         header,
-      },
+      http::{Request, StatusCode, header},
       middleware,
       response::IntoResponse,
       routing::get,
@@ -185,10 +161,7 @@ mod tests {
    use http_body_util::BodyExt as _;
    use tower::ServiceExt as _;
 
-   use super::{
-      prefs_middleware,
-      snowflake_guard,
-   };
+   use super::{prefs_middleware, snowflake_guard};
 
    async fn preference_value(jar: CookieJar) -> impl IntoResponse {
       jar.get("mp4Playback")

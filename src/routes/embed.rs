@@ -2,22 +2,9 @@ use std::str::FromStr;
 
 use axum::{
    Router,
-   extract::{
-      Path,
-      Query,
-      State,
-   },
-   http::{
-      HeaderMap,
-      header,
-   },
-   response::{
-      Html,
-      IntoResponse as _,
-      Json,
-      Redirect,
-      Response,
-   },
+   extract::{Path, Query, State},
+   http::{HeaderMap, header},
+   response::{Html, IntoResponse as _, Json, Redirect, Response},
    routing::get,
 };
 use maud::html;
@@ -28,37 +15,24 @@ use axum_extra::extract::CookieJar;
 use super::helpers::get_cached_translation;
 use crate::{
    AppState,
-   cache::{
-      keys as cache_keys,
-      ttl,
-   },
-   error::{
-      Error,
-      Result,
-   },
-   types::{
-      Conversation,
-      Prefs,
-   },
+   cache::{keys as cache_keys, ttl},
+   error::{Error, Result},
+   types::{Conversation, Prefs},
    utils::formatters::format_relative_time,
-   views::{
-      embed as embed_view,
-      embed::ActivityId,
-      layout::strip_html,
-   },
+   views::{embed as embed_view, embed::ActivityId, layout::strip_html},
 };
 
 #[derive(Debug, Deserialize)]
 pub struct OEmbedQuery {
-   pub text:     Option<String>,
-   pub author:   Option<String>,
-   pub status:   Option<String>,
+   pub text: Option<String>,
+   pub author: Option<String>,
+   pub status: Option<String>,
    pub provider: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct StandardOEmbedQuery {
-   pub url:      String,
+   pub url: String,
    #[serde(default)]
    pub maxwidth: Option<u32>,
 }
@@ -107,12 +81,8 @@ async fn tweet_embed(
       .get(header::USER_AGENT)
       .and_then(|value| value.to_str().ok())
       .is_some_and(|user_agent| user_agent.contains("Discordbot"));
-   let markup = embed_view::render_tweet_embed(
-      &tweet,
-      &state.config,
-      discord_activity,
-      prefs.proxy_media,
-   );
+   let markup =
+      embed_view::render_tweet_embed(&tweet, &state.config, discord_activity, prefs.proxy_media);
    Ok(Html(markup.into_string()).into_response())
 }
 
@@ -243,14 +213,14 @@ async fn oembed(
 ) -> Result<Response> {
    #[derive(serde::Serialize)]
    struct OEmbedData {
-      author_name:   String,
-      author_url:    String,
+      author_name: String,
+      author_url: String,
       provider_name: String,
-      provider_url:  String,
-      title:         &'static str,
+      provider_url: String,
+      title: &'static str,
       #[serde(rename = "type")]
-      kind:          &'static str,
-      version:       &'static str,
+      kind: &'static str,
+      version: &'static str,
    }
 
    let text = query.text.unwrap_or_default();
@@ -261,15 +231,15 @@ async fn oembed(
    let author_url = format!("https://x.com/{author}/status/{status}");
 
    let oembed = OEmbedData {
-      author_name:   text,
-      author_url:    author_url.clone(),
+      author_name: text,
+      author_url: author_url.clone(),
       provider_name: provider
          .clone()
          .unwrap_or_else(|| state.config.server.title.clone()),
-      provider_url:  provider.map_or_else(|| state.config.url_prefix().to_owned(), |_| author_url),
-      title:         "Embed",
-      kind:          "rich",
-      version:       "1.0",
+      provider_url: provider.map_or_else(|| state.config.url_prefix().to_owned(), |_| author_url),
+      title: "Embed",
+      kind: "rich",
+      version: "1.0",
    };
 
    Ok((
@@ -281,18 +251,18 @@ async fn oembed(
 
 #[derive(serde::Serialize)]
 struct StandardOEmbed {
-   version:       &'static str,
+   version: &'static str,
    #[serde(rename = "type")]
-   kind:          &'static str,
-   author_name:   String,
-   author_url:    String,
+   kind: &'static str,
+   author_name: String,
+   author_url: String,
    provider_name: String,
-   provider_url:  String,
-   html:          String,
-   width:         u32,
+   provider_url: String,
+   html: String,
+   width: u32,
    #[serde(skip_serializing_if = "Option::is_none")]
-   height:        Option<u32>,
-   cache_age:     u32,
+   height: Option<u32>,
+   cache_age: u32,
 }
 
 /// Standard oEmbed endpoint: `/oembed?url=https://teapawt.example.com/user/status/123`.

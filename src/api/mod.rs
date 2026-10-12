@@ -8,16 +8,14 @@ pub mod http;
 mod operations;
 mod parser;
 mod proxy_pool;
+pub mod schema;
 mod search_check;
 mod search_denylist;
-pub mod schema;
 mod tid;
 
 pub use auth::*;
 pub use client::*;
 pub use http::HttpClient;
-pub use proxy_pool::{
-   ProxyPool,
-   load_fallback_proxies,
-};
+pub use parser::CommunityInfo;
+pub use proxy_pool::{ProxyPool, load_fallback_proxies};
 pub use tid::*;

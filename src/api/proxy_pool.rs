@@ -4,41 +4,24 @@
 //! stable across restarts. The pin file stores only session id → port; secrets
 //! stay in the proxy list.
 
-use std::{
-   collections::BTreeMap,
-   net::IpAddr,
-   path::Path,
-   time::Duration,
-};
+use std::{collections::BTreeMap, net::IpAddr, path::Path, time::Duration};
 
 use tokio::{
    fs,
-   net::{
-      TcpStream,
-      lookup_host,
-   },
+   net::{TcpStream, lookup_host},
    process::Command,
    task::JoinSet,
-   time::{
-      Instant,
-      timeout,
-   },
+   time::{Instant, timeout},
 };
 
-use super::http::{
-   ProxyConfig,
-   ProxyKind,
-};
+use super::http::{ProxyConfig, ProxyKind};
 use crate::{
    config::Config,
-   error::{
-      Error,
-      Result,
-   },
+   error::{Error, Result},
 };
 
 struct Endpoint {
-   port:     u16,
+   port: u16,
    username: String,
    password: String,
 }
@@ -46,8 +29,8 @@ struct Endpoint {
 /// Resolved SOCKS5 endpoints plus the session→port map.
 pub struct ProxyPool {
    connect_host: String,
-   endpoints:    Vec<Endpoint>,
-   pins:         BTreeMap<i64, u16>,
+   endpoints: Vec<Endpoint>,
+   pins: BTreeMap<i64, u16>,
 }
 
 impl ProxyPool {
@@ -113,8 +96,11 @@ impl ProxyPool {
 
    /// Assign a stable port to every session and rewrite the pin file.
    pub async fn bind_sessions(mut self, session_ids: &[i64], config: &Config) -> Result<Self> {
-      let valid: std::collections::HashSet<u16> =
-         self.endpoints.iter().map(|endpoint| endpoint.port).collect();
+      let valid: std::collections::HashSet<u16> = self
+         .endpoints
+         .iter()
+         .map(|endpoint| endpoint.port)
+         .collect();
       self.pins.retain(|_, port| valid.contains(port));
 
       for id in session_ids {
@@ -164,9 +150,9 @@ impl ProxyPool {
          .find(|endpoint| endpoint.port == port)
          .unwrap_or(&self.endpoints[0]);
       ProxyConfig {
-         host:     self.connect_host.clone(),
-         port:     endpoint.port,
-         kind:     ProxyKind::Socks5,
+         host: self.connect_host.clone(),
+         port: endpoint.port,
+         kind: ProxyKind::Socks5,
          username: Some(endpoint.username.clone()),
          password: Some(endpoint.password.clone()),
       }
@@ -222,11 +208,9 @@ pub async fn load_fallback_proxies(path: &str) -> Result<Vec<ProxyConfig>> {
    };
    let proxies = parsed
       .into_iter()
-      .map(|entry| {
-         ProxyConfig {
-            host: gateway.clone(),
-            ..entry
-         }
+      .map(|entry| ProxyConfig {
+         host: gateway.clone(),
+         ..entry
       })
       .collect::<Vec<_>>();
    tracing::info!(
@@ -256,7 +240,15 @@ fn parse_fallback_line(line: &str) -> Option<ProxyConfig> {
          if host.is_empty() || username.is_empty() || password.is_empty() || port == 0 {
             return None;
          }
-         (kind, (host.to_owned(), port, username.to_owned(), password.to_owned()))
+         (
+            kind,
+            (
+               host.to_owned(),
+               port,
+               username.to_owned(),
+               password.to_owned(),
+            ),
+         )
       },
       None => (ProxyKind::Http, parse_proxy_line(line)?),
    };
@@ -335,12 +327,10 @@ async fn load_pins(path: &str) -> BTreeMap<i64, u16> {
       return BTreeMap::new();
    }
    match fs::read_to_string(path).await {
-      Ok(content) => {
-         serde_json::from_str(&content).unwrap_or_else(|err| {
-            tracing::warn!("Ignoring unreadable session proxy pins: {err}");
-            BTreeMap::new()
-         })
-      },
+      Ok(content) => serde_json::from_str(&content).unwrap_or_else(|err| {
+         tracing::warn!("Ignoring unreadable session proxy pins: {err}");
+         BTreeMap::new()
+      }),
       Err(_) => BTreeMap::new(),
    }
 }

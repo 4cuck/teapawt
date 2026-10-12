@@ -1,20 +1,9 @@
 use axum::{
    Router,
    body::Body,
-   extract::{
-      Path,
-      State,
-   },
-   http::{
-      HeaderMap,
-      StatusCode,
-      Uri,
-      header,
-   },
-   response::{
-      IntoResponse as _,
-      Response,
-   },
+   extract::{Path, State},
+   http::{HeaderMap, StatusCode, Uri, header},
+   response::{IntoResponse as _, Response},
    routing::get,
 };
 use http_body_util::Limited;
@@ -22,18 +11,9 @@ use tokio::fs;
 
 use crate::{
    AppState,
-   error::{
-      Error,
-      Result,
-   },
-   types::{
-      CLOUDFLARE_VIDEO_CACHE_BYTES,
-      VIDEO_CACHE_LIMIT_MESSAGE,
-   },
-   utils::{
-      formatters,
-      hmac,
-   },
+   error::{Error, Result},
+   types::{CLOUDFLARE_VIDEO_CACHE_BYTES, VIDEO_CACHE_LIMIT_MESSAGE},
+   utils::{formatters, hmac},
 };
 
 const MAX_IMAGE_BYTES: usize = 25 * 1024 * 1024;
@@ -327,7 +307,7 @@ fn validate_media_url(url: &str, kind: MediaKind) -> Result<()> {
       MediaKind::Image => {
          (is_twimg_host(&host) && host != "video.twimg.com") || is_pscp_image_host(&host)
       },
-      MediaKind::Video => host == "video.twimg.com",
+      MediaKind::Video => host == "video.twimg.com" || is_pscp_image_host(&host),
    };
    if allowed {
       Ok(())

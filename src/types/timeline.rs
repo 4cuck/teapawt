@@ -1,10 +1,4 @@
-use super::{
-   GalleryPhoto,
-   PhotoRail,
-   Query,
-   Tweet,
-   User,
-};
+use super::{GalleryPhoto, PhotoRail, Query, Tweet, User};
 
 /// Thumbnails shown in a profile header.
 const PHOTO_RAIL_LEN: usize = 10;
@@ -24,19 +18,19 @@ pub enum TimelineKind {
 /// Generic paginated result.
 #[derive(Debug, Clone, Default)]
 pub struct PaginatedResult<T> {
-   pub content:   Vec<T>,
-   pub top:       Option<String>,
-   pub bottom:    Option<String>,
+   pub content: Vec<T>,
+   pub top: Option<String>,
+   pub bottom: Option<String>,
    pub beginning: bool,
-   pub query:     Query,
+   pub query: Query,
 }
 
 /// A chain of tweets (for conversation threads).
 #[derive(Debug, Clone, Default)]
 pub struct Chain {
-   pub content:  Tweets,
+   pub content: Tweets,
    pub has_more: bool,
-   pub cursor:   Option<String>,
+   pub cursor: Option<String>,
 }
 
 impl Chain {
@@ -48,9 +42,9 @@ impl Chain {
 /// A conversation view (tweet + context + replies).
 #[derive(Debug, Clone, Default)]
 pub struct Conversation {
-   pub tweet:   Tweet,
-   pub before:  Chain,
-   pub after:   Chain,
+   pub tweet: Tweet,
+   pub before: Chain,
+   pub after: Chain,
    pub replies: PaginatedResult<Chain>,
 }
 
@@ -63,8 +57,11 @@ impl Timeline {
    /// Used when the profile timeline is served from `UserTweetsAndReplies`,
    /// which mixes those replies into the posts tab.
    pub fn keep_posts(&mut self) {
-      self.content
-         .retain(|group| group.first().is_none_or(|tweet| !tweet.replies_to_someone_else()));
+      self.content.retain(|group| {
+         group
+            .first()
+            .is_none_or(|tweet| !tweet.replies_to_someone_else())
+      });
    }
 
    /// One thumbnail per post of a media timeline: first photo, else the video,
@@ -83,9 +80,9 @@ impl Timeline {
             .filter(|url| !url.is_empty());
          if let Some(url) = url {
             photos.push(GalleryPhoto {
-               url:      url.to_owned(),
+               url: url.to_owned(),
                tweet_id: tweet.id.to_string(),
-               color:    String::new(),
+               color: String::new(),
             });
             if photos.len() >= PHOTO_RAIL_LEN {
                break;
@@ -99,20 +96,20 @@ impl Timeline {
 /// User profile with tweets and photo rail.
 #[derive(Debug, Clone, Default)]
 pub struct Profile {
-   pub user:       User,
+   pub user: User,
    pub photo_rail: PhotoRail,
-   pub pinned:     Option<Tweet>,
-   pub tweets:     Timeline,
+   pub pinned: Option<Tweet>,
+   pub tweets: Timeline,
    /// The media page the rail was cut from, when this profile had to fetch
    /// one. Handed to the caller so the media tab can be served from it; not
    /// part of the cached profile.
-   pub media:      Option<Timeline>,
+   pub media: Option<Timeline>,
 }
 
 /// Edit history for a tweet.
 #[derive(Debug, Clone, Default)]
 pub struct EditHistory {
-   pub latest:  Tweet,
+   pub latest: Tweet,
    pub history: Tweets,
 }
 
@@ -126,7 +123,9 @@ mod tests {
             username: author.to_owned(),
             ..User::default()
          },
-         reply: (!reply_to.is_empty()).then(|| vec![reply_to.to_owned()]).unwrap_or_default(),
+         reply: (!reply_to.is_empty())
+            .then(|| vec![reply_to.to_owned()])
+            .unwrap_or_default(),
          text: "x".to_owned(),
          ..Tweet::default()
       }
@@ -152,20 +151,20 @@ mod tests {
 /// Twitter list.
 #[derive(Debug, Clone, Default)]
 pub struct List {
-   pub id:          String,
-   pub name:        String,
-   pub user_id:     String,
-   pub username:    String,
+   pub id: String,
+   pub name: String,
+   pub user_id: String,
+   pub username: String,
    pub description: String,
-   pub members:     i32,
+   pub members: i32,
    pub subscribers: i32,
-   pub banner:      String,
+   pub banner: String,
    /// Custom list image. Empty when X would show a colored list icon instead.
-   pub cover:       String,
+   pub cover: String,
    /// Short line X already formatted, such as "73 members".
    pub members_text: String,
    /// Short line X already formatted, such as "587 followers including @name".
-   pub followers:   String,
+   pub followers: String,
    /// Member photos shown beside the follower line.
-   pub pictures:    Vec<String>,
+   pub pictures: Vec<String>,
 }

@@ -1,48 +1,19 @@
-use std::{
-   any::Any,
-   collections::BTreeMap,
-   future::Future,
-   iter,
-   slice,
-   sync::LazyLock,
-};
+use std::{any::Any, collections::BTreeMap, future::Future, iter, slice, sync::LazyLock};
 
 use axum::{
-   http::{
-      StatusCode,
-      header,
-   },
-   response::{
-      Html,
-      IntoResponse as _,
-      Response,
-   },
+   http::{StatusCode, header},
+   response::{Html, IntoResponse as _, Response},
 };
 
 use tokio::sync::Semaphore;
 
 use crate::{
    AppState,
-   cache::{
-      Hit,
-      keys as cache_keys,
-      ttl,
-   },
+   cache::{Hit, keys as cache_keys, ttl},
    config::Config,
-   error::{
-      Error,
-      Result,
-   },
+   error::{Error, Result},
    types::{
-      AccountContext,
-      Conversation,
-      PhotoRail,
-      Profile,
-      Timeline,
-      Translation,
-      Tweet,
-      Tweets,
-      User,
+      AccountContext, Conversation, PhotoRail, Profile, Timeline, Translation, Tweet, Tweets, User,
    },
    views::layout,
 };
@@ -53,7 +24,7 @@ const PREFETCH_PROFILES: usize = 4;
 
 #[derive(Clone)]
 struct CachedRss {
-   body:   String,
+   body: String,
    min_id: Option<i64>,
 }
 
@@ -86,7 +57,9 @@ pub fn user_hint(state: &AppState, username: &str) -> Option<User> {
    if let Some(Hit::Fresh(user) | Hit::Stale(user)) = state.cache.lookup(&key) {
       return Some(user);
    }
-   let id = state.cache.get::<String>(&cache_keys::username_id(username))?;
+   let id = state
+      .cache
+      .get::<String>(&cache_keys::username_id(username))?;
    Some(User {
       id,
       username: username.to_owned(),
@@ -99,9 +72,11 @@ pub fn remember_user_id(state: &AppState, user: &User) {
    if user.id.is_empty() || user.username.is_empty() {
       return;
    }
-   state
-      .cache
-      .set(&cache_keys::user_id(&user.id), &user.username, ttl::USER_ID_MAPPING);
+   state.cache.set(
+      &cache_keys::user_id(&user.id),
+      &user.username,
+      ttl::USER_ID_MAPPING,
+   );
    state.cache.set(
       &cache_keys::username_id(&user.username),
       &user.id,
@@ -115,9 +90,12 @@ pub fn store_user(state: &AppState, user: &User) {
    if user.id.is_empty() || user.username.is_empty() {
       return;
    }
-   state
-      .cache
-      .set_swr(&cache_keys::user(&user.username), user, ttl::DEFAULT, ttl::DEFAULT_STALE);
+   state.cache.set_swr(
+      &cache_keys::user(&user.username),
+      user,
+      ttl::DEFAULT,
+      ttl::DEFAULT_STALE,
+   );
 }
 
 /// Store a first-page profile and its user.
@@ -197,7 +175,11 @@ pub fn prefetch_profiles(state: &AppState, tweets: &[Tweet]) {
       if name.is_empty() || names.iter().any(|seen: &String| seen == &name) {
          continue;
       }
-      if state.cache.get::<Profile>(&cache_keys::profile(&name)).is_some() {
+      if state
+         .cache
+         .get::<Profile>(&cache_keys::profile(&name))
+         .is_some()
+      {
          continue;
       }
       names.push(name);
@@ -249,7 +231,9 @@ pub async fn get_cached_user(state: &AppState, username: &str) -> Result<User> {
 
 pub fn apply_context_to_user(user: &mut User, context: &AccountContext) {
    user.account_based_in.clone_from(&context.account_based_in);
-   user.connection_source.clone_from(&context.connection_source);
+   user
+      .connection_source
+      .clone_from(&context.connection_source);
    user.location_accurate = context.location_accurate;
 }
 
@@ -288,16 +272,14 @@ pub async fn load_account_context(state: &AppState, username: &str) -> Option<Ac
    let community = community_contexts(state, slice::from_ref(&username)).await;
    let resolved = match community.into_values().next() {
       Some(context) => context,
-      None => {
-         state
-            .api
-            .get_account_context(&username)
-            .await
-            .unwrap_or_else(|err| {
-               tracing::debug!(username, "About Account unavailable: {err}");
-               AccountContext::default()
-            })
-      },
+      None => state
+         .api
+         .get_account_context(&username)
+         .await
+         .unwrap_or_else(|err| {
+            tracing::debug!(username, "About Account unavailable: {err}");
+            AccountContext::default()
+         }),
    };
    state.cache.set(&key, &resolved, ttl::ACCOUNT_CONTEXT);
    (!resolved.is_empty()).then_some(resolved)

@@ -5,13 +5,11 @@ pub const CONSUMER_KEY: &str = "3nVuSoBZnx6U4vzUxf5w";
 pub const CONSUMER_SECRET: &str = "Bcs59EFbbsdF6Sl9Ng71smgStWEGwXXKSjYvPVt7qys";
 /// Bearer token that requires x-client-transaction-id (used for cookie sessions
 /// with TID).
-pub const BEARER_TOKEN: &str =
-   "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%\
+pub const BEARER_TOKEN: &str = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%\
     3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 
 /// Fallback bearer token that doesn't require x-client-transaction-id.
-pub const BEARER_TOKEN_NO_TID: &str =
-   "Bearer AAAAAAAAAAAAAAAAAAAAAFXzAwAAAAAAMHCxpeSDG1gLNLghVe8d74hl6k4%\
+pub const BEARER_TOKEN_NO_TID: &str = "Bearer AAAAAAAAAAAAAAAAAAAAAFXzAwAAAAAAMHCxpeSDG1gLNLghVe8d74hl6k4%\
     3DRUMF4xAQLsbeBhTSRrCiQpJtxoGWeyHrDb5te2jpGskWDFW82F";
 
 // GraphQL endpoints
@@ -39,7 +37,11 @@ pub const GRAPH_TWEET_EDIT_HISTORY: &str = "upS9teTSG45aljmP9oTuXA/TweetEditHist
 pub const GRAPH_RETWEETERS: &str = "tj-dlOvzRKjw69iy4z3LzQ/Retweeters";
 pub const GRAPH_ABOUT_ACCOUNT: &str = "XRqGa7EeokUU5kppkh13EA/AboutAccountQuery";
 pub const GRAPH_AUDIO_SPACE: &str = "xpwpkJD3FetGBaSq7zH4Lw/AudioSpaceById";
+pub const GRAPH_COMMUNITY: &str = "-ElI1vg3dYbttVMhBhGdLw/CommunityQuery";
+pub const GRAPH_COMMUNITY_TWEETS: &str = "EwftYyqQemkckQ0wzGM6uw/CommunityTweetsTimeline";
+pub const GRAPH_COMMUNITY_MEDIA: &str = "ESJtwnI_apuGesbJncpc0Q/CommunityMediaTimeline";
 pub const BROADCAST_SHOW_PATH: &str = "/i/api/1.1/broadcasts/show.json";
+pub const LIVE_VIDEO_STREAM_PATH: &str = "/i/api/1.1/live_video_stream/status/";
 
 /// Strato translation keeps its own budget, so it must not be accounted
 /// against `TweetDetail`.
@@ -182,6 +184,38 @@ pub fn audio_space_vars(space_id: &str) -> String {
 
 pub fn broadcast_show_url(broadcast_id: &str) -> String {
    format!("https://x.com{BROADCAST_SHOW_PATH}?ids={broadcast_id}&include_events=false")
+}
+
+pub fn live_stream_url(media_key: &str) -> String {
+   format!("https://x.com{LIVE_VIDEO_STREAM_PATH}{media_key}")
+}
+
+pub fn community_vars(community_id: &str) -> String {
+   vars(json!({ "communityId": community_id }))
+}
+
+pub fn community_tweets_vars(
+   community_id: &str,
+   cursor: Option<&str>,
+   ranking_mode: &str,
+) -> String {
+   vars(json!({
+      "communityId": community_id,
+      "cursor": cursor,
+      "count": 20,
+      "displayLocation": "Community",
+      "rankingMode": ranking_mode,
+      "withCommunity": true,
+   }))
+}
+
+pub fn community_media_vars(community_id: &str, cursor: Option<&str>) -> String {
+   vars(json!({
+      "communityId": community_id,
+      "cursor": cursor,
+      "count": 20,
+      "withCommunity": true,
+   }))
 }
 
 pub fn search_vars(raw_query: &str, cursor: Option<&str>, product: &str) -> String {

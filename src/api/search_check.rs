@@ -6,24 +6,13 @@
 //! spaced out. Those that get results go first for search from then on; the
 //! refused ones sit out search for a day and are checked again after that.
 
-use std::time::{
-   Duration,
-   Instant,
-};
+use std::time::{Duration, Instant};
 
 use tokio::time::sleep;
 
-use super::{
-   ApiClient,
-   SessionLease,
-   endpoints,
-   schema::SearchTimelineData,
-};
+use super::{ApiClient, SessionLease, endpoints, schema::SearchTimelineData};
 use crate::{
-   error::{
-      Error,
-      Result,
-   },
+   error::{Error, Result},
    types::SessionKind,
 };
 

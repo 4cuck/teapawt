@@ -1,73 +1,29 @@
 use std::sync::Arc;
 
 use axum::http::header;
-use serde::{
-   Deserialize,
-   de::DeserializeOwned,
-};
+use serde::{Deserialize, de::DeserializeOwned};
 use tokio::time::timeout;
 
 use super::{
-   ProxyPool,
-   SessionLease,
-   SessionPool,
-   TidClient,
-   budget::{
-      self,
-      ClientBudget,
-   },
+   ProxyPool, SessionLease, SessionPool, TidClient,
+   budget::{self, ClientBudget},
    endpoints,
-   http::{
-      Egress,
-      HttpClient,
-      ProxyConfig,
-      Purpose,
-   },
+   http::{Egress, HttpClient, ProxyConfig, Purpose},
    operations::Operations,
    parser,
 };
 use crate::{
    api::schema::{
-      AboutAccountData,
-      ApiError,
-      AudioSpaceData,
-      AudioSpaceMetadata,
-      BroadcastMetadata,
-      BroadcastsData,
-      ConversationData,
-      EditHistoryData,
-      GqlResponse,
-      ListByIdData,
-      ListBySlugData,
-      ListMembersData,
-      ListTimelineData,
-      RetweetersData,
-      SearchTimelineData,
-      TweetData,
-      UserResultData,
-      UserTimelineData,
+      AboutAccountData, ApiError, AudioSpaceData, AudioSpaceMetadata, BroadcastMetadata,
+      BroadcastsData, ConversationData, EditHistoryData, GqlResponse, ListByIdData, ListBySlugData,
+      ListMembersData, ListTimelineData, LiveStreamStatus, RetweetersData, SearchTimelineData,
+      TweetData, UserResultData, UserTimelineData,
    },
    config::Config,
-   error::{
-      Error,
-      Result,
-      TwitterError,
-   },
+   error::{Error, Result, TwitterError},
    types::{
-      AccountContext,
-      Article,
-      CardKind,
-      Conversation,
-      EditHistory,
-      List,
-      PaginatedResult,
-      PhotoRail,
-      Profile,
-      SessionKind,
-      Timeline,
-      Translation,
-      Tweet,
-      User,
+      AccountContext, Article, CardKind, Conversation, EditHistory, List, PaginatedResult,
+      PhotoRail, Profile, SessionKind, Timeline, Translation, Tweet, User,
    },
    utils::formatters,
 };
@@ -98,12 +54,10 @@ fn request_errors(errors: &[ApiError], has_data: bool) -> Vec<ApiError> {
          let one_field = !err.path.is_empty() || err.message.contains("DecodeException");
          !(has_data && one_field && !is_denylisted(&err.message))
       })
-      .map(|err| {
-         ApiError {
-            code:    err.code,
-            message: err.message.clone(),
-            path:    err.path.clone(),
-         }
+      .map(|err| ApiError {
+         code: err.code,
+         message: err.message.clone(),
+         path: err.path.clone(),
       })
       .collect()
 }
@@ -130,29 +84,25 @@ fn millis_to_time(milliseconds: i64) -> Option<time::OffsetDateTime> {
 
 fn audio_space_status(metadata: &AudioSpaceMetadata) -> String {
    match metadata.state.as_deref() {
-      Some("NotStarted") => {
-         metadata
-            .scheduled_start
-            .and_then(millis_to_time)
-            .map_or_else(
-               || "Scheduled".to_owned(),
-               |time| format!("Scheduled · {}", formatters::format_tweet_time(time)),
-            )
-      },
-      Some("Running") => {
-         metadata
-            .total_live_listeners
-            .filter(|count| *count > 0)
-            .map_or_else(
-               || "Live now".to_owned(),
-               |count| {
-                  format!(
-                     "Live now · {} listening",
-                     formatters::abbreviate_number(count)
-                  )
-               },
-            )
-      },
+      Some("NotStarted") => metadata
+         .scheduled_start
+         .and_then(millis_to_time)
+         .map_or_else(
+            || "Scheduled".to_owned(),
+            |time| format!("Scheduled · {}", formatters::format_tweet_time(time)),
+         ),
+      Some("Running") => metadata
+         .total_live_listeners
+         .filter(|count| *count > 0)
+         .map_or_else(
+            || "Live now".to_owned(),
+            |count| {
+               format!(
+                  "Live now · {} listening",
+                  formatters::abbreviate_number(count)
+               )
+            },
+         ),
       Some("Ended" | "TimedOut") if metadata.is_space_available_for_replay.unwrap_or(false) => {
          metadata
             .total_replay_watched
@@ -221,48 +171,42 @@ fn broadcast_id_from_url(url: &str) -> Option<&str> {
 
 fn broadcast_status(metadata: &BroadcastMetadata) -> String {
    match metadata.state.as_str() {
-      "RUNNING" => {
-         metadata
-            .total_watching
-            .filter(|count| *count > 0)
-            .map_or_else(
-               || "Live now".to_owned(),
-               |count| {
-                  format!(
-                     "Live now · {} watching",
-                     formatters::abbreviate_number(count)
-                  )
-               },
-            )
-      },
-      "ENDED" if metadata.available_for_replay => {
-         metadata
-            .total_watched
-            .filter(|count| *count > 0)
-            .map_or_else(
-               || "Replay available".to_owned(),
-               |count| {
-                  format!(
-                     "Replay available · {} views",
-                     formatters::abbreviate_number(count)
-                  )
-               },
-            )
-      },
-      "ENDED" => {
-         metadata
-            .total_watched
-            .filter(|count| *count > 0)
-            .map_or_else(
-               || "Broadcast ended".to_owned(),
-               |count| {
-                  format!(
-                     "Broadcast ended · {} views",
-                     formatters::abbreviate_number(count)
-                  )
-               },
-            )
-      },
+      "RUNNING" => metadata
+         .total_watching
+         .filter(|count| *count > 0)
+         .map_or_else(
+            || "Live now".to_owned(),
+            |count| {
+               format!(
+                  "Live now · {} watching",
+                  formatters::abbreviate_number(count)
+               )
+            },
+         ),
+      "ENDED" if metadata.available_for_replay => metadata
+         .total_watched
+         .filter(|count| *count > 0)
+         .map_or_else(
+            || "Replay available".to_owned(),
+            |count| {
+               format!(
+                  "Replay available · {} views",
+                  formatters::abbreviate_number(count)
+               )
+            },
+         ),
+      "ENDED" => metadata
+         .total_watched
+         .filter(|count| *count > 0)
+         .map_or_else(
+            || "Broadcast ended".to_owned(),
+            |count| {
+               format!(
+                  "Broadcast ended · {} views",
+                  formatters::abbreviate_number(count)
+               )
+            },
+         ),
       _ => String::new(),
    }
 }
@@ -312,14 +256,14 @@ fn twitter_error_code(body: &str) -> Option<i64> {
 /// Twitter/X API client.
 #[derive(Clone)]
 pub struct ApiClient {
-   pub(crate) client:   HttpClient,
+   pub(crate) client: HttpClient,
    pub(crate) sessions: SessionPool,
-   proxies:             Option<Arc<ProxyPool>>,
-   tid:                 TidClient,
-   operations:          Operations,
-   budget:              ClientBudget,
-   tid_enabled:         bool,
-   denylist:            super::search_denylist::SearchDenylist,
+   proxies: Option<Arc<ProxyPool>>,
+   tid: TidClient,
+   operations: Operations,
+   budget: ClientBudget,
+   tid_enabled: bool,
+   denylist: super::search_denylist::SearchDenylist,
 }
 
 impl ApiClient {
@@ -372,7 +316,10 @@ impl ApiClient {
    pub(crate) fn egress_for(&self, session: &SessionLease) -> Egress {
       Egress {
          session: session.id,
-         proxy:   self.proxies.as_ref().map(|pool| pool.for_session(session.id)),
+         proxy: self
+            .proxies
+            .as_ref()
+            .map(|pool| pool.for_session(session.id)),
       }
    }
 
@@ -456,9 +403,7 @@ impl ApiClient {
             // 326 is *our* cookie session locked, not the profile the reader
             // opened. Mapping it to UserSuspended made live accounts look
             // banned until a refresh hit a different session.
-            TwitterError::Locked
-            | TwitterError::InvalidToken
-            | TwitterError::BadToken => {
+            TwitterError::Locked | TwitterError::InvalidToken | TwitterError::BadToken => {
                Err(Error::SessionRejected(error.message.clone()))
             },
          };
@@ -514,7 +459,9 @@ impl ApiClient {
          let empty = matches!(last, Err(Error::TransientUpstream));
          let retry = match &last {
             Err(Error::SessionRejected(_)) => true,
-            Err(Error::TransientUpstream) => replacement == 0 && session.kind == SessionKind::Cookie,
+            Err(Error::TransientUpstream) => {
+               replacement == 0 && session.kind == SessionKind::Cookie
+            },
             Err(Error::RateLimited) if replacement < RATE_LIMIT_REPLACEMENTS => {
                self
                   .sessions
@@ -631,7 +578,8 @@ impl ApiClient {
 
    /// Sessions that can still open a profile timeline (`UserTweets`).
    pub async fn user_timeline_accounts(&self) -> usize {
-      self.sessions
+      self
+         .sessions
          .available_for(endpoints::GRAPH_USER_TWEETS)
          .await
    }
@@ -1113,7 +1061,8 @@ impl ApiClient {
    }
 }
 
-#[path = "client_endpoints.rs"] mod endpoint_methods;
+#[path = "client_endpoints.rs"]
+mod endpoint_methods;
 #[cfg(test)]
 mod tests {
    use super::*;

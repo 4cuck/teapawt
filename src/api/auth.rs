@@ -1,25 +1,14 @@
 use std::{
-   collections::{
-      BTreeMap,
-      HashMap,
-   },
+   collections::{BTreeMap, HashMap},
    env,
    fmt::Write as _,
    ops::Deref,
    path::Path,
    sync::{
       Arc,
-      atomic::{
-         AtomicBool,
-         AtomicUsize,
-         Ordering,
-      },
+      atomic::{AtomicBool, AtomicUsize, Ordering},
    },
-   time::{
-      Duration,
-      SystemTime,
-      UNIX_EPOCH,
-   },
+   time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use data_encoding::BASE64;
@@ -28,102 +17,86 @@ use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
 use tokio::{
    fs,
-   sync::{
-      Mutex,
-      Notify,
-      OwnedSemaphorePermit,
-      RwLock,
-      Semaphore,
-   },
+   sync::{Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore},
    time::sleep,
 };
 
 use crate::{
-   error::{
-      Error,
-      Result,
-   },
-   types::{
-      RateLimit,
-      Session,
-      SessionCredentials,
-      SessionKind,
-      SessionLimits,
-      Spend,
-   },
+   error::{Error, Result},
+   types::{RateLimit, Session, SessionCredentials, SessionKind, SessionLimits, Spend},
 };
 
 #[derive(Serialize)]
 pub struct HealthResponse {
-   pub sessions:  SessionStats,
-   pub requests:  RequestStats,
+   pub sessions: SessionStats,
+   pub requests: RequestStats,
    pub timestamp: String,
 }
 
 #[derive(Serialize)]
 pub struct SessionStats {
-   pub total:     usize,
-   pub limited:   usize,
-   pub rejected:  usize,
+   pub total: usize,
+   pub limited: usize,
+   pub rejected: usize,
    pub available: usize,
 }
 
 #[derive(Serialize)]
 pub struct RequestStats {
-   pub total:  i32,
+   pub total: i32,
    pub by_api: HashMap<String, i32>,
 }
 
 #[derive(Serialize)]
 pub struct DebugResponse {
-   pub sessions:  Vec<SessionDetail>,
-   pub count:     usize,
+   pub sessions: Vec<SessionDetail>,
+   pub count: usize,
    pub timestamp: String,
 }
 
 #[derive(Serialize)]
 pub struct SessionDetail {
-   pub id:         i64,
-   pub username:   String,
-   pub kind:       SessionKind,
-   pub limited:    bool,
-   pub rejected:   bool,
+   pub id: i64,
+   pub username: String,
+   pub kind: SessionKind,
+   pub limited: bool,
+   pub rejected: bool,
    pub limited_at: i64,
-   pub pending:    i32,
-   pub apis:       HashMap<String, RateLimit>,
+   pub pending: i32,
+   pub apis: HashMap<String, RateLimit>,
 }
 
 /// Pool of authentication sessions for Twitter API.
 #[derive(Clone)]
 pub struct SessionPool {
    sessions: Vec<Arc<SessionSlot>>,
-   limits:   Arc<RwLock<HashMap<i64, SessionLimits>>>,
-   cursor:   Arc<AtomicUsize>,
-   state:    Option<Arc<LimitState>>,
+   limits: Arc<RwLock<HashMap<i64, SessionLimits>>>,
+   cursor: Arc<AtomicUsize>,
+   state: Option<Arc<LimitState>>,
 }
 
 /// Writes the rate-limit map to disk so a restart does not forget which
 /// sessions X has already cut off.
 struct LimitState {
-   path:    String,
-   dirty:   Notify,
+   path: String,
+   dirty: Notify,
    writing: Mutex<()>,
 }
 
 const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(15);
 
 struct SessionSlot {
-   credentials:     Arc<SessionCredentials>,
-   permits:         Arc<Semaphore>,
+   credentials: Arc<SessionCredentials>,
+   permits: Arc<Semaphore>,
    max_concurrency: usize,
 }
 
 /// A session and the concurrency permit held for its request lifetime.
 pub struct SessionLease {
    credentials: Arc<SessionCredentials>,
-   _permit:     OwnedSemaphorePermit,
+   _permit: OwnedSemaphorePermit,
    /// This lease decremented the endpoint's local remaining count.
-   metered:     AtomicBool,
+   metered: AtomicBool,
 }
 
 impl Deref for SessionLease {
@@ -189,8 +162,8 @@ impl SessionPool {
       } else {
          Self::restore(&state_path, &mut limits).await;
          Some(Arc::new(LimitState {
-            path:    state_path,
-            dirty:   Notify::new(),
+            path: state_path,
+            dirty: Notify::new(),
             writing: Mutex::new(()),
          }))
       };
@@ -300,11 +273,9 @@ impl SessionPool {
    ) -> Result<SessionLease> {
       self
          .acquire_with(
-            |kind| {
-               match kind {
-                  SessionKind::OAuth => oauth_api,
-                  SessionKind::Cookie => cookie_api,
-               }
+            |kind| match kind {
+               SessionKind::OAuth => oauth_api,
+               SessionKind::Cookie => cookie_api,
             },
             None,
             None,
@@ -398,7 +369,9 @@ impl SessionPool {
                let credentials = Arc::clone(&self.sessions[index].credentials);
                return Ok(Self::lease(credentials, permit, metered));
             }
-            if metered && let Some(session_limits) = limits.get_mut(&self.sessions[index].credentials.id) {
+            if metered
+               && let Some(session_limits) = limits.get_mut(&self.sessions[index].credentials.id)
+            {
                session_limits.refund_spend(api);
             }
             wait_on.get_or_insert(index);
@@ -453,14 +426,17 @@ impl SessionPool {
    /// How many sessions can still call `api`.
    pub(crate) async fn available_for(&self, api: &str) -> usize {
       let limits = self.limits.read().await;
-      self.sessions
+      self
+         .sessions
          .iter()
          .filter(|slot| {
-            limits.get(&slot.credentials.id).is_none_or(|session_limits| {
-               !session_limits.rejected
-                  && !session_limits.is_limited(api)
-                  && !session_limits.refuses(api)
-            })
+            limits
+               .get(&slot.credentials.id)
+               .is_none_or(|session_limits| {
+                  !session_limits.rejected
+                     && !session_limits.is_limited(api)
+                     && !session_limits.refuses(api)
+               })
          })
          .count()
    }
@@ -569,9 +545,11 @@ impl SessionPool {
          .iter()
          .filter(|slot| slot.credentials.kind == SessionKind::Cookie)
          .filter(|slot| {
-            limits.get(&slot.credentials.id).is_none_or(|session_limits| {
-               !session_limits.rejected && session_limits.unchecked(api)
-            })
+            limits
+               .get(&slot.credentials.id)
+               .is_none_or(|session_limits| {
+                  !session_limits.rejected && session_limits.unchecked(api)
+               })
          })
          .map(|slot| slot.credentials.id)
          .collect()
@@ -640,9 +618,12 @@ impl SessionPool {
             if slot.credentials.kind != SessionKind::Cookie {
                return None;
             }
-            if limits.get(&slot.credentials.id).is_some_and(|session_limits| {
-               session_limits.filters_cleared && session_limits.age_gate_cleared
-            }) {
+            if limits
+               .get(&slot.credentials.id)
+               .is_some_and(|session_limits| {
+                  session_limits.filters_cleared && session_limits.age_gate_cleared
+               })
+            {
                return None;
             }
             Some(slot.credentials.id)
@@ -748,10 +729,10 @@ impl SessionPool {
       drop(limits);
 
       HealthResponse {
-         sessions:  SessionStats {
-            total:     self.sessions.len(),
-            limited:   limited_count,
-            rejected:  rejected_count,
+         sessions: SessionStats {
+            total: self.sessions.len(),
+            limited: limited_count,
+            rejected: rejected_count,
             // Endpoint budgets are per API, so this counts only sessions that
             // are unusable for every endpoint.
             available: self
@@ -759,7 +740,7 @@ impl SessionPool {
                .len()
                .saturating_sub(limited_count + rejected_count),
          },
-         requests:  RequestStats {
+         requests: RequestStats {
             total: total_requests,
             by_api,
          },
@@ -778,19 +759,19 @@ impl SessionPool {
             let sess = &slot.credentials;
             let lim = limits.get(&sess.id);
             SessionDetail {
-               id:         sess.id,
-               username:   sess.username.clone(),
-               kind:       sess.kind,
-               limited:    lim.is_some_and(|sl| sl.limited),
-               rejected:   lim.is_some_and(|sl| sl.rejected),
+               id: sess.id,
+               username: sess.username.clone(),
+               kind: sess.kind,
+               limited: lim.is_some_and(|sl| sl.limited),
+               rejected: lim.is_some_and(|sl| sl.rejected),
                limited_at: lim.map_or(0, |sl| sl.limited_at),
-               pending:    i32::try_from(
+               pending: i32::try_from(
                   slot
                      .max_concurrency
                      .saturating_sub(slot.permits.available_permits()),
                )
                .unwrap_or(i32::MAX),
-               apis:       lim.map(|sl| sl.apis.clone()).unwrap_or_default(),
+               apis: lim.map(|sl| sl.apis.clone()).unwrap_or_default(),
             }
          })
          .collect();
@@ -894,23 +875,11 @@ fn normalized_parameter_string(params: &[(&str, &str)]) -> String {
 
 #[cfg(test)]
 mod tests {
-   use std::{
-      env,
-      process,
-      time::Duration,
-   };
+   use std::{env, process, time::Duration};
 
-   use tokio::{
-      fs,
-      time::timeout,
-   };
+   use tokio::{fs, time::timeout};
 
-   use super::{
-      SessionKind,
-      SessionPool,
-      normalized_parameter_string,
-      percent_encode,
-   };
+   use super::{SessionKind, SessionPool, normalized_parameter_string, percent_encode};
    use crate::error::Error;
 
    #[test]
@@ -988,10 +957,7 @@ mod tests {
       // Keep the test from flushing into the live session-limits file.
       // The setter is process-global; this binary is the test run, not teapot.
       unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
-      let path = env::temp_dir().join(format!(
-         "teapot-session-pool-spend-{}.jsonl",
-         process::id()
-      ));
+      let path = env::temp_dir().join(format!("teapot-session-pool-spend-{}.jsonl", process::id()));
       fs::write(
          &path,
          concat!(
@@ -1016,9 +982,7 @@ mod tests {
       assert!(matches!(next, Err(Error::RateLimited)));
       drop(held);
 
-      pool
-         .update_session_limit(1, "Other", 50, 5, reset)
-         .await;
+      pool.update_session_limit(1, "Other", 50, 5, reset).await;
       let held = pool
          .acquire("Other", Some(SessionKind::Cookie))
          .await
@@ -1060,9 +1024,7 @@ mod tests {
       .await
       .unwrap();
       let pool = SessionPool::load(path.to_str().unwrap(), 4).await.unwrap();
-      pool
-         .mark_refused(1, "old-id/SearchTimeline")
-         .await;
+      pool.mark_refused(1, "old-id/SearchTimeline").await;
 
       for _ in 0..4 {
          let lease = pool

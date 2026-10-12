@@ -3,17 +3,9 @@ use maud::{Markup, html};
 use super::timeline::{render_media_view_tabs, render_timeline_with_view};
 use crate::{
    config::Config,
-   types::{
-      List,
-      Prefs,
-      Tweets,
-      User,
-   },
+   types::{List, Prefs, Tweets, User},
    utils::formatters,
-   views::{
-      renderutils::icon,
-      user_list::render_user,
-   },
+   views::{renderutils::icon, user_list::render_user},
 };
 
 /// Search pagination URL. The Twitter cursor is opaque and must be encoded —

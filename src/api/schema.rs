@@ -1,16 +1,8 @@
-use std::{
-   collections::HashMap,
-   result,
-};
+use std::{collections::HashMap, result};
 
 use serde::{
-   Deserialize,
-   Deserializer,
-   Serialize,
-   de::{
-      Error as _,
-      IgnoredAny,
-   },
+   Deserialize, Deserializer, Serialize,
+   de::{Error as _, IgnoredAny},
 };
 
 use crate::utils::formatters::parse_twitter_time;
@@ -72,7 +64,7 @@ pub struct SelfThread {
 )]
 pub struct EditControl {
    edit_control_initial: Option<EditControlInner>,
-   pub edit_tweet_ids:   Option<Vec<String>>,
+   pub edit_tweet_ids: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -89,7 +81,7 @@ pub struct BirdwatchPivot {
 
 #[derive(Deserialize, Default)]
 pub struct BirdwatchSubtitle {
-   pub text:     Option<String>,
+   pub text: Option<String>,
    pub entities: Option<Vec<BirdwatchEntity>>,
 }
 
@@ -97,9 +89,9 @@ pub struct BirdwatchSubtitle {
 #[serde(rename_all = "camelCase")]
 pub struct BirdwatchEntity {
    pub from_index: Option<u64>,
-   pub to_index:   Option<u64>,
+   pub to_index: Option<u64>,
    #[serde(rename = "ref")]
-   pub ref_data:   Option<BirdwatchRef>,
+   pub ref_data: Option<BirdwatchRef>,
 }
 
 #[derive(Deserialize, Default)]
@@ -112,17 +104,17 @@ pub struct BirdwatchRef {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct CardData {
-   pub legacy:         Option<CardLegacy>,
-   pub name:           Option<String>,
-   pub url:            Option<String>,
+   pub legacy: Option<CardLegacy>,
+   pub name: Option<String>,
+   pub url: Option<String>,
    pub binding_values: BindingValues,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct CardLegacy {
-   pub name:           Option<String>,
-   pub url:            Option<String>,
+   pub name: Option<String>,
+   pub url: Option<String>,
    pub binding_values: BindingValues,
 }
 
@@ -143,11 +135,11 @@ pub struct Instruction {
       reason = "serde rename maps to API field name"
    )]
    #[serde(rename = "type")]
-   pub instruction_type:    Option<InstructionType>,
-   pub entries:             Option<Vec<Entry>>,
+   pub instruction_type: Option<InstructionType>,
+   pub entries: Option<Vec<Entry>>,
    #[serde(rename = "moduleItems")]
-   pub module_items:        Option<Vec<Item>>,
-   pub entry:               Option<Entry>,
+   pub module_items: Option<Vec<Item>>,
+   pub entry: Option<Entry>,
    pub entry_id_to_replace: Option<String>,
 }
 
@@ -155,41 +147,41 @@ pub struct Instruction {
 pub struct Entry {
    #[serde(rename = "entryId")]
    pub entry_id: Option<String>,
-   pub content:  Option<EntryContent>,
+   pub content: Option<EntryContent>,
 }
 
 #[derive(Deserialize, Default)]
 pub struct EntryContent {
    #[serde(rename = "itemContent")]
    pub item_content: Option<ItemContent>,
-   pub items:        Option<Vec<Item>>,
-   pub value:        Option<String>,
+   pub items: Option<Vec<Item>>,
+   pub value: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 pub struct Item {
    #[serde(rename = "entryId")]
    pub entry_id: Option<String>,
-   pub item:     Option<ItemInner>,
+   pub item: Option<ItemInner>,
 }
 
 #[derive(Deserialize, Default)]
 pub struct ItemInner {
    #[serde(rename = "itemContent")]
    pub item_content: Option<ItemContent>,
-   pub content:      Option<ItemContent>,
+   pub content: Option<ItemContent>,
 }
 
 #[derive(Deserialize, Default)]
 pub struct ItemContent {
-   pub tweet_results:      Option<NestedResult<TweetData>>,
-   pub user_results:       Option<NestedResult<UserData>>,
+   pub tweet_results: Option<NestedResult<TweetData>>,
+   pub user_results: Option<NestedResult<UserData>>,
    /// Present on a search Lists hit (`TimelineTwitterList`).
    #[serde(default)]
-   pub list:               Option<ListData>,
+   pub list: Option<ListData>,
    #[serde(rename = "tweetDisplayType")]
    pub tweet_display_type: Option<String>,
-   pub value:              Option<String>,
+   pub value: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -294,22 +286,22 @@ impl Item {
 #[derive(Deserialize, Default)]
 pub struct Entities {
    #[serde(default)]
-   pub urls:          Vec<UrlEntity>,
+   pub urls: Vec<UrlEntity>,
    #[serde(default)]
-   pub hashtags:      Vec<HashtagEntity>,
+   pub hashtags: Vec<HashtagEntity>,
    #[serde(default)]
    pub user_mentions: Vec<MentionEntity>,
    #[serde(default)]
-   pub symbols:       Vec<SymbolEntity>,
+   pub symbols: Vec<SymbolEntity>,
    #[serde(default)]
-   pub media:         Vec<MediaItem>,
+   pub media: Vec<MediaItem>,
 }
 
 #[derive(Deserialize, Default)]
 pub struct UrlEntity {
    #[serde(default)]
-   pub indices:      Vec<u64>,
-   pub url:          Option<String>,
+   pub indices: Vec<u64>,
+   pub url: Option<String>,
    pub expanded_url: Option<String>,
 }
 
@@ -317,22 +309,22 @@ pub struct UrlEntity {
 pub struct HashtagEntity {
    #[serde(default)]
    pub indices: Vec<u64>,
-   pub text:    Option<String>,
+   pub text: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 pub struct MentionEntity {
    #[serde(default)]
-   pub indices:     Vec<u64>,
+   pub indices: Vec<u64>,
    pub screen_name: Option<String>,
-   pub name:        Option<String>,
+   pub name: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 pub struct SymbolEntity {
    #[serde(default)]
    pub indices: Vec<u64>,
-   pub text:    Option<String>,
+   pub text: Option<String>,
 }
 
 // ── Media types ─────────────────────────────────────────────────────────
@@ -340,27 +332,27 @@ pub struct SymbolEntity {
 #[derive(Deserialize, Default)]
 pub struct MediaItem {
    #[serde(rename = "type")]
-   pub media_type:             Option<MediaType>,
-   pub media_url_https:        Option<String>,
-   pub original_info:          Option<MediaOriginalInfo>,
-   pub url:                    Option<String>,
-   pub expanded_url:           Option<String>,
-   pub video_info:             Option<VideoInfo>,
+   pub media_type: Option<MediaType>,
+   pub media_url_https: Option<String>,
+   pub original_info: Option<MediaOriginalInfo>,
+   pub url: Option<String>,
+   pub expanded_url: Option<String>,
+   pub video_info: Option<VideoInfo>,
    pub ext_media_availability: Option<MediaAvailability>,
-   pub additional_media_info:  Option<AdditionalMediaInfo>,
-   pub ext_alt_text:           Option<String>,
-   pub grok_post_id:           Option<String>,
+   pub additional_media_info: Option<AdditionalMediaInfo>,
+   pub ext_alt_text: Option<String>,
+   pub grok_post_id: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 pub struct MediaOriginalInfo {
-   pub width:  i32,
+   pub width: i32,
    pub height: i32,
 }
 
 #[derive(Deserialize, Default)]
 pub struct AdditionalMediaInfo {
-   pub title:       Option<String>,
+   pub title: Option<String>,
    pub description: Option<String>,
    pub source_user: Option<Box<UserData>>,
 }
@@ -375,15 +367,15 @@ pub struct MediaAvailability {
 #[serde(default)]
 pub struct VideoInfo {
    pub duration_millis: i32,
-   pub variants:        Vec<VideoVariant>,
+   pub variants: Vec<VideoVariant>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct VideoVariant {
    pub content_type: Option<RawVideoContentType>,
-   pub bitrate:      i32,
-   pub url:          Option<String>,
+   pub bitrate: i32,
+   pub url: Option<String>,
 }
 
 // ── Card binding values ─────────────────────────────────────────────────
@@ -431,14 +423,14 @@ impl From<Vec<BindingValueEntry>> for BindingValues {
 
 #[derive(Deserialize)]
 pub struct BindingValueEntry {
-   key:   String,
+   key: String,
    value: Option<BindingValueInner>,
 }
 
 #[derive(Deserialize, Default)]
 struct BindingValueInner {
    string_value: Option<String>,
-   image_value:  Option<ImageValueInner>,
+   image_value: Option<ImageValueInner>,
 }
 
 #[derive(Deserialize, Default)]
@@ -451,21 +443,21 @@ struct ImageValueInner {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ListData {
-   pub id_str:             Option<String>,
-   pub rest_id:            Option<String>,
-   pub name:               Option<String>,
-   pub description:        Option<String>,
-   pub member_count:       i32,
-   pub subscriber_count:   i32,
+   pub id_str: Option<String>,
+   pub rest_id: Option<String>,
+   pub name: Option<String>,
+   pub description: Option<String>,
+   pub member_count: i32,
+   pub subscriber_count: i32,
    #[serde(default)]
-   pub facepile_urls:      Vec<String>,
+   pub facepile_urls: Vec<String>,
    #[serde(default)]
-   pub followers_context:  String,
+   pub followers_context: String,
    #[serde(default)]
-   pub members_context:    String,
-   pub user_results:       Option<NestedResult<UserData>>,
+   pub members_context: String,
+   pub user_results: Option<NestedResult<UserData>>,
    #[serde(default, deserialize_with = "deser_banner_url")]
-   pub banner_url:         Option<String>,
+   pub banner_url: Option<String>,
    #[serde(default, deserialize_with = "deser_banner_url")]
    pub custom_banner_media: Option<String>,
    #[serde(default, deserialize_with = "deser_banner_url")]
@@ -477,7 +469,7 @@ pub struct ListData {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ContentDisclosure {
-   pub advertising_disclosure:  Option<AdvertisingDisclosure>,
+   pub advertising_disclosure: Option<AdvertisingDisclosure>,
    pub ai_generated_disclosure: Option<AiGeneratedDisclosure>,
 }
 
@@ -496,74 +488,74 @@ pub struct AiGeneratedDisclosure {
 #[derive(Deserialize, Default)]
 pub struct TweetData {
    #[expect(clippy::pub_underscore_fields, reason = "serde field name matches API")]
-   pub __typename:              Option<String>,
-   pub rest_id:                 Option<String>,
-   pub legacy:                  Option<TweetLegacy>,
-   pub core:                    Option<TweetCore>,
+   pub __typename: Option<String>,
+   pub rest_id: Option<String>,
+   pub legacy: Option<TweetLegacy>,
+   pub core: Option<TweetCore>,
    #[serde(default, deserialize_with = "deser_note_tweet")]
-   pub note_tweet:              Option<NoteTweet>,
-   pub card:                    Option<CardData>,
-   pub quoted_status_result:    Option<NestedResult<Self>>,
+   pub note_tweet: Option<NoteTweet>,
+   pub card: Option<CardData>,
+   pub quoted_status_result: Option<NestedResult<Self>>,
    #[serde(rename = "quotedPostResults")]
-   pub quoted_post_results:     Option<NestedResult<Self>>,
+   pub quoted_post_results: Option<NestedResult<Self>>,
    #[serde(rename = "repostedStatusResults")]
    pub reposted_status_results: Option<NestedResult<Self>>,
-   pub views:                   Option<Views>,
-   pub tweet:                   Option<Box<Self>>,
+   pub views: Option<Views>,
+   pub tweet: Option<Box<Self>>,
    #[serde(default, deserialize_with = "deser_tombstone")]
-   pub tombstone:               Option<String>,
-   pub reason:                  Option<String>,
+   pub tombstone: Option<String>,
+   pub reason: Option<String>,
    /// Fallback for reply-to tweet ID (newer GraphQL path).
-   pub reply_to_results:        Option<ReplyToResults>,
+   pub reply_to_results: Option<ReplyToResults>,
    /// Fallback for reply-to user info (newer GraphQL path).
    #[serde(default, deserialize_with = "deser_reply_to_user")]
-   pub reply_to_screen_name:    Option<String>,
-   pub birdwatch_pivot:         Option<BirdwatchPivot>,
-   pub edit_control:            Option<EditControl>,
-   pub article:                 Option<ArticleWrapper>,
-   pub content_disclosure:      Option<ContentDisclosure>,
-   pub is_translatable:         Option<bool>,
-   pub source:                  Option<String>,
+   pub reply_to_screen_name: Option<String>,
+   pub birdwatch_pivot: Option<BirdwatchPivot>,
+   pub edit_control: Option<EditControl>,
+   pub article: Option<ArticleWrapper>,
+   pub content_disclosure: Option<ContentDisclosure>,
+   pub is_translatable: Option<bool>,
+   pub source: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct TweetLegacy {
-   pub id_str:                    Option<String>,
-   pub full_text:                 Option<String>,
-   pub text:                      Option<String>,
-   pub created_at:                Option<String>,
-   pub reply_count:               i64,
-   pub retweet_count:             i64,
-   pub favorite_count:            i64,
-   pub quote_count:               i64,
+   pub id_str: Option<String>,
+   pub full_text: Option<String>,
+   pub text: Option<String>,
+   pub created_at: Option<String>,
+   pub reply_count: i64,
+   pub retweet_count: i64,
+   pub favorite_count: i64,
+   pub quote_count: i64,
    pub in_reply_to_status_id_str: Option<String>,
-   pub in_reply_to_screen_name:   Option<String>,
-   pub conversation_id_str:       Option<String>,
-   pub self_thread:               Option<SelfThread>,
-   pub retweeted_status_result:   Option<NestedResult<TweetData>>,
-   pub display_text_range:        Option<Vec<u64>>,
-   pub place:                     Option<Place>,
-   pub withheld_in_countries:     Option<Vec<String>>,
-   pub withheld_copyright:        Option<bool>,
-   pub quoted_status_id_str:      Option<String>,
-   pub is_quote_status:           Option<bool>,
-   pub created_at_ms:             Option<i64>,
-   pub lang:                      Option<String>,
-   pub possibly_sensitive:        Option<bool>,
-   pub entities:                  Option<Entities>,
-   pub extended_entities:         Option<ExtendedEntities>,
+   pub in_reply_to_screen_name: Option<String>,
+   pub conversation_id_str: Option<String>,
+   pub self_thread: Option<SelfThread>,
+   pub retweeted_status_result: Option<NestedResult<TweetData>>,
+   pub display_text_range: Option<Vec<u64>>,
+   pub place: Option<Place>,
+   pub withheld_in_countries: Option<Vec<String>>,
+   pub withheld_copyright: Option<bool>,
+   pub quoted_status_id_str: Option<String>,
+   pub is_quote_status: Option<bool>,
+   pub created_at_ms: Option<i64>,
+   pub lang: Option<String>,
+   pub possibly_sensitive: Option<bool>,
+   pub entities: Option<Entities>,
+   pub extended_entities: Option<ExtendedEntities>,
 }
 
 #[derive(Deserialize, Default)]
 pub struct TweetCore {
    pub user_results: Option<NestedResult<UserData>>,
-   pub user_result:  Option<NestedResult<UserData>>,
+   pub user_result: Option<NestedResult<UserData>>,
 }
 
 #[derive(Deserialize, Default)]
 pub struct NoteTweet {
-   pub text:       Option<String>,
+   pub text: Option<String>,
    pub entity_set: Option<Entities>,
 }
 
@@ -587,27 +579,27 @@ pub struct ReplyToResults {
 #[derive(Deserialize, Default)]
 pub struct UserData {
    #[expect(clippy::pub_underscore_fields, reason = "serde field name matches API")]
-   pub __typename:          Option<String>,
-   pub rest_id:             Option<String>,
-   pub is_blue_verified:    Option<bool>,
+   pub __typename: Option<String>,
+   pub rest_id: Option<String>,
+   pub is_blue_verified: Option<bool>,
    #[serde(default, deserialize_with = "deser_present")]
    pub unavailable_message: bool,
-   pub reason:              Option<String>,
-   pub legacy:              Option<UserLegacy>,
-   pub core:                Option<UserCore>,
-   pub avatar:              Option<Avatar>,
-   pub location:            Option<UserLocation>,
-   pub profile_bio:         Option<ProfileBio>,
-   pub verification:        Option<Verification>,
-   pub privacy:             Option<Privacy>,
-   pub about_profile:       Option<AboutProfile>,
+   pub reason: Option<String>,
+   pub legacy: Option<UserLegacy>,
+   pub core: Option<UserCore>,
+   pub avatar: Option<Avatar>,
+   pub location: Option<UserLocation>,
+   pub profile_bio: Option<ProfileBio>,
+   pub verification: Option<Verification>,
+   pub privacy: Option<Privacy>,
+   pub about_profile: Option<AboutProfile>,
    // The web client's current user shape carries no `legacy`; these hold
    // what used to be in it.
-   pub banner:              Option<UserBanner>,
+   pub banner: Option<UserBanner>,
    pub relationship_counts: Option<RelationshipCounts>,
-   pub tweet_counts:        Option<TweetCounts>,
-   pub action_counts:       Option<ActionCounts>,
-   pub pinned_items:        Option<PinnedItems>,
+   pub tweet_counts: Option<TweetCounts>,
+   pub action_counts: Option<ActionCounts>,
+   pub pinned_items: Option<PinnedItems>,
 }
 
 #[derive(Deserialize, Default)]
@@ -625,7 +617,7 @@ pub struct RelationshipCounts {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct TweetCounts {
-   pub tweets:       Option<i64>,
+   pub tweets: Option<i64>,
    pub media_tweets: Option<i64>,
 }
 
@@ -644,8 +636,8 @@ pub struct PinnedItems {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct AboutProfile {
-   pub account_based_in:  Option<String>,
-   pub source:            Option<String>,
+   pub account_based_in: Option<String>,
+   pub source: Option<String>,
    pub location_accurate: Option<bool>,
 }
 
@@ -658,32 +650,32 @@ pub struct AboutAccountData {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct UserLegacy {
-   pub id_str:                  Option<String>,
-   pub screen_name:             Option<String>,
-   pub name:                    Option<String>,
-   pub description:             Option<String>,
-   pub location:                Option<String>,
+   pub id_str: Option<String>,
+   pub screen_name: Option<String>,
+   pub name: Option<String>,
+   pub description: Option<String>,
+   pub location: Option<String>,
    pub profile_image_url_https: Option<String>,
-   pub profile_banner_url:      Option<String>,
-   pub profile_link_color:      Option<String>,
-   pub followers_count:         i64,
-   pub friends_count:           i64,
-   pub statuses_count:          i64,
-   pub favourites_count:        i64,
-   pub media_count:             i64,
-   pub protected:               Option<bool>,
-   pub created_at:              Option<String>,
-   pub verified_type:           Option<String>,
-   pub pinned_tweet_ids_str:    Option<Vec<String>>,
+   pub profile_banner_url: Option<String>,
+   pub profile_link_color: Option<String>,
+   pub followers_count: i64,
+   pub friends_count: i64,
+   pub statuses_count: i64,
+   pub favourites_count: i64,
+   pub media_count: i64,
+   pub protected: Option<bool>,
+   pub created_at: Option<String>,
+   pub verified_type: Option<String>,
+   pub pinned_tweet_ids_str: Option<Vec<String>>,
    #[serde(default, deserialize_with = "deser_user_url_entities")]
-   pub entities:                Vec<UrlEntity>,
+   pub entities: Vec<UrlEntity>,
 }
 
 #[derive(Deserialize, Default)]
 pub struct UserCore {
    pub screen_name: Option<String>,
-   pub name:        Option<String>,
-   pub created_at:  Option<String>,
+   pub name: Option<String>,
+   pub created_at: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -700,7 +692,7 @@ pub struct UserLocation {
 pub struct ProfileBio {
    pub description: Option<String>,
    #[serde(default, deserialize_with = "deser_user_url_entities")]
-   pub entities:    Vec<UrlEntity>,
+   pub entities: Vec<UrlEntity>,
 }
 
 #[derive(Deserialize, Default)]
@@ -718,34 +710,34 @@ pub struct Privacy {
 
 #[derive(Deserialize, Default)]
 pub struct UnifiedCard {
-   pub component_objects:   Option<HashMap<String, CardComponent>>,
+   pub component_objects: Option<HashMap<String, CardComponent>>,
    pub destination_objects: Option<HashMap<String, Destination>>,
-   pub media_entities:      Option<HashMap<String, CardMediaEntity>>,
+   pub media_entities: Option<HashMap<String, CardMediaEntity>>,
    #[serde(rename = "appStoreData")]
-   pub app_store_data:      Option<HashMap<String, Vec<AppStoreEntry>>>,
+   pub app_store_data: Option<HashMap<String, Vec<AppStoreEntry>>>,
 }
 
 #[derive(Deserialize, Default)]
 pub struct CardComponent {
    #[serde(rename = "type")]
    pub comp_type: Option<String>,
-   pub data:      Option<ComponentData>,
+   pub data: Option<ComponentData>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ComponentData {
-   pub destination:            Option<String>,
-   pub title:                  Option<String>,
-   pub name:                   Option<String>,
-   pub member_count:           i32,
-   pub id:                     Option<String>,
-   pub media_list:             Option<Vec<MediaListItem>>,
-   pub app_id:                 Option<String>,
+   pub destination: Option<String>,
+   pub title: Option<String>,
+   pub name: Option<String>,
+   pub member_count: i32,
+   pub id: Option<String>,
+   pub media_list: Option<Vec<MediaListItem>>,
+   pub app_id: Option<String>,
    pub short_description_text: Option<String>,
-   pub profile_user:           Option<ProfileUser>,
-   pub location:               Option<String>,
-   pub conversation_preview:   Option<Vec<ConversationMsg>>,
+   pub profile_user: Option<ProfileUser>,
+   pub location: Option<String>,
+   pub conversation_preview: Option<Vec<ConversationMsg>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -760,7 +752,7 @@ pub struct ProfileUser {
 
 #[derive(Deserialize, Default)]
 pub struct ConversationMsg {
-   pub sender:  Option<String>,
+   pub sender: Option<String>,
    pub message: Option<String>,
 }
 
@@ -776,14 +768,14 @@ pub struct DestinationData {
 
 #[derive(Deserialize, Default)]
 pub struct UrlDataInner {
-   pub url:    Option<String>,
+   pub url: Option<String>,
    pub vanity: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 pub struct CardMediaEntity {
    #[serde(rename = "type")]
-   pub media_type:      Option<MediaType>,
+   pub media_type: Option<MediaType>,
    pub media_url_https: Option<String>,
 }
 
@@ -791,16 +783,17 @@ pub struct CardMediaEntity {
 pub struct AppStoreEntry {
    #[serde(rename = "type")]
    pub app_type: Option<String>,
-   pub id:       Option<String>,
-   pub title:    Option<String>,
+   pub id: Option<String>,
+   pub title: Option<String>,
    pub category: Option<String>,
 }
 
-#[path = "schema_accessors.rs"] mod accessors;
+#[path = "schema_accessors.rs"]
+mod accessors;
 /// A parsed community note with structured link data (no HTML).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommunityNote {
-   pub text:  String,
+   pub text: String,
    /// (`char_start`, `char_end`, url) triples for linked ranges.
    pub links: Vec<(usize, usize, String)>,
 }
@@ -958,5 +951,6 @@ pub fn indices(raw: &[u64]) -> (usize, usize) {
    )
 }
 
-#[path = "schema_endpoints.rs"] mod endpoint_types;
+#[path = "schema_endpoints.rs"]
+mod endpoint_types;
 pub use endpoint_types::*;

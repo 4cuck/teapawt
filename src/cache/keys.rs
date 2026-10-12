@@ -83,11 +83,19 @@ pub fn search_timeline(query: &str, product: &str, cursor: Option<&str>) -> Stri
 }
 
 pub fn search_users(query: &str, cursor: Option<&str>) -> String {
-   format!("search-users:{}:{}", query.to_lowercase(), cursor.unwrap_or(""))
+   format!(
+      "search-users:{}:{}",
+      query.to_lowercase(),
+      cursor.unwrap_or("")
+   )
 }
 
 pub fn search_lists(query: &str, cursor: Option<&str>) -> String {
-   format!("search-lists:{}:{}", query.to_lowercase(), cursor.unwrap_or(""))
+   format!(
+      "search-lists:{}:{}",
+      query.to_lowercase(),
+      cursor.unwrap_or("")
+   )
 }
 
 pub fn rss_user_search(username: &str, query: &str) -> String {

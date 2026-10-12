@@ -342,7 +342,12 @@ fn render_media_meta_tags(tweet: &Tweet, config: &Config, url_prefix: &str, prox
 
 /// Discord normally gets tweet media from `/api/v1/statuses/{id}`. Broadcasts
 /// keep an OG fallback because Discord sometimes skips that second request.
-fn render_discord_activity_meta_tags(tweet: &Tweet, config: &Config, url_prefix: &str, proxy: bool) -> Markup {
+fn render_discord_activity_meta_tags(
+   tweet: &Tweet,
+   config: &Config,
+   url_prefix: &str,
+   proxy: bool,
+) -> Markup {
    let has_video = video_source_with_quote(tweet).is_some();
    let has_gif = gif_source_with_quote(tweet).is_some();
    let has_photo = !tweet.photos.is_empty()
@@ -438,7 +443,12 @@ fn build_oembed_url(tweet: &Tweet, config: &Config) -> String {
    clippy::module_name_repetitions,
    reason = "public API name is clear and conventional"
 )]
-pub fn render_tweet_embed(tweet: &Tweet, config: &Config, discord_activity: bool, proxy: bool) -> Markup {
+pub fn render_tweet_embed(
+   tweet: &Tweet,
+   config: &Config,
+   discord_activity: bool,
+   proxy: bool,
+) -> Markup {
    let url_prefix = config.url_prefix();
    let oembed_url = build_oembed_url(tweet, config);
    let description = if discord_activity {
@@ -595,7 +605,11 @@ pub fn render_status_page(
    let referer = format!("/{username}/status/{id}");
    let page_url = format!("{url_prefix}/{username}/status/{id}");
 
-   let avatar_url = formatters::get_pic_url(&tweet.user.user_pic, config.config.base64_media, prefs.proxy_media);
+   let avatar_url = formatters::get_pic_url(
+      &tweet.user.user_pic,
+      config.config.base64_media,
+      prefs.proxy_media,
+   );
 
    let head_extra = html! {
        meta property="og:url" content=(page_url);

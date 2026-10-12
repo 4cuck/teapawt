@@ -5,22 +5,13 @@ use std::collections::BTreeSet;
 use axum::{
    Router,
    extract::State,
-   http::{
-      HeaderMap,
-      header,
-   },
-   response::{
-      IntoResponse,
-      Response,
-   },
+   http::{HeaderMap, header},
+   response::{IntoResponse, Response},
    routing::get,
 };
 use time::OffsetDateTime;
 
-use crate::{
-   AppState,
-   config::Config,
-};
+use crate::{AppState, config::Config};
 
 /// Well-known public accounts so crawlers have many entry points on day one.
 const SEED_PROFILES: &[&str] = &[
@@ -573,9 +564,7 @@ Sitemap: {origin}/sitemap.xml
 }
 
 fn today() -> String {
-   OffsetDateTime::now_utc()
-      .date()
-      .to_string()
+   OffsetDateTime::now_utc().date().to_string()
 }
 
 fn url_entry(loc: &str, lastmod: &str, changefreq: &str, priority: &str) -> String {
@@ -626,8 +615,9 @@ async fn sitemap_static(State(state): State<AppState>, headers: HeaderMap) -> Re
       ("/robots.txt", "daily", "0.2"),
       ("/sitemap.xml", "hourly", "0.2"),
    ];
-   let mut body =
-      String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
+   let mut body = String::from(
+      "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n",
+   );
    for (path, changefreq, priority) in static_paths {
       body.push_str(&url_entry(
          &format!("{origin}{path}"),
@@ -686,8 +676,9 @@ async fn sitemap_profiles(State(state): State<AppState>, headers: HeaderMap) -> 
    let origin = public_origin(&headers, &state.config);
    let lastmod = today();
    let names = collect_profile_usernames(&state);
-   let mut body =
-      String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
+   let mut body = String::from(
+      "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n",
+   );
    // Stay under the 50_000 URL sitemap limit.
    let mut count = 0usize;
    'outer: for name in names {

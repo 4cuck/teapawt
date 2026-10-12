@@ -1,10 +1,5 @@
 use std::{
-   collections::HashMap,
-   fs as std_fs,
-   path::PathBuf,
-   process::Stdio,
-   sync::Arc,
-   time::Duration,
+   collections::HashMap, fs as std_fs, path::PathBuf, process::Stdio, sync::Arc, time::Duration,
 };
 
 use data_encoding::HEXLOWER;
@@ -12,18 +7,11 @@ use ring::digest;
 use tokio::{
    fs,
    process::Command,
-   sync::{
-      Mutex,
-      Semaphore,
-   },
+   sync::{Mutex, Semaphore},
    time::timeout,
 };
 
-use crate::{
-   api::HttpClient,
-   cache::GifCache,
-   config::GifTranscodingConfig,
-};
+use crate::{api::HttpClient, cache::GifCache, config::GifTranscodingConfig};
 
 const MAX_TRANSCODE_INPUT_BYTES: usize = 100 * 1024 * 1024;
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(90);
@@ -39,11 +27,11 @@ impl Drop for TempFiles {
 }
 
 pub struct GifTranscoder {
-   cache:       GifCache,
+   cache: GifCache,
    http_client: HttpClient,
-   cache_dir:   PathBuf,
-   semaphore:   Semaphore,
-   inflight:    Mutex<HashMap<String, Arc<Mutex<()>>>>,
+   cache_dir: PathBuf,
+   semaphore: Semaphore,
+   inflight: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl GifTranscoder {

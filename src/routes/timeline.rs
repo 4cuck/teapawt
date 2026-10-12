@@ -2,16 +2,8 @@ use std::cmp;
 
 use axum::{
    Router,
-   extract::{
-      Path,
-      Query,
-      State,
-   },
-   response::{
-      Html,
-      IntoResponse as _,
-      Response,
-   },
+   extract::{Path, Query, State},
+   response::{Html, IntoResponse as _, Response},
    routing::get,
 };
 use axum_extra::extract::CookieJar;
@@ -20,36 +12,16 @@ use serde::Deserialize;
 
 use super::{
    helpers,
-   helpers::{
-      extract_timeline,
-      get_cached_user,
-   },
+   helpers::{extract_timeline, get_cached_user},
 };
 use crate::{
    AppState,
    api::budget,
-   cache::{
-      keys as cache_keys,
-      ttl,
-      Hit,
-   },
-   error::{
-      Error,
-      Result,
-   },
-   types::{
-      Prefs,
-      Profile,
-      Timeline,
-      TimelineKind,
-   },
+   cache::{Hit, keys as cache_keys, ttl},
+   error::{Error, Result},
+   types::{Prefs, Profile, Timeline, TimelineKind},
    utils::formatters,
-   views::{
-      layout,
-      profile,
-      search::render_search_panel_with_action,
-      timeline,
-   },
+   views::{layout, profile, search::render_search_panel_with_action, timeline},
 };
 
 /// Below this many accounts with `UserTweets` left, a stale profile is shown
@@ -162,6 +134,7 @@ const RESERVED_PATHS: &[&str] = &[
    "saveprefs",
    "resetprefs",
    "enablemp4",
+   "enablehls",
    "public",
    "css",
    "js",
@@ -205,9 +178,9 @@ fn parse_usernames(name: &str) -> Option<Vec<String>> {
 
 #[derive(Debug, Deserialize)]
 pub struct TimelineQuery {
-   pub tab:    Option<String>,
+   pub tab: Option<String>,
    pub cursor: Option<String>,
-   pub view:   Option<String>,
+   pub view: Option<String>,
    /// For AJAX infinite scroll requests - returns only tweet HTML.
    pub scroll: Option<String>,
 }
@@ -536,7 +509,7 @@ async fn user_media(
 #[derive(Debug, serde::Deserialize)]
 pub struct UserSearchQuery {
    #[serde(rename = "q")]
-   pub query:  Option<String>,
+   pub query: Option<String>,
    pub cursor: Option<String>,
 }
 
@@ -615,13 +588,11 @@ async fn user_search(
             .render();
          Ok(Html(markup.into_string()).into_response())
       },
-      Err(err) => {
-         Ok(helpers::api_error_titled(
-            &state.config,
-            &err,
-            "Search Error",
-         ))
-      },
+      Err(err) => Ok(helpers::api_error_titled(
+         &state.config,
+         &err,
+         "Search Error",
+      )),
    }
 }
 

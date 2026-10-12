@@ -1,19 +1,9 @@
-use std::collections::{
-   HashMap,
-   HashSet,
-   VecDeque,
-};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use axum::{
    Router,
-   extract::{
-      Path,
-      State,
-   },
-   response::{
-      Html,
-      IntoResponse,
-   },
+   extract::{Path, State},
+   response::{Html, IntoResponse},
    routing::get,
 };
 use axum_extra::extract::CookieJar;
@@ -24,16 +14,9 @@ use crate::{
    AppState,
    api::budget,
    error::Result,
-   types::{
-      ArticleBlockType,
-      ArticleEntityType,
-      Prefs,
-   },
+   types::{ArticleBlockType, ArticleEntityType, Prefs},
    utils::formatters,
-   views::{
-      layout::PageLayout,
-      notes as notes_view,
-   },
+   views::{layout::PageLayout, notes as notes_view},
 };
 
 pub fn router() -> Router<AppState> {
@@ -125,7 +108,11 @@ async fn show_note_inner(state: AppState, jar: CookieJar, id: String) -> Result<
    } else {
       formatters::join_base(
          &state.config.url_prefix(),
-         &formatters::get_pic_url(&article.cover_image, state.config.config.base64_media, prefs.proxy_media),
+         &formatters::get_pic_url(
+            &article.cover_image,
+            state.config.config.base64_media,
+            prefs.proxy_media,
+         ),
       )
    };
 

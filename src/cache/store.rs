@@ -2,24 +2,14 @@
 
 use std::{
    any::Any,
-   collections::{
-      HashMap,
-      HashSet,
-   },
-   sync::{
-      Arc,
-      Mutex,
-      RwLock,
-   },
-   time::{
-      Duration,
-      Instant,
-   },
+   collections::{HashMap, HashSet},
+   sync::{Arc, Mutex, RwLock},
+   time::{Duration, Instant},
 };
 
 /// Cache entry holding a type-erased value and its expiry.
 struct Entry {
-   value:       Arc<dyn Any + Send + Sync>,
+   value: Arc<dyn Any + Send + Sync>,
    fresh_until: Instant,
    stale_until: Instant,
 }
@@ -33,7 +23,7 @@ pub enum Hit<T> {
 /// Drops the in-flight refresh mark when the refresher finishes or panics.
 pub struct RefreshGuard {
    cache: Cache,
-   key:   String,
+   key: String,
 }
 
 impl Drop for RefreshGuard {
@@ -50,16 +40,16 @@ impl Drop for RefreshGuard {
 /// LRU for workloads with uniform TTLs without mutating on `get`.
 #[derive(Clone)]
 pub struct Cache {
-   inner:       Arc<RwLock<HashMap<String, Entry>>>,
-   inflight:    Arc<Mutex<HashSet<String>>>,
+   inner: Arc<RwLock<HashMap<String, Entry>>>,
+   inflight: Arc<Mutex<HashSet<String>>>,
    max_entries: usize,
 }
 
 impl Cache {
    pub fn new(max_entries: usize) -> Self {
       Self {
-         inner:       Arc::new(RwLock::new(HashMap::new())),
-         inflight:    Arc::new(Mutex::new(HashSet::new())),
+         inner: Arc::new(RwLock::new(HashMap::new())),
+         inflight: Arc::new(Mutex::new(HashSet::new())),
          max_entries: max_entries.max(16),
       }
    }
@@ -127,16 +117,10 @@ impl Cache {
 
    /// Mark `key` as refreshing. The guard clears the mark on drop.
    pub fn start_refresh(&self, key: &str) -> Option<RefreshGuard> {
-      let inserted = self
-         .inflight
-         .lock()
-         .ok()?
-         .insert(key.to_owned());
-      inserted.then(|| {
-         RefreshGuard {
-            cache: self.clone(),
-            key:   key.to_owned(),
-         }
+      let inserted = self.inflight.lock().ok()?.insert(key.to_owned());
+      inserted.then(|| RefreshGuard {
+         cache: self.clone(),
+         key: key.to_owned(),
       })
    }
 

@@ -1,26 +1,13 @@
-use std::{
-   collections::HashMap,
-   mem,
-};
+use std::{collections::HashMap, mem};
 
-use maud::{
-   Markup,
-   PreEscaped,
-   html,
-};
+use maud::{Markup, PreEscaped, html};
 
 use super::renderutils;
 use crate::{
    config::Config,
    types::{
-      Article,
-      ArticleBlockType,
-      ArticleEntityType,
-      ArticleMediaType,
-      ArticleParagraph,
-      ArticleStyle,
-      Prefs,
-      Tweet,
+      Article, ArticleBlockType, ArticleEntityType, ArticleMediaType, ArticleParagraph,
+      ArticleStyle, Prefs, Tweet,
    },
    utils::formatters,
 };

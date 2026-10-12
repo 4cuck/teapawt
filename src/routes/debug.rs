@@ -1,16 +1,8 @@
 use axum::{
-   Json,
-   Router,
+   Json, Router,
    extract::State,
-   http::{
-      HeaderMap,
-      StatusCode,
-      header,
-   },
-   response::{
-      IntoResponse as _,
-      Response,
-   },
+   http::{HeaderMap, StatusCode, header},
+   response::{IntoResponse as _, Response},
    routing::get,
 };
 

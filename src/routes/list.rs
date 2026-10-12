@@ -1,15 +1,7 @@
 use axum::{
    Router,
-   extract::{
-      Path,
-      Query,
-      State,
-   },
-   response::{
-      Html,
-      IntoResponse as _,
-      Response,
-   },
+   extract::{Path, Query, State},
+   response::{Html, IntoResponse as _, Response},
    routing::get,
 };
 use axum_extra::extract::CookieJar;
@@ -20,27 +12,14 @@ use super::helpers;
 use crate::{
    AppState,
    cache::keys as cache_keys,
-   error::{
-      Error,
-      Result,
-   },
-   types::{
-      List,
-      PaginatedResult,
-      Prefs,
-      Tweet,
-      User,
-   },
-   views::{
-      layout,
-      timeline as timeline_view,
-      user_list,
-   },
+   error::{Error, Result},
+   types::{List, PaginatedResult, Prefs, Tweet, User},
+   views::{layout, timeline as timeline_view, user_list},
 };
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
-   pub cursor:      Option<String>,
+   pub cursor: Option<String>,
    /// Exclude retweets from list timeline (`?no_retweets=true`).
    pub no_retweets: Option<String>,
 }
@@ -238,13 +217,11 @@ async fn list_members(
             .render();
          Ok(Html(markup.into_string()).into_response())
       },
-      Err(err) => {
-         Ok(helpers::api_error_titled(
-            &state.config,
-            &err,
-            "Error loading members",
-         ))
-      },
+      Err(err) => Ok(helpers::api_error_titled(
+         &state.config,
+         &err,
+         "Error loading members",
+      )),
    }
 }
 

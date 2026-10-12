@@ -1,12 +1,6 @@
 use crate::{
-   api::schema::{
-      Entities,
-      indices,
-   },
-   types::{
-      Entity,
-      EntityKind,
-   },
+   api::schema::{Entities, indices},
+   types::{Entity, EntityKind},
 };
 
 /// Parse entities from a typed `Entities` struct.
@@ -44,8 +38,8 @@ pub fn parse_entities_from(raw: &Entities) -> Vec<Entity> {
       let name = mention.name.as_deref().unwrap_or(screen_name);
       entities.push(Entity {
          indices: (start, end),
-         kind:    EntityKind::Mention,
-         url:     format!("/{screen_name}"),
+         kind: EntityKind::Mention,
+         url: format!("/{screen_name}"),
          display: name.to_owned(),
       });
    }

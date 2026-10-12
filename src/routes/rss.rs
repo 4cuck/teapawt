@@ -1,38 +1,19 @@
 use axum::{
    Router,
-   extract::{
-      Path,
-      Query,
-      State,
-   },
+   extract::{Path, Query, State},
    response::Response,
    routing::get,
 };
 use serde::Deserialize;
 
 use super::helpers::{
-   cache_rss,
-   check_rss_cache,
-   get_cached_user,
-   rss_response,
-   rss_response_with_min_id,
+   cache_rss, check_rss_cache, get_cached_user, rss_response, rss_response_with_min_id,
 };
 use crate::{
    AppState,
-   cache::{
-      keys as cache_keys,
-      Hit,
-   },
-   error::{
-      Error,
-      Result,
-   },
-   types::{
-      Profile,
-      Query as SearchQuery,
-      QueryKind,
-      Tweet,
-   },
+   cache::{Hit, keys as cache_keys},
+   error::{Error, Result},
+   types::{Profile, Query as SearchQuery, QueryKind, Tweet},
    views::rss as rss_view,
 };
 
@@ -112,7 +93,12 @@ async fn user_rss_handler(
    if matches!(kind, UserRssKind::Tweets)
       && let Some(profile) = cached_profile_page(state, username, cursor.as_deref())
    {
-      let tweets = profile.tweets.content.into_iter().flatten().collect::<Vec<_>>();
+      let tweets = profile
+         .tweets
+         .content
+         .into_iter()
+         .flatten()
+         .collect::<Vec<_>>();
       let rss = rss_view::render_user_rss(&profile.user, &tweets, &state.config, feed_kind);
       if let Some(ref key) = rss_cache_key {
          cache_rss(state, key, &rss, tweets.iter().map(|tweet| tweet.id).min());

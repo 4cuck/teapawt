@@ -10,10 +10,7 @@ use std::{
    future::Future,
    net::IpAddr,
    sync::Arc,
-   time::{
-      Duration,
-      Instant,
-   },
+   time::{Duration, Instant},
 };
 
 use axum::http::HeaderMap;
@@ -22,22 +19,22 @@ use tokio::sync::Mutex;
 #[derive(Clone, Copy)]
 pub struct Tier {
    pub refill_per_sec: f64,
-   pub capacity:       f64,
+   pub capacity: f64,
 }
 
 /// Widening horizons. The tightest tier decides.
 const TIERS: [Tier; 3] = [
    Tier {
       refill_per_sec: 5.0,
-      capacity:       100.0,
+      capacity: 100.0,
    },
    Tier {
       refill_per_sec: 1.0,
-      capacity:       300.0,
+      capacity: 300.0,
    },
    Tier {
       refill_per_sec: 0.25,
-      capacity:       1000.0,
+      capacity: 1000.0,
    },
 ];
 
@@ -53,14 +50,14 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 struct Buckets {
    tokens: [f64; TIERS.len()],
-   seen:   Instant,
+   seen: Instant,
 }
 
 impl Buckets {
    fn new() -> Self {
       Self {
          tokens: [TIERS[0].capacity, TIERS[1].capacity, TIERS[2].capacity],
-         seen:   Instant::now(),
+         seen: Instant::now(),
       }
    }
 
@@ -103,7 +100,7 @@ pub struct ClientBudget {
 }
 
 struct Clients {
-   buckets:    HashMap<ClientKey, Buckets>,
+   buckets: HashMap<ClientKey, Buckets>,
    last_sweep: Instant,
 }
 
@@ -212,7 +209,7 @@ impl ClientBudget {
    pub fn new(enabled: bool) -> Self {
       Self {
          clients: Arc::new(Mutex::new(Clients {
-            buckets:    HashMap::new(),
+            buckets: HashMap::new(),
             last_sweep: Instant::now(),
          })),
          enabled,

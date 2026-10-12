@@ -1,6 +1,8 @@
 //! HTTP routes.
 
 mod app;
+mod broadcast;
+mod community;
 mod debug;
 mod embed;
 pub mod helpers;
@@ -20,8 +22,4 @@ mod timeline;
 mod unsupported;
 
 pub use app::router;
-pub use middleware::{
-   client_middleware,
-   prefs_middleware,
-   snowflake_guard,
-};
+pub use middleware::{client_middleware, prefs_middleware, snowflake_guard};

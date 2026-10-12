@@ -1,63 +1,29 @@
 use axum::{
    Router,
-   extract::{
-      Path,
-      Query,
-      State,
-   },
-   http::{
-      HeaderMap,
-      StatusCode,
-      header,
-   },
-   response::{
-      Html,
-      IntoResponse as _,
-      Redirect,
-      Response,
-   },
+   extract::{Path, Query, State},
+   http::{HeaderMap, StatusCode, header},
+   response::{Html, IntoResponse as _, Redirect, Response},
    routing::get,
 };
 use axum_extra::extract::CookieJar;
 use maud::html;
 use serde::Deserialize;
-use tweet_view::{
-   TweetRenderer,
-   render_reply_chains,
-   thread_context,
-};
+use tweet_view::{TweetRenderer, render_reply_chains, thread_context};
 
 use super::{
    helpers,
-   helpers::{
-      get_cached_translation,
-      get_cached_tweet,
-   },
+   helpers::{get_cached_translation, get_cached_tweet},
 };
 use crate::{
    AppState,
-   cache::{
-      keys as cache_keys,
-      ttl,
-   },
+   cache::{keys as cache_keys, ttl},
    config::Config,
-   error::{
-      Error,
-      Result,
-   },
-   types::{
-      Conversation,
-      Prefs,
-   },
+   error::{Error, Result},
+   types::{Conversation, Prefs},
    views::{
-      embed,
-      layout,
-      timeline::{
-         render_timeline_with_prefs,
-         render_to_top_with_focus,
-      },
-      tweet as tweet_view,
-      user_list,
+      embed, layout,
+      timeline::{render_timeline_with_prefs, render_to_top_with_focus},
+      tweet as tweet_view, user_list,
    },
 };
 
@@ -73,21 +39,21 @@ const PREVIEW_AGENTS: [&str; 6] = [
 #[derive(Debug, Deserialize)]
 struct StatusParams {
    username: String,
-   id:       String,
+   id: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct PhotoParams {
    username: String,
-   id:       String,
-   idx:      usize,
+   id: String,
+   idx: usize,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct StatusQuery {
    pub cursor: Option<String>,
    pub scroll: Option<String>,
-   pub sort:   Option<String>,
+   pub sort: Option<String>,
 }
 
 /// Map the `?sort=` query parameter to a Twitter API `rankingMode` value.
@@ -533,15 +499,7 @@ fn render_conversation(
        }
    };
 
-   let markup = embed::render_status_page(
-      tweet,
-      &content,
-      prefs,
-      config,
-      username,
-      id,
-      activity,
-   );
+   let markup = embed::render_status_page(tweet, &content, prefs, config, username, id, activity);
    Html(markup.into_string()).into_response()
 }
 

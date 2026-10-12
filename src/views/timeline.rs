@@ -1,23 +1,11 @@
-use maud::{
-   Markup,
-   html,
-};
+use maud::{Markup, html};
 
 use super::tweet::TweetRenderer;
 use crate::{
    config::Config,
-   types::{
-      List,
-      Prefs,
-      TimelineKind,
-      Tweet,
-      Tweets,
-   },
+   types::{List, Prefs, TimelineKind, Tweet, Tweets},
    utils::formatters,
-   views::renderutils::{
-      gen_img,
-      icon,
-   },
+   views::renderutils::{gen_img, icon},
 };
 
 /// Render a timeline of tweets with optional "Load more" link.
@@ -87,7 +75,9 @@ pub fn render_timeline_with_pinned_and_prefs(
    prefs: Option<&Prefs>,
    newer_url: Option<&str>,
 ) -> Markup {
-   render_timeline_full(groups, config, cursor, base_url, pinned, prefs, newer_url, "")
+   render_timeline_full(
+      groups, config, cursor, base_url, pinned, prefs, newer_url, "",
+   )
 }
 
 /// Render "scroll to top" button.
@@ -124,7 +114,12 @@ fn render_none_found() -> Markup {
 use super::renderutils::tweet_link;
 
 /// Render a thread group wrapped in thread-line.
-fn render_thread(thread: &[&Tweet], config: &Config, prefs: Option<&Prefs>, big_thumb: bool) -> Markup {
+fn render_thread(
+   thread: &[&Tweet],
+   config: &Config,
+   prefs: Option<&Prefs>,
+   big_thumb: bool,
+) -> Markup {
    // Sort by ID for correct order
    let mut sorted: Vec<&Tweet> = thread.to_vec();
    sorted.sort_by_key(|tweet| tweet.id);
@@ -196,7 +191,8 @@ fn render_timeline_full(
    let pinned_id = pinned.map(|tweet| tweet.id);
    let has_tweets = groups.iter().any(|group| !group.is_empty()) || pinned.is_some();
    let is_gallery = view == "gallery";
-   let big_thumb = is_gallery && prefs.is_some_and(|pref| pref.gallery_size.eq_ignore_ascii_case("Large"));
+   let big_thumb =
+      is_gallery && prefs.is_some_and(|pref| pref.gallery_size.eq_ignore_ascii_case("Large"));
    let masonry_class = if prefs.is_some_and(|pref| pref.compact_gallery) {
       "gallery-masonry compact"
    } else {

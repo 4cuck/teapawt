@@ -1,17 +1,7 @@
 use crate::{
-   api::schema::{
-      UserData,
-      UserLegacy,
-      UserResultData,
-   },
-   error::{
-      Error,
-      Result,
-   },
-   types::{
-      User,
-      VerifiedType,
-   },
+   api::schema::{UserData, UserLegacy, UserResultData},
+   error::{Error, Result},
+   types::{User, VerifiedType},
    utils::formatters::parse_twitter_time,
 };
 

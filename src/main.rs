@@ -11,71 +11,46 @@ mod views;
 
 use std::{
    env,
-   net::{
-      IpAddr,
-      SocketAddr,
-   },
+   net::{IpAddr, SocketAddr},
    sync::Arc,
    time::Duration,
 };
 
+use axum::http::header;
 use axum::{
-   Router,
-   ServiceExt,
+   Router, ServiceExt,
    extract::Request,
-   http::{
-      StatusCode,
-      header::HeaderValue,
-   },
+   http::{StatusCode, header::HeaderValue},
    middleware,
 };
-use axum::http::header;
 use tokio::net::TcpListener;
-use tower::{
-   Layer as _,
-   limit::ConcurrencyLimitLayer,
-};
+use tower::{Layer as _, limit::ConcurrencyLimitLayer};
 use tower_http::{
    normalize_path::NormalizePathLayer,
-   services::{
-      ServeDir,
-      ServeFile,
-   },
+   services::{ServeDir, ServeFile},
    set_header::SetResponseHeaderLayer,
    timeout::TimeoutLayer,
 };
-use tracing_subscriber::{
-   fmt,
-   layer::SubscriberExt as _,
-   util::SubscriberInitExt as _,
-};
+use tracing_subscriber::{fmt, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 use crate::{
-   api::{
-      ApiClient,
-      HttpClient,
-      ProxyPool,
-      SessionPool,
-   },
+   api::{ApiClient, HttpClient, ProxyPool, SessionPool},
    cache::Cache,
-   config::{
-      Config,
-      GifTranscodingMode,
-   },
+   config::{Config, GifTranscodingMode},
    transcode::GifTranscoder,
 };
 
 /// Application state shared across all routes.
 #[derive(Clone)]
 pub struct AppState {
-   pub config:              Arc<Config>,
-   pub cache:               Cache,
-   pub api:                 ApiClient,
-   pub http_client:         HttpClient,
-   pub gif_transcoder:      Option<Arc<GifTranscoder>>,
+   pub config: Arc<Config>,
+   pub cache: Cache,
+   pub api: ApiClient,
+   pub http_client: HttpClient,
+   pub gif_transcoder: Option<Arc<GifTranscoder>>,
    pub translation_limiter: Arc<translation::TranslationLimiter>,
    /// Peers permitted to name a different caller through forwarding headers.
-   pub trusted_proxies:     Arc<[IpAddr]>,
+   pub trusted_proxies: Arc<[IpAddr]>,
 }
 
 #[tokio::main]
@@ -103,8 +78,8 @@ async fn main() -> eyre::Result<()> {
    );
 
    error::set_messages(error::Messages {
-      client_budget:  config.config.client_budget_message.clone(),
-      rate_limited:   config.config.rate_limited_message.clone(),
+      client_budget: config.config.client_budget_message.clone(),
+      rate_limited: config.config.rate_limited_message.clone(),
       internal_error: config.config.internal_error_message.clone(),
    });
 
@@ -221,7 +196,7 @@ async fn main() -> eyre::Result<()> {
                  img-src 'self' data: https://*.twimg.com https://video.pscp.tv https://*.video.pscp.tv; \
                  media-src 'self' blob: https://*.twimg.com; \
                  font-src 'self'; \
-                 connect-src 'self'; \
+                 connect-src 'self' https://*.twimg.com https://video.pscp.tv https://*.video.pscp.tv; \
                  form-action 'self'; \
                  base-uri 'self'; \
                  frame-ancestors 'none'"

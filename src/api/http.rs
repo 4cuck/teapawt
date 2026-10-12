@@ -7,59 +7,27 @@
 //! else (media, bootstrap fetches) uses a shared default client.
 
 use std::{
-   collections::{
-      HashMap,
-      HashSet,
-   },
+   collections::{HashMap, HashSet},
    error::Error as _,
    fmt::Write as _,
-   hash::{
-      Hash as _,
-      Hasher as _,
-   },
+   hash::{Hash as _, Hasher as _},
    pin::Pin,
    result::Result as StdResult,
    sync::{
-      Arc,
-      Mutex,
-      atomic::{
-         AtomicU64,
-         AtomicUsize,
-         Ordering,
-      },
+      Arc, Mutex,
+      atomic::{AtomicU64, AtomicUsize, Ordering},
    },
-   task::{
-      Context,
-      Poll,
-   },
-   time::{
-      Duration,
-      SystemTime,
-      UNIX_EPOCH,
-   },
+   task::{Context, Poll},
+   time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use axum::http::{
-   HeaderMap,
-   HeaderName,
-   HeaderValue,
-   Method,
-   StatusCode,
-   header,
-};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use bytes::Bytes;
 use futures_core::Stream;
 use http_body::Frame;
 
-use super::browser::{
-   self,
-   Engine,
-   Identity,
-};
-use crate::error::{
-   Error,
-   Result,
-};
+use super::browser::{self, Engine, Identity};
+use crate::error::{Error, Result};
 
 const DEFAULT_BODY_LIMIT: usize = 32 * 1024 * 1024; // 32 MiB
 /// Whole API call, connect to last byte.
@@ -92,9 +60,9 @@ pub enum ProxyKind {
 /// Parsed proxy configuration.
 #[derive(Clone, Debug)]
 pub struct ProxyConfig {
-   pub host:     String,
-   pub port:     u16,
-   pub kind:     ProxyKind,
+   pub host: String,
+   pub port: u16,
+   pub kind: ProxyKind,
    pub username: Option<String>,
    pub password: Option<String>,
 }
@@ -110,18 +78,16 @@ impl ProxyConfig {
       };
       let mut url = format!("{scheme}://");
       if let Some(ref user) = self.username {
-         url.push_str(&percent_encoding::utf8_percent_encode(
-            user,
-            percent_encoding::NON_ALPHANUMERIC,
-         )
-         .to_string());
+         url.push_str(
+            &percent_encoding::utf8_percent_encode(user, percent_encoding::NON_ALPHANUMERIC)
+               .to_string(),
+         );
          if let Some(ref pass) = self.password {
             url.push(':');
-            url.push_str(&percent_encoding::utf8_percent_encode(
-               pass,
-               percent_encoding::NON_ALPHANUMERIC,
-            )
-            .to_string());
+            url.push_str(
+               &percent_encoding::utf8_percent_encode(pass, percent_encoding::NON_ALPHANUMERIC)
+                  .to_string(),
+            );
          }
          url.push('@');
       }
@@ -135,7 +101,7 @@ impl ProxyConfig {
 #[derive(Clone, Debug)]
 pub struct Egress {
    pub session: i64,
-   pub proxy:   Option<ProxyConfig>,
+   pub proxy: Option<ProxyConfig>,
 }
 
 /// What a client's requests are for, which decides the fetch-context headers
@@ -164,8 +130,8 @@ impl Purpose {
 struct FallbackPool {
    proxies: Vec<ProxyConfig>,
    /// [`proxy_tag`] of every exit, to recognise them when picking a client.
-   tags:    HashSet<u64>,
-   next:    AtomicUsize,
+   tags: HashSet<u64>,
+   next: AtomicUsize,
 }
 
 impl FallbackPool {
@@ -182,20 +148,20 @@ impl FallbackPool {
    reason = "HttpClient is clearer than Client"
 )]
 pub struct HttpClient {
-   purpose:        Purpose,
-   default:        primp::Client,
-   default_proxy:  Option<ProxyConfig>,
+   purpose: Purpose,
+   default: primp::Client,
+   default_proxy: Option<ProxyConfig>,
    /// Used only after the direct exit returns an HTML 429, or while that
    /// block is still fresh.
    fallback_proxy: Option<ProxyConfig>,
    /// Round-robin exits for the same window. Each call takes the next one.
-   fallback_pool:  Option<Arc<FallbackPool>>,
+   fallback_pool: Option<Arc<FallbackPool>>,
    /// Unix millis until which the direct exit is skipped.
    direct_blocked_until: Arc<AtomicU64>,
-   extra_headers:  HeaderMap,
+   extra_headers: HeaderMap,
    /// Keyed by session and exit so a direct client is never reused for the
    /// fallback proxy.
-   sessions:       Arc<Mutex<HashMap<(i64, u64), primp::Client>>>,
+   sessions: Arc<Mutex<HashMap<(i64, u64), primp::Client>>>,
 }
 
 /// Response wrapper providing convenience methods.
@@ -307,7 +273,9 @@ impl HttpClient {
          POOL_PER_HOST,
       ) {
          Ok(client) => self.default = client,
-         Err(err) => tracing::error!("browser client for the default identity failed to build: {err}"),
+         Err(err) => {
+            tracing::error!("browser client for the default identity failed to build: {err}")
+         },
       }
    }
 
@@ -364,7 +332,9 @@ impl HttpClient {
 
    fn is_fallback(&self, proxy: Option<&ProxyConfig>) -> bool {
       match (proxy, self.fallback_proxy.as_ref()) {
-         (Some(proxy), Some(fallback)) => proxy.host == fallback.host && proxy.port == fallback.port,
+         (Some(proxy), Some(fallback)) => {
+            proxy.host == fallback.host && proxy.port == fallback.port
+         },
          _ => false,
       }
    }
@@ -376,7 +346,9 @@ impl HttpClient {
 
    fn block_direct(&self) {
       let until = unix_millis().saturating_add(DIRECT_BLOCK_FOR.as_millis() as u64);
-      self.direct_blocked_until.fetch_max(until, Ordering::Relaxed);
+      self
+         .direct_blocked_until
+         .fetch_max(until, Ordering::Relaxed);
    }
 
    /// Send a GET request.
@@ -451,7 +423,7 @@ impl HttpClient {
       let first_via = if skip_direct {
          proxied = Egress {
             session: via.expect("direct egress").session,
-            proxy:   self.take_fallback(),
+            proxy: self.take_fallback(),
          };
          Some(&proxied)
       } else {
@@ -476,10 +448,13 @@ impl HttpClient {
       if matches!(&first, Ok(response) if is_edge_block(response.status(), response.headers())) {
          self.block_direct();
       }
-      tracing::warn!(uri, "direct exit blocked, retrying through a fallback proxy");
+      tracing::warn!(
+         uri,
+         "direct exit blocked, retrying through a fallback proxy"
+      );
       let proxied = Egress {
          session: via.expect("direct egress").session,
-         proxy:   self.take_fallback(),
+         proxy: self.take_fallback(),
       };
       self
          .dispatch(&method, uri, extra_headers, &body, Some(&proxied))
@@ -540,7 +515,7 @@ impl HttpClient {
 fn default_identity() -> Identity {
    Identity {
       engine: Engine::Chrome,
-      os:     primp::ImpersonateOS::Windows,
+      os: primp::ImpersonateOS::Windows,
    }
 }
 
@@ -553,77 +528,71 @@ fn default_identity() -> Identity {
 /// list for the calls that do.
 fn wire_header_order(purpose: Purpose) -> Vec<HeaderName> {
    let names: &[&str] = match purpose {
-      Purpose::Api => {
-         &[
-            "sec-gpc",
-            "sec-ch-ua-platform",
-            "authorization",
-            "x-csrf-token",
-            "sec-ch-ua",
-            "x-twitter-client-language",
-            "sec-ch-ua-mobile",
-            "x-twitter-active-user",
-            "x-client-transaction-id",
-            "x-twitter-auth-type",
-            "user-agent",
-            "dnt",
-            "x-twitter-polling",
-            "content-type",
-            "accept",
-            "origin",
-            "sec-fetch-site",
-            "sec-fetch-mode",
-            "sec-fetch-dest",
-            "referer",
-            "accept-encoding",
-            "accept-language",
-            "cookie",
-            "priority",
-         ]
-      },
-      Purpose::Media => {
-         &[
-            "sec-gpc",
-            "sec-ch-ua-platform",
-            "user-agent",
-            "sec-ch-ua",
-            "dnt",
-            "sec-ch-ua-mobile",
-            "accept",
-            "origin",
-            "sec-fetch-site",
-            "sec-fetch-mode",
-            "sec-fetch-dest",
-            "sec-fetch-storage-access",
-            "referer",
-            "accept-encoding",
-            "accept-language",
-            "range",
-            "if-range",
-            "cookie",
-            "priority",
-         ]
-      },
-      Purpose::Script => {
-         &[
-            "sec-gpc",
-            "origin",
-            "sec-ch-ua-platform",
-            "user-agent",
-            "sec-ch-ua",
-            "dnt",
-            "sec-ch-ua-mobile",
-            "accept",
-            "sec-fetch-site",
-            "sec-fetch-mode",
-            "sec-fetch-dest",
-            "referer",
-            "accept-encoding",
-            "accept-language",
-            "cookie",
-            "priority",
-         ]
-      },
+      Purpose::Api => &[
+         "sec-gpc",
+         "sec-ch-ua-platform",
+         "authorization",
+         "x-csrf-token",
+         "sec-ch-ua",
+         "x-twitter-client-language",
+         "sec-ch-ua-mobile",
+         "x-twitter-active-user",
+         "x-client-transaction-id",
+         "x-twitter-auth-type",
+         "user-agent",
+         "dnt",
+         "x-twitter-polling",
+         "content-type",
+         "accept",
+         "origin",
+         "sec-fetch-site",
+         "sec-fetch-mode",
+         "sec-fetch-dest",
+         "referer",
+         "accept-encoding",
+         "accept-language",
+         "cookie",
+         "priority",
+      ],
+      Purpose::Media => &[
+         "sec-gpc",
+         "sec-ch-ua-platform",
+         "user-agent",
+         "sec-ch-ua",
+         "dnt",
+         "sec-ch-ua-mobile",
+         "accept",
+         "origin",
+         "sec-fetch-site",
+         "sec-fetch-mode",
+         "sec-fetch-dest",
+         "sec-fetch-storage-access",
+         "referer",
+         "accept-encoding",
+         "accept-language",
+         "range",
+         "if-range",
+         "cookie",
+         "priority",
+      ],
+      Purpose::Script => &[
+         "sec-gpc",
+         "origin",
+         "sec-ch-ua-platform",
+         "user-agent",
+         "sec-ch-ua",
+         "dnt",
+         "sec-ch-ua-mobile",
+         "accept",
+         "sec-fetch-site",
+         "sec-fetch-mode",
+         "sec-fetch-dest",
+         "referer",
+         "accept-encoding",
+         "accept-language",
+         "cookie",
+         "priority",
+      ],
    };
    names
       .iter()
@@ -665,15 +634,13 @@ fn build_client(
          .connect_timeout(Duration::from_secs(3))
          .tcp_keepalive(Duration::from_secs(10));
    }
-   builder = match proxy {
-      Some(proxy) => {
-         builder.proxy(
-            primp::Proxy::all(proxy.url())
-               .map_err(|err| Error::Internal(format!("proxy {}:{}: {err}", proxy.host, proxy.port)))?,
-         )
-      },
-      None => builder.no_proxy(),
-   };
+   builder =
+      match proxy {
+         Some(proxy) => builder.proxy(primp::Proxy::all(proxy.url()).map_err(|err| {
+            Error::Internal(format!("proxy {}:{}: {err}", proxy.host, proxy.port))
+         })?),
+         None => builder.no_proxy(),
+      };
    let mut client = builder
       .build()
       .map_err(|err| Error::Internal(format!("browser client for {identity}: {err}")))?;
@@ -696,15 +663,13 @@ fn shape_headers(headers: &mut HeaderMap, purpose: Purpose, extra: &HeaderMap) {
 
    let (accept, dest, mode, site, priority) = match purpose {
       Purpose::Api => ("*/*", "empty", "cors", "same-origin", Some("u=1, i")),
-      Purpose::Media => {
-         (
-            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-            "image",
-            "no-cors",
-            "cross-site",
-            Some("u=1, i"),
-         )
-      },
+      Purpose::Media => (
+         "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+         "image",
+         "no-cors",
+         "cross-site",
+         Some("u=1, i"),
+      ),
       // A chunk webpack loads on demand carries no priority.
       Purpose::Script => ("*/*", "script", "cors", "cross-site", None),
    };
@@ -839,8 +804,7 @@ fn parse_proxy(url: &str, auth: &str) -> ProxyConfig {
    } else {
       (
          ProxyKind::Http,
-         url
-            .strip_prefix("https://")
+         url.strip_prefix("https://")
             .or_else(|| url.strip_prefix("http://"))
             .unwrap_or(url),
       )
@@ -909,8 +873,7 @@ impl Response {
    /// Collect the response body as a UTF-8 string.
    pub async fn text(self) -> Result<String> {
       let data = self.bytes().await?;
-      String::from_utf8(data.into())
-         .map_err(|err| Error::Internal(format!("invalid UTF-8: {err}")))
+      String::from_utf8(data.into()).map_err(|err| Error::Internal(format!("invalid UTF-8: {err}")))
    }
 }
 
@@ -939,9 +902,9 @@ impl http_body::Body for StreamingBody {
 #[cfg(test)]
 fn proxy_on(port: u16) -> ProxyConfig {
    ProxyConfig {
-      host:     "proxy.example".into(),
+      host: "proxy.example".into(),
       port,
-      kind:     ProxyKind::Socks5,
+      kind: ProxyKind::Socks5,
       username: None,
       password: None,
    }
@@ -980,20 +943,27 @@ mod tests {
          .map(|session| browser::identity_for(session).to_string())
          .collect();
       let cached = client.sessions.lock().unwrap().len();
-      assert!(cached <= browsers.len() * 2, "{cached} clients for {} browsers", browsers.len());
+      assert!(
+         cached <= browsers.len() * 2,
+         "{cached} clients for {} browsers",
+         browsers.len()
+      );
       assert!(identity_owner(browser::identity_for(1)) < 0);
    }
 
    #[test]
    fn socks_proxy_url_carries_credentials() {
       let proxy = ProxyConfig {
-         host:     "proxy.example".into(),
-         port:     10001,
-         kind:     ProxyKind::Socks5,
+         host: "proxy.example".into(),
+         port: 10001,
+         kind: ProxyKind::Socks5,
          username: Some("user".into()),
          password: Some("p@ss:word".into()),
       };
-      assert_eq!(proxy.url(), "socks5h://user:p%40ss%3Aword@proxy.example:10001");
+      assert_eq!(
+         proxy.url(),
+         "socks5h://user:p%40ss%3Aword@proxy.example:10001"
+      );
    }
 
    #[test]
@@ -1096,7 +1066,10 @@ mod tests {
       headers.insert("upgrade-insecure-requests", HeaderValue::from_static("1"));
       headers.insert("sec-fetch-user", HeaderValue::from_static("?1"));
       headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
-      headers.insert("sec-ch-ua", HeaderValue::from_static("\"Chromium\";v=\"151\""));
+      headers.insert(
+         "sec-ch-ua",
+         HeaderValue::from_static("\"Chromium\";v=\"151\""),
+      );
       shape_headers(&mut headers, Purpose::Api, &HeaderMap::new());
       assert_eq!(headers.get(header::ACCEPT).unwrap(), "*/*");
       assert_eq!(headers.get("sec-fetch-mode").unwrap(), "cors");

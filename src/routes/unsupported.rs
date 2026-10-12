@@ -1,19 +1,12 @@
 use axum::{
    Router,
    extract::State,
-   response::{
-      Html,
-      IntoResponse as _,
-      Response,
-   },
+   response::{Html, IntoResponse as _, Response},
    routing::get,
 };
 use maud::html;
 
-use crate::{
-   AppState,
-   views::layout,
-};
+use crate::{AppState, views::layout};
 
 pub fn router() -> Router<AppState> {
    Router::new()

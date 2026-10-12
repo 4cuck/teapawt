@@ -1,7 +1,4 @@
-use serde::{
-   Deserialize,
-   Serialize,
-};
+use serde::{Deserialize, Serialize};
 
 use super::User;
 use crate::api::schema::CommunityNote;
@@ -23,9 +20,9 @@ pub struct Entity {
    /// Start and end byte indices in the text.
    pub indices: (usize, usize),
    /// Type of entity.
-   pub kind:    EntityKind,
+   pub kind: EntityKind,
    /// Target URL for the link.
-   pub url:     String,
+   pub url: String,
    /// Display text for the link.
    pub display: String,
 }
@@ -35,6 +32,8 @@ pub enum VideoType {
    #[default]
    #[serde(rename = "video/mp4")]
    Mp4,
+   #[serde(rename = "application/x-mpegURL")]
+   M3u8,
 }
 
 /// Cloudflare will not cache a video larger than this, so playback stops here.
@@ -47,23 +46,23 @@ pub const VIDEO_CACHE_LIMIT_MESSAGE: &str = "This video is larger than Cloudflar
 #[serde(default)]
 pub struct VideoVariant {
    pub content_type: VideoType,
-   pub url:          String,
-   pub bitrate:      i32,
-   pub resolution:   i32,
+   pub url: String,
+   pub bitrate: i32,
+   pub resolution: i32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Video {
-   pub duration_ms:   i32,
-   pub url:           String,
-   pub thumb:         String,
-   pub available:     bool,
-   pub reason:        String,
-   pub title:         String,
-   pub description:   String,
+   pub duration_ms: i32,
+   pub url: String,
+   pub thumb: String,
+   pub available: bool,
+   pub reason: String,
+   pub title: String,
+   pub description: String,
    pub playback_type: VideoType,
-   pub variants:      Vec<VideoVariant>,
+   pub variants: Vec<VideoVariant>,
 }
 
 impl Video {
@@ -96,6 +95,17 @@ impl Video {
          .filter(|variant| matches!(variant.content_type, VideoType::Mp4))
          .max_by_key(|variant| variant.resolution)
          .map(|variant| variant.url.as_str())
+   }
+
+   /// Highest HLS playlist, used when the visitor has enabled HLS playback.
+   pub fn best_hls_url(&self) -> Option<&str> {
+      self
+         .variants
+         .iter()
+         .filter(|variant| matches!(variant.content_type, VideoType::M3u8))
+         .max_by_key(|variant| variant.resolution)
+         .map(|variant| variant.url.as_str())
+         .filter(|url| !url.is_empty())
    }
 
    /// Parse dimensions from Twitter video URLs (`/vid/WIDTHxHEIGHT/` or
@@ -151,28 +161,28 @@ impl Video {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Gif {
-   pub url:      String,
-   pub thumb:    String,
+   pub url: String,
+   pub thumb: String,
    pub alt_text: String,
-   pub width:    i32,
-   pub height:   i32,
+   pub width: i32,
+   pub height: i32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Photo {
-   pub url:      String,
+   pub url: String,
    pub alt_text: String,
-   pub width:    i32,
-   pub height:   i32,
+   pub width: i32,
+   pub height: i32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GalleryPhoto {
-   pub url:      String,
+   pub url: String,
    pub tweet_id: String,
-   pub color:    String,
+   pub color: String,
 }
 
 pub type PhotoRail = Vec<GalleryPhoto>;
@@ -180,13 +190,13 @@ pub type PhotoRail = Vec<GalleryPhoto>;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Poll {
-   pub options:       Vec<String>,
-   pub values:        Vec<i64>,
-   pub votes:         i64,
-   pub leader:        i64,
+   pub options: Vec<String>,
+   pub values: Vec<i64>,
+   pub votes: i64,
+   pub leader: i64,
    #[serde(with = "time::serde::timestamp::option")]
-   pub end_time:      Option<time::OffsetDateTime>,
-   pub image:         Option<String>,
+   pub end_time: Option<time::OffsetDateTime>,
+   pub image: Option<String>,
    pub choice_images: Vec<String>,
 }
 
@@ -294,13 +304,13 @@ impl CardKind {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Card {
-   pub kind:         CardKind,
-   pub url:          String,
-   pub title:        String,
-   pub dest:         String,
-   pub text:         String,
-   pub image:        String,
-   pub video:        Option<Video>,
+   pub kind: CardKind,
+   pub url: String,
+   pub title: String,
+   pub dest: String,
+   pub text: String,
+   pub image: String,
+   pub video: Option<Video>,
    /// Raw member count for list/community cards. Views format the display
    /// string (e.g. "List · 42 Members").
    pub member_count: i32,
@@ -309,11 +319,11 @@ pub struct Card {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TweetStats {
-   pub replies:  i64,
+   pub replies: i64,
    pub retweets: i64,
-   pub likes:    i64,
-   pub quotes:   i64,
-   pub views:    i64,
+   pub likes: i64,
+   pub quotes: i64,
+   pub views: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -323,57 +333,57 @@ pub struct TweetStats {
    reason = "mirrors Twitter API tweet fields"
 )]
 pub struct Tweet {
-   pub id:                      i64,
-   pub thread_id:               i64,
-   pub reply_id:                i64,
-   pub user:                    User,
-   pub text:                    String,
+   pub id: i64,
+   pub thread_id: i64,
+   pub reply_id: i64,
+   pub user: User,
+   pub text: String,
    #[serde(with = "time::serde::timestamp::option")]
-   pub time:                    Option<time::OffsetDateTime>,
-   pub reply:                   Vec<String>,
+   pub time: Option<time::OffsetDateTime>,
+   pub reply: Vec<String>,
    pub reply_mentions_stripped: bool,
-   pub pinned:                  bool,
-   pub has_thread:              bool,
-   pub available:               bool,
-   pub tombstone:               String,
-   pub location:                String,
-   pub source:                  String,
-   pub stats:                   TweetStats,
-   pub retweet:                 Option<Box<Self>>,
-   pub attribution:             Option<User>,
-   pub media_tags:              Vec<User>,
-   pub quote:                   Option<Box<Self>>,
-   pub card:                    Option<Card>,
-   pub poll:                    Option<Poll>,
-   pub gifs:                    Vec<Gif>,
-   pub video:                   Option<Video>,
-   pub additional_videos:       Vec<Video>,
-   pub photos:                  Vec<Photo>,
+   pub pinned: bool,
+   pub has_thread: bool,
+   pub available: bool,
+   pub tombstone: String,
+   pub location: String,
+   pub source: String,
+   pub stats: TweetStats,
+   pub retweet: Option<Box<Self>>,
+   pub attribution: Option<User>,
+   pub media_tags: Vec<User>,
+   pub quote: Option<Box<Self>>,
+   pub card: Option<Card>,
+   pub poll: Option<Poll>,
+   pub gifs: Vec<Gif>,
+   pub video: Option<Video>,
+   pub additional_videos: Vec<Video>,
+   pub photos: Vec<Photo>,
    /// Community note (Birdwatch) -- structured data, rendered in views.
-   pub note:                    Option<CommunityNote>,
+   pub note: Option<CommunityNote>,
    /// Content disclosure labels (paid promotion, AI-generated media).
-   pub sensitive:               bool,
-   pub paid_promotion:          bool,
-   pub ai_generated:            bool,
+   pub sensitive: bool,
+   pub paid_promotion: bool,
+   pub ai_generated: bool,
    /// Edit history tweet IDs.
-   pub history:                 Vec<i64>,
+   pub history: Vec<i64>,
    /// Text entities for expansion (mentions, hashtags, URLs).
-   pub entities:                Vec<Entity>,
+   pub entities: Vec<Entity>,
    /// BCP-47 language code from Twitter's language detection.
-   pub lang:                    String,
+   pub lang: String,
    /// Whether Twitter considers this tweet translatable.
-   pub is_translatable:         bool,
+   pub is_translatable: bool,
    /// Pre-fetched translation for embeds (OG tags, `ActivityPub`).
-   pub translation:             Option<Translation>,
+   pub translation: Option<Translation>,
 }
 
 /// Translation of a tweet's text via Twitter's Strato translation API.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Translation {
-   pub text:                String,
-   pub source_lang:         String,
-   pub dest_lang:           String,
+   pub text: String,
+   pub source_lang: String,
+   pub dest_lang: String,
    pub source_lang_display: String,
 }
 
@@ -398,7 +408,8 @@ impl Tweet {
 
    /// A reply to someone other than the author. A self-thread stays.
    pub fn replies_to_someone_else(&self) -> bool {
-      self.reply
+      self
+         .reply
          .iter()
          .any(|name| !name.eq_ignore_ascii_case(&self.user.username))
    }

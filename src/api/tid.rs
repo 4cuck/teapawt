@@ -8,49 +8,34 @@
 use std::{
    collections::HashMap,
    sync::Arc,
-   time::{
-      Duration,
-      Instant,
-   },
+   time::{Duration, Instant},
 };
 
-use axum::http::{
-   HeaderMap,
-   header,
-};
-use tokio::sync::{
-   Mutex,
-   RwLock,
-};
+use axum::http::{HeaderMap, header};
+use tokio::sync::{Mutex, RwLock};
 use xitter_txid::transaction::ClientTransaction;
 
 use super::{
    ProxyPool,
    auth::SessionPool,
-   http::{
-      Egress,
-      HttpClient,
-   },
-   operations::{
-      self,
-      Operations,
-   },
+   http::{Egress, HttpClient},
+   operations::{self, Operations},
 };
 
 /// Cached transaction ID client that refreshes periodically.
 #[derive(Clone)]
 pub struct TidClient {
-   inner:      Arc<RwLock<Option<ClientTransaction>>>,
-   http:       HttpClient,
+   inner: Arc<RwLock<Option<ClientTransaction>>>,
+   http: HttpClient,
    /// Loads the web client's script chunks from abs.twimg.com.
-   scripts:    HttpClient,
-   sessions:   SessionPool,
-   proxies:    Option<Arc<ProxyPool>>,
+   scripts: HttpClient,
+   sessions: SessionPool,
+   proxies: Option<Arc<ProxyPool>>,
    operations: Operations,
    last_fetch: Arc<Mutex<Instant>>,
-   refused:    Arc<RwLock<HashMap<String, Instant>>>,
+   refused: Arc<RwLock<HashMap<String, Instant>>>,
    /// When GraphQL operations were last read again after an empty answer.
-   rechecked:  Arc<Mutex<Option<Instant>>>,
+   rechecked: Arc<Mutex<Option<Instant>>>,
 }
 
 /// How often to refresh the TID client.
@@ -293,7 +278,7 @@ impl TidClient {
       );
       let egress = Egress {
          session: session_id,
-         proxy:   self
+         proxy: self
             .proxies
             .as_ref()
             .map(|pool| pool.for_session(session_id)),

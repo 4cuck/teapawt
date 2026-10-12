@@ -1,31 +1,28 @@
 use std::collections::HashMap;
 
-use serde::{
-   Deserialize,
-   Serialize,
-};
+use serde::{Deserialize, Serialize};
 
 use super::User;
 
 /// A Twitter Article (long-form Notes).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Article {
-   pub title:       String,
+   pub title: String,
    pub cover_image: String,
-   pub user:        User,
+   pub user: User,
    #[serde(with = "time::serde::timestamp::option")]
-   pub time:        Option<time::OffsetDateTime>,
-   pub paragraphs:  Vec<ArticleParagraph>,
-   pub entities:    Vec<ArticleEntity>,
-   pub media:       HashMap<String, ArticleMedia>,
+   pub time: Option<time::OffsetDateTime>,
+   pub paragraphs: Vec<ArticleParagraph>,
+   pub entities: Vec<ArticleEntity>,
+   pub media: HashMap<String, ArticleMedia>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ArticleParagraph {
-   pub text:                String,
-   pub base_type:           ArticleBlockType,
+   pub text: String,
+   pub base_type: ArticleBlockType,
    pub inline_style_ranges: Vec<ArticleStyleRange>,
-   pub entity_ranges:       Vec<ArticleEntityRange>,
+   pub entity_ranges: Vec<ArticleEntityRange>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,7 +44,7 @@ pub enum ArticleBlockType {
 pub struct ArticleStyleRange {
    pub offset: usize,
    pub length: usize,
-   pub style:  ArticleStyle,
+   pub style: ArticleStyle,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,17 +61,17 @@ pub enum ArticleStyle {
 pub struct ArticleEntityRange {
    pub offset: usize,
    pub length: usize,
-   pub key:    usize,
+   pub key: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ArticleEntity {
    pub entity_type: ArticleEntityType,
-   pub url:         String,
-   pub media_ids:   Vec<String>,
-   pub tweet_id:    String,
-   pub twemoji:     String,
-   pub markdown:    String,
+   pub url: String,
+   pub media_ids: Vec<String>,
+   pub tweet_id: String,
+   pub twemoji: String,
+   pub markdown: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,7 +90,7 @@ pub enum ArticleEntityType {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ArticleMedia {
    pub media_type: ArticleMediaType,
-   pub url:        String,
+   pub url: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

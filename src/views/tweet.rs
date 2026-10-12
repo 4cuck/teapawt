@@ -1,42 +1,15 @@
-use maud::{
-   Markup,
-   PreEscaped,
-   html,
-};
+use maud::{Markup, PreEscaped, html};
 
 use crate::{
    config::Config,
    types::{
-      Card,
-      CardKind,
-      Chain,
-      Entity,
-      Photo,
-      Poll,
-      Prefs,
-      Tweet,
-      TweetStats,
-      User,
-      Video,
-      VIDEO_CACHE_LIMIT_MESSAGE,
+      Card, CardKind, Chain, Entity, Photo, Poll, Prefs, Tweet, TweetStats, User,
+      VIDEO_CACHE_LIMIT_MESSAGE, Video,
    },
-   utils::{
-      entity_expander::expand_with_regex,
-      expand_entities,
-      formatters,
-   },
+   utils::{entity_expander::expand_with_regex, expand_entities, formatters},
    views::renderutils::{
-      button_referer,
-      gen_img,
-      get_avatar_class,
-      get_medium_pic,
-      get_small_pic,
-      icon,
-      link_user,
-      parse_location,
-      proxy_media,
-      render_community_note,
-      verified_icon,
+      button_referer, gen_img, get_avatar_class, get_medium_pic, get_small_pic, icon, link_user,
+      parse_location, proxy_media, render_community_note, verified_icon,
    },
 };
 
@@ -82,16 +55,16 @@ pub const fn thread_context(index: usize, total: usize, is_definite_end: bool) -
    reason = "TweetRenderer is the canonical name used across the codebase"
 )]
 pub struct TweetRenderer<'a> {
-   tweet:       &'a Tweet,
-   config:      &'a Config,
-   is_main:     bool,
-   pinned:      bool,
-   prefs:       Option<&'a Prefs>,
-   thread_ctx:  ThreadContext,
+   tweet: &'a Tweet,
+   config: &'a Config,
+   is_main: bool,
+   pinned: bool,
+   prefs: Option<&'a Prefs>,
+   thread_ctx: ThreadContext,
    extra_class: &'a str,
-   index:       usize,
+   index: usize,
    sort_toggle: Option<&'a Markup>,
-   big_thumb:   bool,
+   big_thumb: bool,
 }
 
 impl<'a> TweetRenderer<'a> {
@@ -724,7 +697,20 @@ fn render_card_content(card: &Card) -> Markup {
    }
 }
 
-/// Render card preview for links.
+fn card_href(url: &str) -> String {
+   let path = url
+      .strip_prefix("https://x.com")
+      .or_else(|| url.strip_prefix("https://twitter.com"))
+      .or_else(|| url.strip_prefix("https://mobile.x.com"))
+      .or_else(|| url.strip_prefix("https://mobile.twitter.com"));
+   if let Some(path) = path {
+      let path = path.split(['?', '#']).next().unwrap_or(path);
+      if path.starts_with("/i/communities/") || path.starts_with("/i/broadcasts/") {
+         return path.to_owned();
+      }
+   }
+   url.to_owned()
+}
 ///
 /// App, Player, Summary, and `StoreLink` use small cards.
 /// All other variants, including `SummaryLarge` and `PromoWebsite`, use large
@@ -747,12 +733,12 @@ fn render_card(card: &Card, config: &Config, prefs: Option<&Prefs>) -> Markup {
            @if let Some(ref video) = card.video {
                div class="card-container" {
                    (render_video(video, config, prefs, false))
-                   a class="card-content-container" href=(card.url) {
+                   a class="card-content-container" href=(card_href(&card.url)) {
                        (render_card_content(card))
                    }
                }
            } @else {
-               a class="card-container" href=(card.url) {
+               a class="card-container" href=(card_href(&card.url)) {
                    @if !card.image.is_empty() {
                        (render_card_image(card, config, proxy_media(prefs)))
                    }
@@ -781,7 +767,11 @@ fn render_tweet_date(time: Option<time::OffsetDateTime>, href: &str) -> Markup {
 
 /// Render user avatar image with proper class from prefs.
 fn render_user_avatar(user: &User, config: &Config, prefs: Option<&Prefs>) -> Markup {
-   let avatar_url = formatters::get_pic_url(&user.user_pic, config.config.base64_media, proxy_media(prefs));
+   let avatar_url = formatters::get_pic_url(
+      &user.user_pic,
+      config.config.base64_media,
+      proxy_media(prefs),
+   );
    let avatar_class = get_avatar_class(prefs);
    html! {
        img src=(avatar_url) class=(avatar_class) alt="" loading="lazy";
@@ -798,8 +788,11 @@ pub fn render_thread_context(tweet: &Tweet, config: &Config, prefs: &Prefs) -> M
 
    let text_html = render_tweet_text_html(&display_tweet.text, &display_tweet.entities, "", config);
    let text = super::layout::strip_html(&text_html);
-   let avatar_url =
-      formatters::get_pic_url(&display_tweet.user.user_pic, config.config.base64_media, prefs.proxy_media);
+   let avatar_url = formatters::get_pic_url(
+      &display_tweet.user.user_pic,
+      config.config.base64_media,
+      prefs.proxy_media,
+   );
 
    html! {
        aside class="thread-context-bar" aria-label="Original post context" {
@@ -920,7 +913,7 @@ fn render_video(video: &Video, config: &Config, prefs: Option<&Prefs>, big_thumb
                        div class="video-overlay" {
                            (button_referer("/enablemp4", "Enable mp4 playback", "", "", ""))
                        }
-                   } @else if video.exceeds_cloudflare_cache() {
+                   } @else if proxy_media(prefs) && video.exceeds_cloudflare_cache() {
                        img src=(thumb) loading="lazy";
                        div class="video-overlay cache-limit" {
                            p {
@@ -935,8 +928,25 @@ fn render_video(video: &Video, config: &Config, prefs: Option<&Prefs>, big_thumb
                        video poster=(thumb) controls="" muted=[mute_videos.then_some("")] {
                            source src=(video_src) type="video/mp4";
                        }
+                   } @else if prefs.is_some_and(|pref| pref.hls_playback)
+                      && let Some(hls_url) = video.best_hls_url() {
+                       @let video_src = formatters::get_vid_url(hls_url, &config.config.hmac_key, config.config.base64_media, proxy_media(prefs));
+                       video class="hls" poster=(thumb) data-url=(video_src) data-autoload="false" muted=[mute_videos.then_some("")] {}
+                       div class="video-overlay hls-overlay" {
+                           div class="overlay-circle" {
+                               span class="overlay-triangle" {}
+                           }
+                           @if !duration.is_empty() {
+                               div class="overlay-duration" { (duration) }
+                           }
+                       }
+                   } @else if video.best_hls_url().is_some() {
+                       img src=(thumb) loading="lazy";
+                       div class="video-overlay" {
+                           (button_referer("/enablehls", "Enable hls playback", "", "", ""))
+                       }
                    } @else {
-                       // No MP4 URL available - show thumbnail with duration
+                       // No playable URL available - show thumbnail with duration
                        img src=(thumb) loading="lazy";
                        div class="video-overlay" {
                            div class="overlay-duration" { (duration) }

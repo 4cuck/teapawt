@@ -1,15 +1,7 @@
 use axum::{
    Router,
-   extract::{
-      Path,
-      Query,
-      State,
-   },
-   response::{
-      IntoResponse as _,
-      Redirect,
-      Response,
-   },
+   extract::{Path, Query, State},
+   response::{IntoResponse as _, Redirect, Response},
    routing::get,
 };
 use axum_extra::extract::CookieJar;
@@ -18,10 +10,7 @@ use serde::Deserialize;
 use crate::{
    AppState,
    config::Config,
-   error::{
-      Error,
-      Result,
-   },
+   error::{Error, Result},
    types::Prefs,
 };
 

@@ -1,16 +1,13 @@
 use std::collections::HashMap;
 
-use serde::{
-   Deserialize,
-   Serialize,
-};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RateLimit {
-   pub limit:     i32,
+   pub limit: i32,
    pub remaining: i32,
-   pub reset:     i64,
+   pub reset: i64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,41 +21,41 @@ pub enum SessionKind {
 /// Immutable session credentials, loaded once and `Arc`-shared.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionCredentials {
-   pub id:           i64,
-   pub username:     String,
-   pub kind:         SessionKind,
-   pub oauth_token:  String,
+   pub id: i64,
+   pub username: String,
+   pub kind: SessionKind,
+   pub oauth_token: String,
    pub oauth_secret: String,
-   pub auth_token:   String,
-   pub ct0:          String,
+   pub auth_token: String,
+   pub ct0: String,
 }
 
 /// Mutable rate-limit state, stored separately in the pool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionLimits {
-   pub limited:    bool,
+   pub limited: bool,
    pub limited_at: i64,
    /// The credentials themselves were refused, which no amount of waiting
    /// fixes, so this is kept apart from the rate-limit state that expires.
    #[serde(skip)]
-   pub rejected:        bool,
+   pub rejected: bool,
    /// Sensitive-media and search-safety filters have already been turned off
    /// for this session, so startup does not POST the same settings again.
    #[serde(default)]
-   pub filters_cleared:  bool,
+   pub filters_cleared: bool,
    /// An adult birthdate has already been written so X stops age-gating media.
    #[serde(default)]
    pub age_gate_cleared: bool,
-   pub apis:             HashMap<String, RateLimit>,
+   pub apis: HashMap<String, RateLimit>,
    /// Operations X answers with an empty 404 from this account while another
    /// account gets a result, by operation name, with when that was seen.
    #[serde(default)]
-   pub refused_ops:      HashMap<String, i64>,
+   pub refused_ops: HashMap<String, i64>,
    /// Operations this account has been seen getting results for, by
    /// operation name, with when.
    #[serde(default)]
-   pub verified_ops:     HashMap<String, i64>,
+   pub verified_ops: HashMap<String, i64>,
 }
 
 /// How long a globally-limited session stays limited before auto-recovery (15
@@ -114,12 +111,8 @@ impl SessionLimits {
    /// Leave this account out of `api` for [`REFUSED_OP_SECS`].
    pub fn refuse(&mut self, api: &str) {
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
-      self
-         .refused_ops
-         .retain(|_, at| now - *at < REFUSED_OP_SECS);
-      self
-         .refused_ops
-         .insert(operation_name(api).to_owned(), now);
+      self.refused_ops.retain(|_, at| now - *at < REFUSED_OP_SECS);
+      self.refused_ops.insert(operation_name(api).to_owned(), now);
       self.verified_ops.remove(operation_name(api));
    }
 
@@ -190,11 +183,14 @@ impl SessionLimits {
    }
 
    pub fn update_limit(&mut self, api: &str, limit: i32, remaining: i32, reset: i64) {
-      self.apis.insert(api.to_owned(), RateLimit {
-         limit,
-         remaining,
-         reset,
-      });
+      self.apis.insert(
+         api.to_owned(),
+         RateLimit {
+            limit,
+            remaining,
+            reset,
+         },
+      );
    }
 
    /// Record a single API as exhausted for the rest of the window.
@@ -212,21 +208,21 @@ impl SessionLimits {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
-   pub id:         i64,
-   pub username:   String,
-   pub pending:    i32,
-   pub limited:    bool,
+   pub id: i64,
+   pub username: String,
+   pub pending: i32,
+   pub limited: bool,
    pub limited_at: i64,
-   pub apis:       HashMap<String, RateLimit>,
-   pub kind:       SessionKind,
+   pub apis: HashMap<String, RateLimit>,
+   pub kind: SessionKind,
 
    // OAuth credentials
-   pub oauth_token:  String,
+   pub oauth_token: String,
    pub oauth_secret: String,
 
    // Cookie credentials
    pub auth_token: String,
-   pub ct0:        String,
+   pub ct0: String,
 }
 
 impl Session {
@@ -234,23 +230,23 @@ impl Session {
    pub fn into_credentials_and_limits(self) -> (SessionCredentials, SessionLimits) {
       (
          SessionCredentials {
-            id:           self.id,
-            username:     self.username,
-            kind:         self.kind,
-            oauth_token:  self.oauth_token,
+            id: self.id,
+            username: self.username,
+            kind: self.kind,
+            oauth_token: self.oauth_token,
             oauth_secret: self.oauth_secret,
-            auth_token:   self.auth_token,
-            ct0:          self.ct0,
+            auth_token: self.auth_token,
+            ct0: self.ct0,
          },
          SessionLimits {
-            limited:         self.limited,
-            limited_at:      self.limited_at,
-            rejected:         false,
-            filters_cleared:  false,
+            limited: self.limited,
+            limited_at: self.limited_at,
+            rejected: false,
+            filters_cleared: false,
             age_gate_cleared: false,
-            apis:             self.apis,
-            refused_ops:      HashMap::new(),
-            verified_ops:     HashMap::new(),
+            apis: self.apis,
+            refused_ops: HashMap::new(),
+            verified_ops: HashMap::new(),
          },
       )
    }

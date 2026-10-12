@@ -2,19 +2,9 @@ use std::slice;
 
 use axum::{
    Router,
-   extract::{
-      Path,
-      Query as AxumQuery,
-      RawQuery,
-      State,
-   },
+   extract::{Path, Query as AxumQuery, RawQuery, State},
    http::header::CONTENT_TYPE,
-   response::{
-      Html,
-      IntoResponse as _,
-      Redirect,
-      Response,
-   },
+   response::{Html, IntoResponse as _, Redirect, Response},
    routing::get,
 };
 use axum_extra::extract::CookieJar;
@@ -23,25 +13,11 @@ use serde::Deserialize;
 use super::helpers;
 use crate::{
    AppState,
-   cache::{
-      keys as cache_keys,
-      ttl,
-   },
+   cache::{keys as cache_keys, ttl},
    config::Config,
    error::Result,
-   types::{
-      PaginatedResult,
-      Prefs,
-      Query,
-      QueryKind,
-      Timeline,
-      Tweet,
-      User,
-   },
-   views::{
-      layout,
-      search as search_view,
-   },
+   types::{PaginatedResult, Prefs, Query, QueryKind, Timeline, Tweet, User},
+   views::{layout, search as search_view},
 };
 
 /// One card per original tweet. Latest search otherwise lists every retweet
@@ -62,61 +38,64 @@ fn dedup_search_tweets(tweets: Vec<Tweet>) -> Vec<Tweet> {
          _ => {},
       }
    }
-   order.into_iter().filter_map(|id| best.remove(&id)).collect()
+   order
+      .into_iter()
+      .filter_map(|id| best.remove(&id))
+      .collect()
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct SearchQuery {
    #[serde(rename = "q")]
-   pub query:      Option<String>,
+   pub query: Option<String>,
    #[serde(rename = "f")]
-   pub filter:     Option<String>,
-   pub cursor:     Option<String>,
-   pub view:       Option<String>,
+   pub filter: Option<String>,
+   pub cursor: Option<String>,
+   pub view: Option<String>,
    // Filter parameters
-   pub from:       Option<String>,
-   pub since:      Option<String>,
-   pub until:      Option<String>,
-   pub min_faves:  Option<String>,
+   pub from: Option<String>,
+   pub since: Option<String>,
+   pub until: Option<String>,
+   pub min_faves: Option<String>,
    // Filter toggles (f-media=on, e-replies=on, etc.)
    #[serde(rename = "f-media")]
-   pub f_media:    Option<String>,
+   pub f_media: Option<String>,
    #[serde(rename = "f-images")]
-   pub f_images:   Option<String>,
+   pub f_images: Option<String>,
    #[serde(rename = "f-videos")]
-   pub f_videos:   Option<String>,
+   pub f_videos: Option<String>,
    #[serde(rename = "f-links")]
-   pub f_links:    Option<String>,
+   pub f_links: Option<String>,
    #[serde(rename = "f-news")]
-   pub f_news:     Option<String>,
+   pub f_news: Option<String>,
    #[serde(rename = "f-quote")]
-   pub f_quote:    Option<String>,
+   pub f_quote: Option<String>,
    #[serde(rename = "f-verified")]
    pub f_verified: Option<String>,
    #[serde(rename = "e-replies")]
-   pub e_replies:  Option<String>,
+   pub e_replies: Option<String>,
    #[serde(rename = "e-retweets")]
    pub e_retweets: Option<String>,
    /// AJAX infinite-scroll request — return a timeline fragment, not a page.
-   pub scroll:     Option<String>,
+   pub scroll: Option<String>,
 }
 
 impl SearchQuery {
    /// Convert URL parameters to `SearchFilters` for form rendering.
    pub fn to_filters(&self) -> search_view::SearchFilters {
       search_view::SearchFilters {
-         media:            self.f_media.as_deref() == Some("on"),
-         images:           self.f_images.as_deref() == Some("on"),
-         videos:           self.f_videos.as_deref() == Some("on"),
-         links:            self.f_links.as_deref() == Some("on"),
-         news:             self.f_news.as_deref() == Some("on"),
-         quote:            self.f_quote.as_deref() == Some("on"),
-         verified:         self.f_verified.as_deref() == Some("on"),
-         exclude_replies:  self.e_replies.as_deref() == Some("on"),
+         media: self.f_media.as_deref() == Some("on"),
+         images: self.f_images.as_deref() == Some("on"),
+         videos: self.f_videos.as_deref() == Some("on"),
+         links: self.f_links.as_deref() == Some("on"),
+         news: self.f_news.as_deref() == Some("on"),
+         quote: self.f_quote.as_deref() == Some("on"),
+         verified: self.f_verified.as_deref() == Some("on"),
+         exclude_replies: self.e_replies.as_deref() == Some("on"),
          exclude_retweets: self.e_retweets.as_deref() == Some("on"),
-         since:            self.since.clone().unwrap_or_default(),
-         until:            self.until.clone().unwrap_or_default(),
-         min_faves:        self.min_faves.clone().unwrap_or_default(),
+         since: self.since.clone().unwrap_or_default(),
+         until: self.until.clone().unwrap_or_default(),
+         min_faves: self.min_faves.clone().unwrap_or_default(),
       }
    }
 
@@ -277,17 +256,22 @@ async fn search(
    if raw_q.is_empty() && params.from.is_none() {
       let filters = params.to_filters();
       let content = match active_tab {
-         "users" => {
-            search_view::render_user_search_results(
-               &raw_q,
-               &[],
-               &state.config,
-               None,
-               None,
-               Some(&prefs),
-            )
-         },
-         "lists" => search_view::render_list_search_results(&raw_q, &[], &state.config, None, None, prefs.proxy_media),
+         "users" => search_view::render_user_search_results(
+            &raw_q,
+            &[],
+            &state.config,
+            None,
+            None,
+            Some(&prefs),
+         ),
+         "lists" => search_view::render_list_search_results(
+            &raw_q,
+            &[],
+            &state.config,
+            None,
+            None,
+            prefs.proxy_media,
+         ),
          _ => {
             let empty_tweets = Vec::new();
             search_view::render_search_results_with_prefs(
@@ -378,24 +362,24 @@ async fn search(
                .render();
             Ok(Html(markup.into_string()).into_response())
          },
-         Err(err) => {
-            Ok(search_error(&state.config, &err))
-         },
+         Err(err) => Ok(search_error(&state.config, &err)),
       }
    } else if active_tab == "users" {
       let search_result = if params.cursor.is_none() {
          let cache_key = cache_keys::search_users(&raw_q, None);
-         if let Some(cached) = helpers::swr_take::<PaginatedResult<User>, _, _>(&state, &cache_key, {
-            let raw_q = raw_q.clone();
-            let cache_key = cache_key.clone();
-            move |state| async move {
-               if let Ok(data) = state.api.search_users(&raw_q, None).await {
-                  state
-                     .cache
-                     .set_swr(&cache_key, &data, ttl::SEARCH, ttl::SEARCH_STALE);
+         if let Some(cached) =
+            helpers::swr_take::<PaginatedResult<User>, _, _>(&state, &cache_key, {
+               let raw_q = raw_q.clone();
+               let cache_key = cache_key.clone();
+               move |state| async move {
+                  if let Ok(data) = state.api.search_users(&raw_q, None).await {
+                     state
+                        .cache
+                        .set_swr(&cache_key, &data, ttl::SEARCH, ttl::SEARCH_STALE);
+                  }
                }
-            }
-         }) {
+            })
+         {
             Ok(cached)
          } else {
             let result = state.api.search_users(&raw_q, None).await;
@@ -453,9 +437,7 @@ async fn search(
                .render();
             Ok(Html(markup.into_string()).into_response())
          },
-         Err(err) => {
-            Ok(search_error(&state.config, &err))
-         },
+         Err(err) => Ok(search_error(&state.config, &err)),
       }
    } else {
       // Tweet search
@@ -559,9 +541,7 @@ async fn search(
                .render();
             Ok(Html(markup.into_string()).into_response())
          },
-         Err(err) => {
-            Ok(search_error(&state.config, &err))
-         },
+         Err(err) => Ok(search_error(&state.config, &err)),
       }
    }
 }
@@ -580,10 +560,10 @@ async fn hashtag(
       jar,
       RawQuery(None),
       AxumQuery(SearchQuery {
-         query:  Some(hashtag_query),
+         query: Some(hashtag_query),
          filter: query.filter,
          cursor: query.cursor,
-         view:   query.view,
+         view: query.view,
          scroll: query.scroll,
          ..Default::default()
       }),

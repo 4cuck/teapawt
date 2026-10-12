@@ -2,31 +2,12 @@ use std::collections::HashMap;
 
 use super::user::parse_user_object;
 use crate::{
-   api::schema::{
-      InlineArticle,
-      InlineContentState,
-      TweetData,
-   },
-   error::{
-      Error,
-      Result,
-   },
+   api::schema::{InlineArticle, InlineContentState, TweetData},
+   error::{Error, Result},
    types::{
-      Article,
-      ArticleBlockType,
-      ArticleEntity,
-      ArticleEntityRange,
-      ArticleEntityType,
-      ArticleMedia,
-      ArticleMediaType,
-      ArticleParagraph,
-      ArticleStyle,
-      ArticleStyleRange,
-      Card,
-      CardKind,
-      EntityKind,
-      Tweet,
-      User,
+      Article, ArticleBlockType, ArticleEntity, ArticleEntityRange, ArticleEntityType,
+      ArticleMedia, ArticleMediaType, ArticleParagraph, ArticleStyle, ArticleStyleRange, Card,
+      CardKind, EntityKind, Tweet, User,
    },
 };
 
@@ -139,23 +120,19 @@ fn parse_inline_article(raw: &InlineArticle, user: User) -> Article {
 
          let type_name = info.__typename.as_deref().unwrap_or("");
          let (media_type, url) = match type_name {
-            "ApiImage" => {
-               (
-                  ArticleMediaType::ApiImage,
-                  info.original_img_url.clone().unwrap_or_default(),
-               )
-            },
-            "ApiGif" => {
-               (
-                  ArticleMediaType::ApiGif,
-                  info
-                     .variants
-                     .as_ref()
-                     .and_then(|vars| vars.first())
-                     .and_then(|var| var.url.clone())
-                     .unwrap_or_default(),
-               )
-            },
+            "ApiImage" => (
+               ArticleMediaType::ApiImage,
+               info.original_img_url.clone().unwrap_or_default(),
+            ),
+            "ApiGif" => (
+               ArticleMediaType::ApiGif,
+               info
+                  .variants
+                  .as_ref()
+                  .and_then(|vars| vars.first())
+                  .and_then(|var| var.url.clone())
+                  .unwrap_or_default(),
+            ),
             _ => continue,
          };
 
@@ -212,12 +189,10 @@ fn parse_content_state(state: &InlineContentState) -> (Vec<ArticleParagraph>, Ve
          let entity_ranges = block
             .entity_ranges
             .iter()
-            .map(|er| {
-               ArticleEntityRange {
-                  offset: er.offset,
-                  length: er.length,
-                  key:    er.key,
-               }
+            .map(|er| ArticleEntityRange {
+               offset: er.offset,
+               length: er.length,
+               key: er.key,
             })
             .collect();
 

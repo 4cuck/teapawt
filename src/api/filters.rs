@@ -13,16 +13,9 @@ use bytes::Bytes;
 use serde::Deserialize;
 use tokio::time::sleep;
 
-use super::{
-   ApiClient,
-   SessionLease,
-   endpoints,
-};
+use super::{ApiClient, SessionLease, endpoints};
 use crate::{
-   error::{
-      Error,
-      Result,
-   },
+   error::{Error, Result},
    types::SessionKind,
 };
 
@@ -317,8 +310,7 @@ fn birthdate_write_rejected(body: &[u8]) -> bool {
       return false;
    };
    parsed.errors.into_iter().flatten().any(|err| {
-      err
-         .message
+      err.message
          .as_deref()
          .is_some_and(|msg| !birthdate_already_locked(msg))
    })

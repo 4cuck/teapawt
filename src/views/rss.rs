@@ -1,26 +1,12 @@
-use std::{
-   collections::HashSet,
-   fmt::Write as _,
-};
+use std::{collections::HashSet, fmt::Write as _};
 
 use crate::{
    config::Config,
-   types::{
-      List,
-      Tweet,
-      Tweets,
-      User,
-   },
-   utils::{
-      formatters,
-      html_escape,
-   },
+   types::{List, Tweet, Tweets, User},
+   utils::{formatters, html_escape},
    views::{
       layout::strip_html,
-      renderutils::{
-         community_note_to_html,
-         tweet_link,
-      },
+      renderutils::{community_note_to_html, tweet_link},
    },
 };
 
@@ -280,10 +266,7 @@ fn render_rss_tweet(tweet: &Tweet, config: &Config) -> String {
    if !tweet.photos.is_empty() {
       for photo in &tweet.photos {
          let pic_url = formatters::join_base(url_prefix, &get_pic_url(&photo.url, config));
-         let _ = write!(
-            body,
-            r#"<img src="{pic_url}" style="max-width:250px;" />"#
-         );
+         let _ = write!(body, r#"<img src="{pic_url}" style="max-width:250px;" />"#);
       }
    }
    if let Some(ref video) = tweet.video {
@@ -327,10 +310,7 @@ fn render_rss_tweet(tweet: &Tweet, config: &Config) -> String {
       // Card image
       if !card.image.is_empty() {
          let card_url = formatters::join_base(url_prefix, &get_pic_url(&card.image, config));
-         let _ = write!(
-            body,
-            r#"<img src="{card_url}" style="max-width:250px;" />"#
-         );
+         let _ = write!(body, r#"<img src="{card_url}" style="max-width:250px;" />"#);
       }
    }
 
@@ -432,7 +412,12 @@ fn get_pic_url(url: &str, config: &Config) -> String {
 
 /// Helper to get a signed proxied video URL path (not full URL).
 fn get_video_url(url: &str, config: &Config) -> String {
-   formatters::get_vid_url(url, &config.config.hmac_key, config.config.base64_media, false)
+   formatters::get_vid_url(
+      url,
+      &config.config.hmac_key,
+      config.config.base64_media,
+      false,
+   )
 }
 
 /// Escape XML special characters (delegates to shared `html_escape`).

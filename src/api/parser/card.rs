@@ -3,25 +3,9 @@ use std::collections::HashMap;
 use time::format_description::well_known::Rfc3339;
 
 use crate::{
-   api::schema::{
-      BindingValues,
-      CardData,
-      Destination,
-      MediaType,
-      UnifiedCard,
-   },
-   error::{
-      Error,
-      Result,
-   },
-   types::{
-      Card,
-      CardKind,
-      Poll,
-      Video,
-      VideoType,
-      VideoVariant,
-   },
+   api::schema::{BindingValues, CardData, Destination, MediaType, UnifiedCard},
+   error::{Error, Result},
+   types::{Card, CardKind, Poll, Video, VideoType, VideoVariant},
 };
 
 /// Extract destination URL and vanity from typed destination objects.
@@ -196,9 +180,9 @@ fn parse_promo_video(bv: &BindingValues) -> Video {
    let variants = if available {
       vec![VideoVariant {
          content_type: VideoType::Mp4,
-         url:          stream_url.clone(),
-         bitrate:      0,
-         resolution:   0,
+         url: stream_url.clone(),
+         bitrate: 0,
+         resolution: 0,
       }]
    } else {
       Vec::new()
@@ -227,13 +211,13 @@ fn parse_unified_card(bv: &BindingValues) -> Card {
    let card = serde_json::from_str::<UnifiedCard>(unified_card_json).unwrap_or_default();
 
    let mut result = Card {
-      kind:         CardKind::Summary,
-      url:          String::new(),
-      title:        String::new(),
-      dest:         String::new(),
-      text:         String::new(),
-      image:        String::new(),
-      video:        None,
+      kind: CardKind::Summary,
+      url: String::new(),
+      title: String::new(),
+      dest: String::new(),
+      text: String::new(),
+      image: String::new(),
+      video: None,
       member_count: 0,
    };
 

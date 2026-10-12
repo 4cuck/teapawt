@@ -1,8 +1,4 @@
-use maud::{
-   Markup,
-   PreEscaped,
-   html,
-};
+use maud::{Markup, PreEscaped, html};
 
 use crate::types::Prefs;
 
@@ -119,7 +115,8 @@ pub fn render_preferences_form(
                    div class="pref-section" data-section="media" {
                        legend { "Media" }
                        div class="pref-grid" {
-                           (gen_checkbox("proxyMedia", "Proxy images and videos", prefs.proxy_media))
+                           (gen_checkbox("proxyMedia", "Proxy media streaming through the server (might be slow)", prefs.proxy_media))
+                           (gen_checkbox("hlsPlayback", "Enable HLS video streaming (requires JavaScript)", prefs.hls_playback))
                            (gen_checkbox("mp4Playback", "Enable mp4 video playback", prefs.mp4_playback))
                            (gen_checkbox("muteVideos", "Mute videos by default", prefs.mute_videos))
                            (gen_checkbox("autoplayGifs", "Autoplay gifs", prefs.autoplay_gifs))

@@ -1,53 +1,14 @@
-use std::{
-   collections::BTreeMap,
-   time::Duration,
-};
+use std::{collections::BTreeMap, time::Duration};
 
 use super::super::search_denylist::bypass_denylist;
 use super::{
-   AboutAccountData,
-   AccountContext,
-   ApiClient,
-   Article,
-   AudioSpaceData,
-   BroadcastsData,
-   CardKind,
-   Conversation,
-   ConversationData,
-   Deserialize,
-   EditHistory,
-   EditHistoryData,
-   Error,
-   List,
-   ListByIdData,
-   ListBySlugData,
-   ListMembersData,
-   ListTimelineData,
-   PaginatedResult,
-   PhotoRail,
-   Profile,
-   Result,
-   RetweetersData,
-   SearchTimelineData,
-   SessionKind,
-   Timeline,
-   Translation,
-   Tweet,
-   User,
-   UserResultData,
-   UserTimelineData,
-   article_tweet_data,
-   audio_space_host,
-   audio_space_status,
-   broadcast_id_from_url,
-   broadcast_status,
-   clamp_community_value,
-   endpoints,
-   header,
-   hosted_by,
-   parser,
-   space_id_from_url,
-   timeout,
+   AboutAccountData, AccountContext, ApiClient, Article, AudioSpaceData, BroadcastsData, CardKind,
+   Conversation, ConversationData, Deserialize, EditHistory, EditHistoryData, Error, List,
+   ListByIdData, ListBySlugData, ListMembersData, ListTimelineData, LiveStreamStatus,
+   PaginatedResult, PhotoRail, Profile, Result, RetweetersData, SearchTimelineData, SessionKind,
+   Timeline, Translation, Tweet, User, UserResultData, UserTimelineData, article_tweet_data,
+   audio_space_host, audio_space_status, broadcast_id_from_url, broadcast_status,
+   clamp_community_value, endpoints, header, hosted_by, parser, space_id_from_url, timeout,
 };
 
 /// Where a profile's photo rail comes from.
@@ -150,12 +111,10 @@ impl ApiClient {
 
       Ok(raw
          .about_profile
-         .map_or_else(AccountContext::default, |profile| {
-            AccountContext {
-               account_based_in:  profile.account_based_in.unwrap_or_default(),
-               connection_source: profile.source.unwrap_or_default(),
-               location_accurate: profile.location_accurate,
-            }
+         .map_or_else(AccountContext::default, |profile| AccountContext {
+            account_based_in: profile.account_based_in.unwrap_or_default(),
+            connection_source: profile.source.unwrap_or_default(),
+            location_accurate: profile.location_accurate,
          }))
    }
 
@@ -171,7 +130,7 @@ impl ApiClient {
          #[serde(rename = "l")]
          location: Option<String>,
          #[serde(rename = "d")]
-         device:   Option<String>,
+         device: Option<String>,
          #[serde(rename = "a")]
          accurate: Option<bool>,
       }
@@ -208,7 +167,7 @@ impl ApiClient {
                continue;
             }
             let context = AccountContext {
-               account_based_in:  clamp_community_value(info.location),
+               account_based_in: clamp_community_value(info.location),
                connection_source: clamp_community_value(info.device),
                location_accurate: info.accurate,
             };
@@ -461,18 +420,14 @@ impl ApiClient {
          .charged_session_by_kind(endpoints::GRAPH_USER_MEDIA, endpoints::GRAPH_USER_MEDIA_V2)
          .await?;
       let (endpoint, variables) = match session.kind {
-         SessionKind::OAuth => {
-            (
-               endpoints::GRAPH_USER_MEDIA_V2,
-               endpoints::user_media_v2_vars(user_id, cursor),
-            )
-         },
-         SessionKind::Cookie => {
-            (
-               endpoints::GRAPH_USER_MEDIA,
-               endpoints::user_media_vars(user_id, cursor),
-            )
-         },
+         SessionKind::OAuth => (
+            endpoints::GRAPH_USER_MEDIA_V2,
+            endpoints::user_media_v2_vars(user_id, cursor),
+         ),
+         SessionKind::Cookie => (
+            endpoints::GRAPH_USER_MEDIA,
+            endpoints::user_media_vars(user_id, cursor),
+         ),
       };
 
       let retry_kind = session.kind;
@@ -492,7 +447,9 @@ impl ApiClient {
 
    /// Get user's profile with tweets.
    pub async fn get_profile(&self, screen_name: &str, cursor: Option<&str>) -> Result<Profile> {
-      self.get_profile_hinted(screen_name, cursor, None, None).await
+      self
+         .get_profile_hinted(screen_name, cursor, None, None)
+         .await
    }
 
    /// Same as [`get_profile`], but a known user (or id stub) lets tweets and
@@ -522,12 +479,10 @@ impl ApiClient {
             );
             let user = match user_res {
                Ok(user) => user,
-               Err(err) => {
-                  known
-                     .filter(|user| !user.fullname.is_empty())
-                     .cloned()
-                     .ok_or(err)?
-               },
+               Err(err) => known
+                  .filter(|user| !user.fullname.is_empty())
+                  .cloned()
+                  .ok_or(err)?,
             };
             if user.protected || user.suspended {
                return Ok(Profile {
@@ -565,8 +520,10 @@ impl ApiClient {
       }
 
       let (tweets, rail) = if cursor.is_none() {
-         let (tweets_result, rail) =
-            tokio::join!(self.get_user_tweets(&user.id, None), self.rail_for(&user.id, rail));
+         let (tweets_result, rail) = tokio::join!(
+            self.get_user_tweets(&user.id, None),
+            self.rail_for(&user.id, rail)
+         );
          (tweets_result?, rail)
       } else {
          (self.get_user_tweets(&user.id, cursor).await?, Rail::None)
@@ -830,20 +787,16 @@ impl ApiClient {
          )
          .await?;
       let (endpoint, variables, field_toggles) = match session.kind {
-         SessionKind::OAuth => {
-            (
-               endpoints::GRAPH_USER_TWEETS_AND_REPLIES_V2,
-               endpoints::user_tweets_and_replies_v2_vars(user_id, cursor),
-               None,
-            )
-         },
-         SessionKind::Cookie => {
-            (
-               endpoints::GRAPH_USER_TWEETS_AND_REPLIES,
-               endpoints::user_tweets_and_replies_vars(user_id, cursor),
-               Some(endpoints::USER_TWEETS_FIELD_TOGGLES),
-            )
-         },
+         SessionKind::OAuth => (
+            endpoints::GRAPH_USER_TWEETS_AND_REPLIES_V2,
+            endpoints::user_tweets_and_replies_v2_vars(user_id, cursor),
+            None,
+         ),
+         SessionKind::Cookie => (
+            endpoints::GRAPH_USER_TWEETS_AND_REPLIES,
+            endpoints::user_tweets_and_replies_vars(user_id, cursor),
+            Some(endpoints::USER_TWEETS_FIELD_TOGGLES),
+         ),
       };
       let retry_kind = session.kind;
       let data = self
@@ -956,11 +909,11 @@ impl ApiClient {
       )]
       #[derive(Deserialize)]
       struct TranslationResponse {
-         translation:               Option<String>,
+         translation: Option<String>,
          #[serde(rename = "sourceLanguage")]
-         source_language:           Option<String>,
+         source_language: Option<String>,
          #[serde(rename = "destinationLanguage")]
-         dest_language:             Option<String>,
+         dest_language: Option<String>,
          #[serde(rename = "localizedSourceLanguage")]
          localized_source_language: Option<String>,
       }
@@ -970,23 +923,20 @@ impl ApiClient {
          .map_err(|err| Error::Internal(format!("Translation parse error: {err}")))?;
 
       Ok(Translation {
-         text:                resp.translation.unwrap_or_default(),
-         source_lang:         resp.source_language.unwrap_or_default(),
-         dest_lang:           resp.dest_language.unwrap_or_default(),
+         text: resp.translation.unwrap_or_default(),
+         source_lang: resp.source_language.unwrap_or_default(),
+         dest_lang: resp.dest_language.unwrap_or_default(),
          source_lang_display: resp.localized_source_language.unwrap_or_default(),
       })
    }
 
    /// Translate a tweet using Kagi Translate API.
    pub async fn kagi_translate(&self, tweet: &Tweet, kagi_token: &str) -> Result<Translation> {
-      use percent_encoding::{
-         NON_ALPHANUMERIC,
-         utf8_percent_encode,
-      };
+      use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 
       #[derive(Deserialize)]
       struct KagiResponse {
-         translation:       Option<String>,
+         translation: Option<String>,
          detected_language: Option<KagiDetectedLang>,
       }
 
@@ -1045,9 +995,9 @@ impl ApiClient {
          .unwrap_or_else(|| tweet.lang.clone());
 
       Ok(Translation {
-         text:                kagi.translation.unwrap_or_default(),
-         source_lang:         tweet.lang.clone(),
-         dest_lang:           "en".to_owned(),
+         text: kagi.translation.unwrap_or_default(),
+         source_lang: tweet.lang.clone(),
+         dest_lang: "en".to_owned(),
          source_lang_display: source_display,
       })
    }
@@ -1075,4 +1025,123 @@ impl ApiClient {
    pub async fn get_session_debug(&self) -> super::super::DebugResponse {
       self.sessions.get_debug().await
    }
+
+   /// Broadcast metadata plus its HLS playlist, when X still has one.
+   pub async fn get_broadcast(&self, id: &str) -> Result<WatchedBroadcast> {
+      if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+         return Err(Error::InvalidUrl("Invalid broadcast id".into()));
+      }
+      let url = endpoints::broadcast_show_url(id);
+      let data = self
+         .cookie_json_request::<BroadcastsData>(
+            endpoints::BROADCAST_SHOW_PATH,
+            endpoints::BROADCAST_SHOW_PATH,
+            &url,
+         )
+         .await?;
+      let Some(metadata) = data.broadcasts.get(id) else {
+         return Err(Error::NotFound("Broadcast not found".into()));
+      };
+      let m3u8 = if metadata.media_key.is_empty() {
+         String::new()
+      } else {
+         let stream_url = endpoints::live_stream_url(&metadata.media_key);
+         let path = format!(
+            "{}{}",
+            endpoints::LIVE_VIDEO_STREAM_PATH,
+            metadata.media_key
+         );
+         self
+            .cookie_json_request::<LiveStreamStatus>(&path, &path, &stream_url)
+            .await
+            .ok()
+            .and_then(|status| status.source)
+            .and_then(|source| {
+               source
+                  .no_redirect_playback_url
+                  .filter(|url| !url.is_empty())
+                  .or(source.location)
+            })
+            .unwrap_or_default()
+      };
+      Ok(WatchedBroadcast {
+         id: id.to_owned(),
+         title: if metadata.status.is_empty() {
+            "Live broadcast".to_owned()
+         } else {
+            metadata.status.clone()
+         },
+         state: metadata.state.clone(),
+         thumb: metadata.image_url.clone(),
+         username: metadata.twitter_username.clone(),
+         display_name: metadata.user_display_name.clone(),
+         watched: metadata.total_watched.unwrap_or(0),
+         watching: metadata.total_watching.unwrap_or(0),
+         replay: metadata.available_for_replay,
+         status_line: broadcast_status(metadata),
+         m3u8,
+      })
+   }
+
+   pub async fn get_community(&self, id: &str) -> Result<parser::CommunityInfo> {
+      snowflake(id)?;
+      let data = self
+         .graphql_request::<parser::CommunityQueryData>(
+            endpoints::GRAPH_COMMUNITY,
+            &endpoints::community_vars(id),
+            endpoints::GQL_FEATURES,
+            None,
+         )
+         .await?;
+      let info = parser::parse_community(&data);
+      if info.id.is_empty() || info.name.is_empty() {
+         return Err(Error::NotFound("Community not found".into()));
+      }
+      Ok(info)
+   }
+
+   pub async fn get_community_tweets(
+      &self,
+      id: &str,
+      cursor: Option<&str>,
+      ranking_mode: &str,
+   ) -> Result<Timeline> {
+      snowflake(id)?;
+      let data = self
+         .graphql_request::<parser::CommunityQueryData>(
+            endpoints::GRAPH_COMMUNITY_TWEETS,
+            &endpoints::community_tweets_vars(id, cursor, ranking_mode),
+            endpoints::GQL_FEATURES,
+            None,
+         )
+         .await?;
+      parser::parse_community_timeline(&data)
+   }
+
+   pub async fn get_community_media(&self, id: &str, cursor: Option<&str>) -> Result<Timeline> {
+      snowflake(id)?;
+      let data = self
+         .graphql_request::<parser::CommunityQueryData>(
+            endpoints::GRAPH_COMMUNITY_MEDIA,
+            &endpoints::community_media_vars(id, cursor),
+            endpoints::GQL_FEATURES,
+            None,
+         )
+         .await?;
+      parser::parse_community_timeline(&data)
+   }
+}
+
+pub struct WatchedBroadcast {
+   pub id: String,
+   pub title: String,
+   pub state: String,
+   pub thumb: String,
+   pub username: String,
+   pub display_name: String,
+   pub watched: i64,
+   pub watching: i64,
+   pub replay: bool,
+   pub status_line: String,
+   pub m3u8: String,
 }

@@ -21,6 +21,8 @@ pub fn router() -> Router<AppState> {
       .merge(super::media::router())
       .merge(super::rss::router())
       .merge(super::list::router())
+      .merge(super::broadcast::router())
+      .merge(super::community::router())
       .merge(super::notes::router())
       .merge(super::unsupported::i_catchall_router())
       .merge(super::timeline::router())

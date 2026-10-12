@@ -1,9 +1,6 @@
 use std::fmt::Write as _;
 
-use serde::{
-   Deserialize,
-   Serialize,
-};
+use serde::{Deserialize, Serialize};
 
 /// Valid Twitter search filters.
 pub const VALID_FILTERS: &[&str] = &[
@@ -45,30 +42,30 @@ pub enum QueryKind {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Query {
    #[serde(default)]
-   pub kind:           QueryKind,
+   pub kind: QueryKind,
    #[serde(default)]
-   pub text:           String,
+   pub text: String,
    #[serde(default)]
-   pub filters:        Vec<String>,
+   pub filters: Vec<String>,
    #[serde(default)]
-   pub includes:       Vec<String>,
+   pub includes: Vec<String>,
    #[serde(default)]
-   pub excludes:       Vec<String>,
+   pub excludes: Vec<String>,
    #[serde(default)]
    pub negative_terms: Vec<String>,
    #[serde(default)]
-   pub from_user:      Vec<String>,
+   pub from_user: Vec<String>,
    #[serde(default)]
-   pub since:          String,
+   pub since: String,
    #[serde(default)]
-   pub until:          String,
+   pub until: String,
    #[serde(default)]
-   pub min_likes:      String,
+   pub min_likes: String,
    #[serde(default)]
-   pub sep:            String,
+   pub sep: String,
    /// Media display mode: `timeline`, `grid`, or `gallery`.
    #[serde(default)]
-   pub view:           String,
+   pub view: String,
 }
 
 impl Query {
@@ -319,10 +316,7 @@ fn encode_query_component(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-   use super::{
-      Query,
-      QueryKind,
-   };
+   use super::{Query, QueryKind};
 
    #[test]
    fn negative_words_remain_search_terms() {

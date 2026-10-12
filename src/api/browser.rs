@@ -8,17 +8,9 @@
 //! is found by a handshake at startup, since a profile can advertise something
 //! X's edge rejects (Chrome 152 did at the time of writing).
 
-use std::{
-   collections::HashMap,
-   fmt,
-   sync::OnceLock,
-   time::Duration,
-};
+use std::{collections::HashMap, fmt, sync::OnceLock, time::Duration};
 
-use primp::{
-   Impersonate,
-   ImpersonateOS,
-};
+use primp::{Impersonate, ImpersonateOS};
 use tokio::task::JoinSet;
 
 use super::http::ProxyConfig;
@@ -45,53 +37,43 @@ impl Engine {
    /// Profiles newest first. Only the newest that X accepts is ever used.
    fn candidates(self) -> &'static [Impersonate] {
       match self {
-         Self::Chrome => {
-            &[
-               Impersonate::ChromeV152,
-               Impersonate::ChromeV151,
-               Impersonate::ChromeV150,
-               Impersonate::ChromeV149,
-               Impersonate::ChromeV148,
-               Impersonate::ChromeV147,
-               Impersonate::ChromeV146,
-            ]
-         },
-         Self::Edge => {
-            &[
-               Impersonate::EdgeV151,
-               Impersonate::EdgeV150,
-               Impersonate::EdgeV149,
-               Impersonate::EdgeV148,
-               Impersonate::EdgeV147,
-               Impersonate::EdgeV146,
-            ]
-         },
-         Self::Firefox => {
-            &[
-               Impersonate::FirefoxV151,
-               Impersonate::FirefoxV150,
-               Impersonate::FirefoxV149,
-               Impersonate::FirefoxV148,
-               Impersonate::FirefoxV147,
-               Impersonate::FirefoxV146,
-            ]
-         },
-         Self::Safari => {
-            &[
-               Impersonate::SafariV26_4,
-               Impersonate::SafariV26_3,
-               Impersonate::SafariV26,
-               Impersonate::SafariV18_5,
-            ]
-         },
-         Self::Opera => {
-            &[
-               Impersonate::OperaV135,
-               Impersonate::OperaV134,
-               Impersonate::OperaV133,
-               Impersonate::OperaV132,
-            ]
-         },
+         Self::Chrome => &[
+            Impersonate::ChromeV152,
+            Impersonate::ChromeV151,
+            Impersonate::ChromeV150,
+            Impersonate::ChromeV149,
+            Impersonate::ChromeV148,
+            Impersonate::ChromeV147,
+            Impersonate::ChromeV146,
+         ],
+         Self::Edge => &[
+            Impersonate::EdgeV151,
+            Impersonate::EdgeV150,
+            Impersonate::EdgeV149,
+            Impersonate::EdgeV148,
+            Impersonate::EdgeV147,
+            Impersonate::EdgeV146,
+         ],
+         Self::Firefox => &[
+            Impersonate::FirefoxV151,
+            Impersonate::FirefoxV150,
+            Impersonate::FirefoxV149,
+            Impersonate::FirefoxV148,
+            Impersonate::FirefoxV147,
+            Impersonate::FirefoxV146,
+         ],
+         Self::Safari => &[
+            Impersonate::SafariV26_4,
+            Impersonate::SafariV26_3,
+            Impersonate::SafariV26,
+            Impersonate::SafariV18_5,
+         ],
+         Self::Opera => &[
+            Impersonate::OperaV135,
+            Impersonate::OperaV134,
+            Impersonate::OperaV133,
+            Impersonate::OperaV132,
+         ],
       }
    }
 }
@@ -113,7 +95,7 @@ impl fmt::Display for Engine {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity {
    pub engine: Engine,
-   pub os:     ImpersonateOS,
+   pub os: ImpersonateOS,
 }
 
 impl Identity {
@@ -144,21 +126,17 @@ const ENGINE_WEIGHTS: [(Engine, u64); 5] = [
 /// and Edge on Windows; a Safari-on-Windows user agent does not exist.
 fn os_weights(engine: Engine) -> &'static [(ImpersonateOS, u64)] {
    match engine {
-      Engine::Chrome => {
-         &[
-            (ImpersonateOS::Windows, 75),
-            (ImpersonateOS::MacOS, 20),
-            (ImpersonateOS::Linux, 5),
-         ]
-      },
+      Engine::Chrome => &[
+         (ImpersonateOS::Windows, 75),
+         (ImpersonateOS::MacOS, 20),
+         (ImpersonateOS::Linux, 5),
+      ],
       Engine::Edge => &[(ImpersonateOS::Windows, 90), (ImpersonateOS::MacOS, 10)],
-      Engine::Firefox => {
-         &[
-            (ImpersonateOS::Windows, 70),
-            (ImpersonateOS::Linux, 20),
-            (ImpersonateOS::MacOS, 10),
-         ]
-      },
+      Engine::Firefox => &[
+         (ImpersonateOS::Windows, 70),
+         (ImpersonateOS::Linux, 20),
+         (ImpersonateOS::MacOS, 10),
+      ],
       Engine::Safari => &[(ImpersonateOS::MacOS, 100)],
       Engine::Opera => &[(ImpersonateOS::Windows, 100)],
    }
@@ -327,9 +305,15 @@ mod tests {
          *counts.entry(identity_for(id).engine).or_default() += 1;
       }
       let chrome = counts[&Engine::Chrome];
-      assert!(chrome > 2_500 && chrome < 4_000, "chrome share {chrome}/5000");
+      assert!(
+         chrome > 2_500 && chrome < 4_000,
+         "chrome share {chrome}/5000"
+      );
       for engine in Engine::ALL {
-         assert!(counts.get(&engine).copied().unwrap_or(0) > 0, "{engine} never picked");
+         assert!(
+            counts.get(&engine).copied().unwrap_or(0) > 0,
+            "{engine} never picked"
+         );
       }
    }
 

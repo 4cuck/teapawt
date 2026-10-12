@@ -1,32 +1,21 @@
 use std::{
-   io,
-   result,
+   io, result,
    sync::{
       OnceLock,
-      atomic::{
-         AtomicUsize,
-         Ordering,
-      },
+      atomic::{AtomicUsize, Ordering},
    },
 };
 
 use axum::{
    http::StatusCode,
-   response::{
-      Html,
-      IntoResponse,
-      Response,
-   },
+   response::{Html, IntoResponse, Response},
 };
 use thiserror::Error;
 use toml::de::Error as TomlError;
 
 use crate::{
    utils::html_escape,
-   views::layout::{
-      FONTELLO_CSS,
-      STYLE_CSS,
-   },
+   views::layout::{FONTELLO_CSS, STYLE_CSS},
 };
 
 pub type Result<T> = result::Result<T, Error>;
@@ -35,8 +24,8 @@ pub type Result<T> = result::Result<T, Error>;
 /// the two cannot drift.
 #[derive(Debug, Default)]
 pub struct Messages {
-   pub client_budget:  Vec<String>,
-   pub rate_limited:   Vec<String>,
+   pub client_budget: Vec<String>,
+   pub rate_limited: Vec<String>,
    pub internal_error: Vec<String>,
 }
 
@@ -49,8 +38,8 @@ pub fn set_messages(messages: Messages) {
 
 fn configured() -> &'static Messages {
    static EMPTY: Messages = Messages {
-      client_budget:  Vec::new(),
-      rate_limited:   Vec::new(),
+      client_budget: Vec::new(),
+      rate_limited: Vec::new(),
       internal_error: Vec::new(),
    };
    MESSAGES.get().unwrap_or(&EMPTY)
@@ -174,85 +163,63 @@ impl Error {
    pub fn presentation(&self) -> (StatusCode, &'static str, &str) {
       match *self {
          Self::NotFound(ref message) => (StatusCode::NOT_FOUND, "Not found", message),
-         Self::UserNotFound(_) => {
-            (
-               StatusCode::NOT_FOUND,
-               "Account not found",
-               "No account exists with that name, or X has removed it.",
-            )
-         },
-         Self::TweetNotFound(_) => {
-            (
-               StatusCode::NOT_FOUND,
-               "Post not found",
-               "That post has been deleted, or the account that made it is gone.",
-            )
-         },
-         Self::UserSuspended(_) => {
-            (
-               StatusCode::FORBIDDEN,
-               "Account suspended",
-               "X has suspended this account, so its posts are not available here.",
-            )
-         },
-         Self::ProtectedUser(_) => {
-            (
-               StatusCode::FORBIDDEN,
-               "Protected account",
-               "This account's posts are only visible to followers it has approved.",
-            )
-         },
+         Self::UserNotFound(_) => (
+            StatusCode::NOT_FOUND,
+            "Account not found",
+            "No account exists with that name, or X has removed it.",
+         ),
+         Self::TweetNotFound(_) => (
+            StatusCode::NOT_FOUND,
+            "Post not found",
+            "That post has been deleted, or the account that made it is gone.",
+         ),
+         Self::UserSuspended(_) => (
+            StatusCode::FORBIDDEN,
+            "Account suspended",
+            "X has suspended this account, so its posts are not available here.",
+         ),
+         Self::ProtectedUser(_) => (
+            StatusCode::FORBIDDEN,
+            "Protected account",
+            "This account's posts are only visible to followers it has approved.",
+         ),
          Self::InvalidUrl(ref message) => (StatusCode::BAD_REQUEST, "Bad request", message),
-         Self::SearchDenylisted => {
-            (
-               StatusCode::BAD_REQUEST,
-               "Search blocked",
-               "X will not run that search.",
-            )
-         },
-         Self::HmacVerification => {
-            (
-               StatusCode::FORBIDDEN,
-               "Forbidden",
-               "The media URL signature is invalid.",
-            )
-         },
-         Self::ClientBudgetExhausted => {
-            (
-               StatusCode::TOO_MANY_REQUESTS,
-               "Slow down",
-               client_budget_message(),
-            )
-         },
-         Self::RateLimited | Self::IpThrottled => {
-            (
-               StatusCode::TOO_MANY_REQUESTS,
-               "Rate limited",
-               rate_limited_message(),
-            )
-         },
-         Self::TransientUpstream => {
-            (
-               StatusCode::SERVICE_UNAVAILABLE,
-               "Try again",
-               "X did not return a result. Refresh in a moment.",
-            )
-         },
+         Self::SearchDenylisted => (
+            StatusCode::BAD_REQUEST,
+            "Search blocked",
+            "X will not run that search.",
+         ),
+         Self::HmacVerification => (
+            StatusCode::FORBIDDEN,
+            "Forbidden",
+            "The media URL signature is invalid.",
+         ),
+         Self::ClientBudgetExhausted => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "Slow down",
+            client_budget_message(),
+         ),
+         Self::RateLimited | Self::IpThrottled => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "Rate limited",
+            rate_limited_message(),
+         ),
+         Self::TransientUpstream => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Try again",
+            "X did not return a result. Refresh in a moment.",
+         ),
          // Out of sessions is an operator problem, not an upstream quota one.
-         Self::NoSessions | Self::SessionRejected(_) => {
-            (
-               StatusCode::SERVICE_UNAVAILABLE,
-               "Unavailable",
-               unavailable_message(),
-            )
-         },
-         _ => {
-            (
-               StatusCode::INTERNAL_SERVER_ERROR,
-               "Error",
-               internal_error_message(),
-            )
-         },
+         Self::NoSessions | Self::SessionRejected(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Unavailable",
+            unavailable_message(),
+         ),
+         _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Error",
+            internal_error_message(),
+         ),
       }
    }
 }
@@ -292,19 +259,19 @@ impl IntoResponse for Error {
 // Twitter API error codes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TwitterError {
-   NoUserMatches       = 17,
-   ProtectedUser       = 22,
-   UserNotFound        = 50,
-   UserSuspended       = 63,
-   RateLimited         = 88,
-   InvalidToken        = 89,
-   TweetNotFound       = 144,
-   TweetUnavailable    = 179,
-   NoStatusFound       = 220,
-   BadToken            = 239,
-   Locked              = 326,
+   NoUserMatches = 17,
+   ProtectedUser = 22,
+   UserNotFound = 50,
+   UserSuspended = 63,
+   RateLimited = 88,
+   InvalidToken = 89,
+   TweetNotFound = 144,
+   TweetUnavailable = 179,
+   NoStatusFound = 220,
+   BadToken = 239,
+   Locked = 326,
    TweetUnavailable421 = 421,
-   TweetCensored       = 422,
+   TweetCensored = 422,
 }
 
 impl TwitterError {

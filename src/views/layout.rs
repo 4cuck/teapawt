@@ -6,7 +6,7 @@ use regex::Regex;
 use crate::{config::Config, types::Prefs};
 
 pub const STYLE_CSS: &str = "/css/style.css?teapawt8";
-pub const CLEAN_CSS: &str = "/css/clean.css?teapawt17";
+pub const CLEAN_CSS: &str = "/css/clean.css?teapawt18";
 pub const FONTELLO_CSS: &str = "/css/fontello.css";
 
 /// Builder for rendering a full page layout.
@@ -112,8 +112,9 @@ impl<'a> PageLayout<'a> {
    }
 
    pub fn render(self) -> Markup {
-      let (infinite_scroll, theme, sticky_nav, use_twemoji, font_size) =
-         self.prefs.map_or((false, None, true, true, ""), |prefs| {
+      let (infinite_scroll, theme, sticky_nav, use_twemoji, font_size, hls_playback) = self
+         .prefs
+         .map_or((false, None, true, true, "", false), |prefs| {
             (
                prefs.infinite_scroll,
                Some(prefs.theme.as_str()),
@@ -126,6 +127,7 @@ impl<'a> PageLayout<'a> {
                   "X-Large" => "font-size: 20px",
                   _ => "",
                },
+               prefs.hls_playback,
             )
          });
 
@@ -255,6 +257,10 @@ impl<'a> PageLayout<'a> {
                   script src="/js/imageLightbox.js" defer="" {}
                   @if infinite_scroll {
                       script src="/js/infiniteScroll.js?teapawt=2" defer="" {}
+                  }
+                  @if hls_playback {
+                      script src="/js/hls.min.js" defer="" {}
+                      script src="/js/hlsPlayback.js" defer="" {}
                   }
 
                   // Font preload

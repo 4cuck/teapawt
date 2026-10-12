@@ -1,27 +1,8 @@
-use super::{
-   entity::parse_entities_from,
-   media::parse_media,
-   user::parse_user_object,
-};
+use super::{entity::parse_entities_from, media::parse_media, user::parse_user_object};
 use crate::{
-   api::schema::{
-      TweetData,
-      TweetLegacy,
-      indices,
-   },
-   error::{
-      Error,
-      Result,
-   },
-   types::{
-      Card,
-      CardKind,
-      EntityKind,
-      Photo,
-      Poll,
-      Tweet,
-      TweetStats,
-   },
+   api::schema::{TweetData, TweetLegacy, indices},
+   error::{Error, Result},
+   types::{Card, CardKind, EntityKind, Photo, Poll, Tweet, TweetStats},
 };
 
 /// Parse a tweet object (from `NestedResult` or direct).
@@ -108,11 +89,11 @@ impl TryFrom<&TweetData> for Tweet {
 
       // Parse stats
       let stats = TweetStats {
-         replies:  legacy.reply_count,
+         replies: legacy.reply_count,
          retweets: legacy.retweet_count,
-         likes:    legacy.favorite_count,
-         quotes:   legacy.quote_count,
-         views:    raw
+         likes: legacy.favorite_count,
+         quotes: legacy.quote_count,
+         views: raw
             .views
             .as_ref()
             .and_then(|views| views.count.as_ref())
@@ -393,10 +374,10 @@ impl TryFrom<&TweetData> for Tweet {
          && let Some(ref img_url) = poll.image
       {
          photos.push(Photo {
-            url:      img_url.clone(),
+            url: img_url.clone(),
             alt_text: String::new(),
-            width:    0,
-            height:   0,
+            width: 0,
+            height: 0,
          });
       }
 

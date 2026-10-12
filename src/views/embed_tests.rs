@@ -401,9 +401,7 @@ fn activity_payload_includes_external_link_preview_card() {
    assert_eq!(card.provider_name, "github.com");
    assert_eq!(
       card.image.as_deref(),
-      Some(
-         "https://pbs.twimg.com/card_img/2075083153316749312/qlKLI1ak?format=jpg&name=800x419"
-      )
+      Some("https://pbs.twimg.com/card_img/2075083153316749312/qlKLI1ak?format=jpg&name=800x419")
    );
    assert_eq!(activity.media_attachments.len(), 1);
    let attachment = &activity.media_attachments[0];
@@ -761,9 +759,9 @@ fn generic_photo_metadata_includes_real_dimensions() {
 
    assert!(html.contains(r#"property="og:image:width" content="2048""#));
    assert!(html.contains(r#"property="og:image:height" content="1536""#));
-   assert!(html.contains(
-      r#"property="twitter:image" content="https://pbs.twimg.com/media/photo.jpg""#
-   ));
+   assert!(
+      html.contains(r#"property="twitter:image" content="https://pbs.twimg.com/media/photo.jpg""#)
+   );
    assert!(!html.contains("twitter:image:src"));
    assert!(!html.contains("application/activity+json"));
 }

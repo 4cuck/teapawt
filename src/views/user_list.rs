@@ -1,22 +1,10 @@
-use maud::{
-   Markup,
-   PreEscaped,
-   html,
-};
+use maud::{Markup, PreEscaped, html};
 
 use crate::{
    config::Config,
-   types::{
-      Prefs,
-      User,
-   },
+   types::{Prefs, User},
    utils::formatters,
-   views::renderutils::{
-      get_avatar_class,
-      link_user,
-      render_bio_html,
-      verified_icon,
-   },
+   views::renderutils::{get_avatar_class, link_user, render_bio_html, verified_icon},
 };
 
 /// Render a list of users in timeline format.
@@ -64,7 +52,11 @@ pub fn render_user_list(
 /// Used by both `user_list` and `search` views.
 pub fn render_user(user: &User, config: &Config, prefs: Option<&Prefs>) -> Markup {
    let href = format!("/{}", user.username);
-   let avatar_url = formatters::get_pic_url(&user.user_pic, config.config.base64_media, crate::views::renderutils::proxy_media(prefs));
+   let avatar_url = formatters::get_pic_url(
+      &user.user_pic,
+      config.config.base64_media,
+      crate::views::renderutils::proxy_media(prefs),
+   );
    let avatar_class = get_avatar_class(prefs);
 
    html! {

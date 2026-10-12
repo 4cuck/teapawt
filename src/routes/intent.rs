@@ -1,26 +1,14 @@
 use axum::{
    Router,
-   extract::{
-      Query,
-      State,
-   },
-   response::{
-      Html,
-      IntoResponse as _,
-      Redirect,
-      Response,
-   },
+   extract::{Query, State},
+   response::{Html, IntoResponse as _, Redirect, Response},
    routing::get,
 };
 use maud::html;
 use serde::Deserialize;
 
 use super::unsupported::render_unsupported_feature;
-use crate::{
-   AppState,
-   error::Result,
-   views::layout,
-};
+use crate::{AppState, error::Result, views::layout};
 
 pub fn router() -> Router<AppState> {
    Router::new()
@@ -37,7 +25,7 @@ async fn intent_unsupported(State(state): State<AppState>) -> Response {
 
 #[derive(Debug, Deserialize)]
 pub struct IntentUserQuery {
-   pub user_id:     Option<String>,
+   pub user_id: Option<String>,
    pub screen_name: Option<String>,
 }
 
