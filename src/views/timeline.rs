@@ -331,7 +331,7 @@ pub fn tab_to_kind(tab: &str) -> TimelineKind {
 
 /// Render list header (banner + name + tabs).
 /// Moved here from routes/list.rs since it's presentation logic.
-pub fn render_list_header(list: &List, active_tab: &str, config: &Config) -> Markup {
+pub fn render_list_header(list: &List, active_tab: &str, config: &Config, proxy: bool) -> Markup {
    let path = format!("/i/lists/{}", list.id);
    let tweets_class = if active_tab == "tweets" {
       "tab-item active"
@@ -347,8 +347,8 @@ pub fn render_list_header(list: &List, active_tab: &str, config: &Config) -> Mar
    html! {
        @if !list.banner.is_empty() {
            div class="timeline-banner" {
-               a href=(formatters::get_pic_url(&list.banner, config.config.base64_media)) target="_blank" {
-                   (gen_img(&list.banner, "", config))
+               a href=(formatters::get_pic_url(&list.banner, config.config.base64_media, proxy)) target="_blank" {
+                   (gen_img(&list.banner, "", config, proxy))
                }
            }
        }

@@ -175,7 +175,8 @@ pub fn get_user_pic(user_pic: &str, style: &str) -> String {
 }
 
 /// Encode a URL for proxy path segments: base64 (with `/enc/` prefix) or
-/// percent-encoded.
+/// percent-encoded. Still used for the GIF transcoder, which has to serve a
+/// file Twitter does not host.
 fn encode_media_url(prefix: &str, url: &str, base64: bool) -> String {
    if base64 {
       format!("{prefix}/enc/{}", base64_encode_url(url))
@@ -184,20 +185,71 @@ fn encode_media_url(prefix: &str, url: &str, base64: bool) -> String {
    }
 }
 
-/// Generate pic URL (proxied image).
-pub fn get_pic_url(url: &str, base64_media: bool) -> String {
-   encode_media_url("/pic", url, base64_media)
+/// Public CDN address for a stored media URL. The browser fetches this
+/// itself; this instance does not relay the bytes.
+pub fn direct_media_url(url: &str) -> String {
+   let url = url.trim();
+   if url.is_empty() {
+      return String::new();
+   }
+   if url.starts_with("https://") || url.starts_with("http://") {
+      return url.to_owned();
+   }
+   if let Some(rest) = url.strip_prefix("//") {
+      return format!("https://{rest}");
+   }
+   if url.starts_with("/media/")
+      || url.starts_with("/profile_images/")
+      || url.starts_with("/profile_banners/")
+      || url.starts_with("/ext_tw_video")
+      || url.starts_with("/tweet_video")
+      || url.starts_with("/card_img/")
+      || url.starts_with("/amplify_video/")
+   {
+      return format!("https://pbs.twimg.com{url}");
+   }
+   url.to_owned()
 }
 
-/// Generate original pic URL.
-pub fn get_orig_pic_url(url: &str, base64_media: bool) -> String {
-   encode_media_url("/pic/orig", url, base64_media)
+/// Prefix an instance-relative path. Absolute CDN links stay unchanged.
+pub fn join_base(prefix: &str, url: &str) -> String {
+   if url.starts_with("https://") || url.starts_with("http://") || url.is_empty() {
+      url.to_owned()
+   } else {
+      format!("{prefix}{url}")
+   }
 }
 
-/// Generate video URL with HMAC signature.
-pub fn get_vid_url(url: &str, hmac_key: &str, base64_media: bool) -> String {
-   let sig = super::sign(url, hmac_key);
-   encode_media_url(&format!("/video/{sig}"), url, base64_media)
+/// Image URL. `proxy` serves it from this instance; otherwise the browser loads the CDN directly.
+pub fn get_pic_url(url: &str, base64_media: bool, proxy: bool) -> String {
+   if proxy {
+      encode_media_url("/pic", url, base64_media)
+   } else {
+      direct_media_url(url)
+   }
+}
+
+/// Full-size image URL. Proxied paths use `/pic/orig`; direct links ask Twitter for `name=orig`.
+pub fn get_orig_pic_url(url: &str, base64_media: bool, proxy: bool) -> String {
+   if proxy {
+      return encode_media_url("/pic/orig", url, base64_media);
+   }
+   let direct = direct_media_url(url);
+   if !(direct.starts_with("https://") || direct.starts_with("http://")) {
+      return direct;
+   }
+   let separator = if direct.contains('?') { '&' } else { '?' };
+   format!("{direct}{separator}name=orig")
+}
+
+/// Video URL. `proxy` signs it for this instance's `/video` route.
+pub fn get_vid_url(url: &str, hmac_key: &str, base64_media: bool, proxy: bool) -> String {
+   if proxy {
+      let sig = super::sign(url, hmac_key);
+      encode_media_url(&format!("/video/{sig}"), url, base64_media)
+   } else {
+      direct_media_url(url)
+   }
 }
 
 /// Generate video embed URL.

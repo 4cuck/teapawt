@@ -66,7 +66,7 @@ pub fn render_profile_with_prefs(
                div class="profile-header" {
                    @if !hide_banner {
                        div class="profile-banner" {
-                           (render_banner(&profile.user.banner, config))
+                           (render_banner(&profile.user.banner, config, prefs.is_some_and(|pref| pref.proxy_media)))
                        }
                    }
                    (render_user_card(&profile.user, config, prefs))
@@ -74,7 +74,7 @@ pub fn render_profile_with_prefs(
 
                // Photo rail positioned on the left side
                @if !profile.photo_rail.is_empty() {
-                   (render_photo_rail(&profile.photo_rail, &profile.user, config))
+                   (render_photo_rail(&profile.photo_rail, &profile.user, config, prefs.is_some_and(|pref| pref.proxy_media)))
                }
            }
 
@@ -143,14 +143,14 @@ pub fn render_profile_page(
                    div class="profile-header" {
                        @if !hide_banner {
                            div class="profile-banner" {
-                               (render_banner(&user.banner, config))
+                               (render_banner(&user.banner, config, prefs.proxy_media))
                            }
                        }
                        (render_user_card(user, config, Some(prefs)))
                    }
 
                    @if !photo_rail.is_empty() {
-                       (render_photo_rail(photo_rail, user, config))
+                       (render_photo_rail(photo_rail, user, config, prefs.proxy_media))
                    }
                }
            }
@@ -285,14 +285,15 @@ fn render_user_card(user: &User, config: &Config, prefs: Option<&Prefs>) -> Mark
       formatters::get_user_pic(&user.user_pic, "_400x400")
    };
 
-   let orig_avatar_url = formatters::get_pic_url(&user.user_pic, config.config.base64_media);
+   let proxy = prefs.is_some_and(|pref| pref.proxy_media);
+   let orig_avatar_url = formatters::get_pic_url(&user.user_pic, config.config.base64_media, proxy);
 
    let bio_html = render_bio_html(&user.bio, config);
 
    html! {
        div class="profile-card" {
            a class="profile-card-avatar" href=(orig_avatar_url) target="_blank" {
-               (gen_img(&avatar_pic, avatar_class, config))
+               (gen_img(&avatar_pic, avatar_class, config, proxy))
            }
 
            div class="profile-card-identity" {
@@ -377,22 +378,22 @@ fn render_user_card(user: &User, config: &Config, prefs: Option<&Prefs>) -> Mark
 }
 
 /// Render banner.
-fn render_banner(banner: &str, config: &Config) -> Markup {
+fn render_banner(banner: &str, config: &Config, proxy: bool) -> Markup {
    if banner.is_empty() {
       html! { a {} }
    } else if banner.starts_with('#') {
       html! { a style=(format!("background-color: {banner}")) {} }
    } else {
       html! {
-          a href=(formatters::get_pic_url(banner, config.config.base64_media)) target="_blank" {
-              (gen_img(banner, "", config))
+          a href=(formatters::get_pic_url(banner, config.config.base64_media, proxy)) target="_blank" {
+              (gen_img(banner, "", config, proxy))
           }
       }
    }
 }
 
 /// Render photo rail showing recent media.
-fn render_photo_rail(photos: &[GalleryPhoto], user: &User, config: &Config) -> Markup {
+fn render_photo_rail(photos: &[GalleryPhoto], user: &User, config: &Config, proxy: bool) -> Markup {
    let count = compact_profile_stat(user.media);
    let exact_count = formatters::format_with_commas(user.media);
 
@@ -425,7 +426,7 @@ fn render_photo_rail(photos: &[GalleryPhoto], user: &User, config: &Config) -> M
                @for photo in photos.iter().take(15) {
                    @let photo_suffix = if photo.url.contains("format") || photo.url.contains("placeholder") { "" } else { ":thumb" };
                    a href=(format!("/{}/status/{}#m", user.username, photo.tweet_id)) {
-                       (gen_img(&format!("{}{}", photo.url, photo_suffix), "", config))
+                       (gen_img(&format!("{}{}", photo.url, photo_suffix), "", config, proxy))
                    }
                }
            }

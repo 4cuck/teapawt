@@ -96,7 +96,7 @@ fn quoted_video_tweet() -> Tweet {
 
 #[test]
 fn quoted_video_player_uses_quote_tweet_id() {
-   let html = render_tweet_embed(&quoted_video_tweet(), &test_config(), false).into_string();
+   let html = render_tweet_embed(&quoted_video_tweet(), &test_config(), false, false).into_string();
 
    assert!(
       html.contains(r#"name="twitter:player" content="https://teapot.test/i/videos/tweet/200""#)
@@ -104,21 +104,27 @@ fn quoted_video_player_uses_quote_tweet_id() {
    assert!(
       !html.contains(r#"name="twitter:player" content="https://teapot.test/i/videos/tweet/100""#)
    );
-   assert!(html.contains(r#"name="twitter:player:stream" content="https://teapot.test/video/"#));
-   assert!(html.contains("/enc/"));
+   assert!(html.contains(
+      r#"name="twitter:player:stream" content="https://video.twimg.com/ext_tw_video/1/pu/vid/720x1280/video.mp4?tag=12""#
+   ));
+   assert!(!html.contains("https://teapot.test/video/"));
 }
 
 #[test]
 fn video_embed_uses_signed_proxy_for_quoted_video() {
    let tweet = quoted_video_tweet();
-   let html = render_video_embed(&tweet, &test_config()).into_string();
+   let html = render_video_embed(&tweet, &test_config(), false).into_string();
 
    assert!(has_playable_video(&tweet));
-   assert!(html.contains(r#"poster="/pic/enc/"#));
-   assert!(html.contains(r#"<source src="/video/"#));
-   assert!(html.contains(r#"name="twitter:player:stream" content="https://teapot.test/video/"#));
-   assert!(html.contains("/enc/"));
-   assert!(!html.contains("https://teapot.test/video/https://video.twimg.com"));
+   assert!(html.contains(r#"poster="https://pbs.twimg.com/ext_tw_video_thumb/thumb.jpg""#));
+   assert!(html.contains(
+      r#"<source src="https://video.twimg.com/ext_tw_video/1/pu/vid/720x1280/video.mp4?tag=12""#
+   ));
+   assert!(html.contains(
+      r#"name="twitter:player:stream" content="https://video.twimg.com/ext_tw_video/1/pu/vid/720x1280/video.mp4?tag=12""#
+   ));
+   assert!(!html.contains("https://teapot.test/video/"));
+   assert!(!html.contains("https://teapot.test/pic/"));
 }
 
 #[test]
@@ -132,14 +138,13 @@ fn activity_pub_quote_fallback_uses_signed_media_urls() {
 
    assert_eq!(activity.media_attachments.len(), 1);
    assert_eq!(attachment.type_, "video");
-   assert!(attachment.url.starts_with("https://teapot.test/video/"));
-   assert!(attachment.url.contains("/enc/"));
-   assert!(!attachment.url.contains("/video/https://video.twimg.com"));
-   assert!(
-      attachment
-         .preview_url
-         .as_ref()
-         .is_some_and(|url| url.starts_with("https://teapot.test/pic/enc/"))
+   assert_eq!(
+      attachment.url,
+      "https://video.twimg.com/ext_tw_video/1/pu/vid/720x1280/video.mp4?tag=12"
+   );
+   assert_eq!(
+      attachment.preview_url.as_deref(),
+      Some("https://pbs.twimg.com/ext_tw_video_thumb/thumb.jpg")
    );
    let dimensions = &attachment.meta.as_ref().unwrap().original;
    assert_eq!((dimensions.width, dimensions.height), (720, 1280));
@@ -294,10 +299,7 @@ fn activity_payload_renders_live_broadcast_preview() {
       Some(ActivityId::new(406, None)),
    )
    .into_string();
-   let image_url = format!(
-      "https://teapot.test{}",
-      formatters::get_pic_url("https://video.pscp.tv/latest.jpg", true)
-   );
+   let image_url = "https://video.pscp.tv/latest.jpg";
 
    assert!(activity.content.contains("📺"));
    assert!(activity.content.contains("Stripe x PayPal"));
@@ -357,7 +359,7 @@ fn oembed_footer_renders_content_disclosures() {
    status.ai_generated = true;
 
    let oembed_url = build_oembed_url(&status, &test_config());
-   let html = render_tweet_embed(&status, &test_config(), true).into_string();
+   let html = render_tweet_embed(&status, &test_config(), true, false).into_string();
    let activity = build_activity_pub(&status, &test_config());
 
    assert!(oembed_url.contains(&format!(
@@ -397,10 +399,11 @@ fn activity_payload_includes_external_link_preview_card() {
    assert_eq!(card.type_, "link");
    assert_eq!((card.width, card.height), (800, 419));
    assert_eq!(card.provider_name, "github.com");
-   assert!(
-      card
-         .image
-         .is_some_and(|image| image.starts_with("https://teapot.test/pic/enc/"))
+   assert_eq!(
+      card.image.as_deref(),
+      Some(
+         "https://pbs.twimg.com/card_img/2075083153316749312/qlKLI1ak?format=jpg&name=800x419"
+      )
    );
    assert_eq!(activity.media_attachments.len(), 1);
    let attachment = &activity.media_attachments[0];
@@ -533,6 +536,7 @@ fn posts_and_quotes_render_every_gif() {
                &gif.url,
                &config.config.hmac_key,
                config.config.base64_media,
+               false,
             );
             remaining = remaining.split_once(&source).unwrap().1;
          }
@@ -566,7 +570,7 @@ fn activity_payload_preserves_every_gif_in_all_transcoding_modes() {
 fn player_oembed_duplicates_engagement_in_provider() {
    let mut tweet = quoted_video_tweet();
    tweet.stats.views = 1_200;
-   let html = render_tweet_embed(&tweet, &test_config(), true).into_string();
+   let html = render_tweet_embed(&tweet, &test_config(), true, false).into_string();
 
    assert!(html.contains("&amp;provider="));
    assert!(html.contains(r#"property="twitter:card" content="player""#));
@@ -587,10 +591,9 @@ fn activity_pub_photo_urls_are_encoded_and_keep_alt_text() {
    let attachment = activity.media_attachments.first().unwrap();
 
    assert_eq!(attachment.type_, "image");
-   assert!(
-      attachment
-         .url
-         .starts_with("https://teapot.test/pic/orig/enc/")
+   assert_eq!(
+      attachment.url,
+      "https://pbs.twimg.com/media/photo.jpg?format=jpg&name=large&name=orig"
    );
    assert_eq!(attachment.preview_url, None);
    assert_eq!(attachment.description.as_deref(), Some("alt text"));
@@ -614,10 +617,7 @@ fn activity_mixed_media_prioritizes_video_with_photo_poster() {
    let config = test_config();
 
    let activity = build_activity_pub(&status, &config);
-   let expected_poster = format!(
-      "https://teapot.test{}",
-      formatters::get_pic_url(photo_url, config.config.base64_media),
-   );
+   let expected_poster = photo_url;
 
    assert_eq!(activity.media_attachments.len(), 2);
    assert_ne!(
@@ -628,7 +628,7 @@ fn activity_mixed_media_prioritizes_video_with_photo_poster() {
    assert_eq!(activity.media_attachments[1].type_, "image");
    assert_eq!(
       activity.media_attachments[0].preview_url.as_deref(),
-      Some(expected_poster.as_str()),
+      Some(expected_poster),
    );
 }
 
@@ -677,7 +677,9 @@ fn status_page_uses_author_first_embed_metadata() {
    assert!(html.contains(r#"property="og:url" content="https://teapot.test/G2CSGO/status/400""#));
    assert!(html.contains(r#"rel="canonical" href="https://teapot.test/G2CSGO/status/400""#));
    assert!(html.contains(r#"rel="alternate" href="https://x.com/G2CSGO/status/400""#));
-   assert!(html.contains(r#"link rel="apple-touch-icon" href="https://teapot.test/pic/enc/"#));
+   assert!(html.contains(
+      r#"link rel="apple-touch-icon" href="https://pbs.twimg.com/profile_images/avatar.jpg""#
+   ));
    assert!(
       !html.contains(r#"link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png""#)
    );
@@ -729,7 +731,9 @@ fn discord_activity_page_uses_avatar_for_text_only_status() {
    )
    .into_string();
 
-   assert!(html.contains(r#"property="og:image" content="https://teapot.test/pic/enc/"#));
+   assert!(html.contains(
+      r#"property="og:image" content="https://pbs.twimg.com/profile_images/avatar.jpg""#
+   ));
    assert!(html.contains(r#"property="twitter:image" content="0""#));
    assert!(html.contains(r#"property="twitter:card" content="summary""#));
 }
@@ -757,7 +761,9 @@ fn generic_photo_metadata_includes_real_dimensions() {
 
    assert!(html.contains(r#"property="og:image:width" content="2048""#));
    assert!(html.contains(r#"property="og:image:height" content="1536""#));
-   assert!(html.contains(r#"property="twitter:image" content="https://teapot.test/pic/enc/"#));
+   assert!(html.contains(
+      r#"property="twitter:image" content="https://pbs.twimg.com/media/photo.jpg""#
+   ));
    assert!(!html.contains("twitter:image:src"));
    assert!(!html.contains("application/activity+json"));
 }

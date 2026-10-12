@@ -34,6 +34,7 @@ use crate::{
       icon,
       link_user,
       parse_location,
+      proxy_media,
       render_community_note,
       verified_icon,
    },
@@ -330,7 +331,7 @@ impl<'a> TweetRenderer<'a> {
 
                   // Media (photos)
                   @if !display_tweet.photos.is_empty() {
-                      (render_photos(&display_tweet.photos, config, big_thumb))
+                      (render_photos(&display_tweet.photos, config, big_thumb, proxy_media(prefs)))
                   }
 
                   // Video
@@ -345,11 +346,11 @@ impl<'a> TweetRenderer<'a> {
                   @for gif in &display_tweet.gifs {
                       @let autoplay_gifs = prefs.is_none_or(|pref| pref.autoplay_gifs);
                       @let poster = if big_thumb {
-                          get_medium_pic(&gif.thumb, config)
+                          get_medium_pic(&gif.thumb, config, proxy_media(prefs))
                       } else {
-                          get_small_pic(&gif.thumb, config)
+                          get_small_pic(&gif.thumb, config, proxy_media(prefs))
                       };
-                      @let gif_src = formatters::get_vid_url(&gif.url, &config.config.hmac_key, config.config.base64_media);
+                      @let gif_src = formatters::get_vid_url(&gif.url, &config.config.hmac_key, config.config.base64_media, proxy_media(prefs));
                       div class="attachments media-gif" {
                           div class="gallery-gif" style="max-height: unset" {
                               div class="attachment" {
@@ -363,7 +364,7 @@ impl<'a> TweetRenderer<'a> {
 
                   // Poll
                   @if let Some(ref poll) = display_tweet.poll {
-                      (render_poll(poll, config))
+                      (render_poll(poll, config, proxy_media(prefs)))
                   }
 
                   // Quote tweet
@@ -432,7 +433,7 @@ impl<'a> TweetRenderer<'a> {
 /// Photos are grouped into rows:
 /// - 1-2 photos: single row
 /// - 3+ photos: distributed into 2 rows (e.g. 3 → [2, 1], 4 → [2, 2])
-fn render_photos(photos: &[Photo], config: &Config, big_thumb: bool) -> Markup {
+fn render_photos(photos: &[Photo], config: &Config, big_thumb: bool, proxy: bool) -> Markup {
    let groups: Vec<&[Photo]> = if photos.len() < 3 {
       vec![photos]
    } else {
@@ -449,13 +450,13 @@ fn render_photos(photos: &[Photo], config: &Config, big_thumb: bool) -> Markup {
                    @for photo in *group {
                        @let named = photo.url.contains("name=");
                        @let small = if named {
-                           formatters::get_pic_url(&photo.url, config.config.base64_media)
+                           formatters::get_pic_url(&photo.url, config.config.base64_media, proxy)
                        } else if big_thumb {
-                           get_medium_pic(&photo.url, config)
+                           get_medium_pic(&photo.url, config, proxy)
                        } else {
-                           get_small_pic(&photo.url, config)
+                           get_small_pic(&photo.url, config, proxy)
                        };
-                       @let orig_url = formatters::get_orig_pic_url(&photo.url, config.config.base64_media);
+                       @let orig_url = formatters::get_orig_pic_url(&photo.url, config.config.base64_media, proxy);
                        div class="attachment image" {
                            a class="still-image" href=(orig_url) target="_blank" {
                                img src=(small) alt=(photo.alt_text) loading="lazy";
@@ -502,7 +503,7 @@ fn render_mini_avatar(user: &User, config: &Config, prefs: Option<&Prefs>) -> Ma
       "avatar round mini"
    };
    let pic = formatters::get_user_pic(&user.user_pic, "_mini");
-   let pic_url = formatters::get_pic_url(&pic, config.config.base64_media);
+   let pic_url = formatters::get_pic_url(&pic, config.config.base64_media, proxy_media(prefs));
    html! {
        img src=(pic_url) class=(avatar_class) alt="" loading="lazy";
    }
@@ -585,7 +586,7 @@ fn render_quote(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> Markup
 
            // Media
            @if !quote.photos.is_empty() {
-               (render_photos(&quote.photos, config, false))
+               (render_photos(&quote.photos, config, false, proxy_media(prefs)))
            }
            @if let Some(ref video) = quote.video {
                (render_video(video, config, prefs, false))
@@ -594,7 +595,7 @@ fn render_quote(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> Markup
                (render_video(video, config, prefs, false))
            }
            @for gif in &quote.gifs {
-               @let gif_url = formatters::get_vid_url(&gif.url, &config.config.hmac_key, config.config.base64_media);
+               @let gif_url = formatters::get_vid_url(&gif.url, &config.config.hmac_key, config.config.base64_media, proxy_media(prefs));
                div class="attachments media-gif" {
                    div class="gallery-gif" style="max-height: unset" {
                        div class="attachment" {
@@ -608,7 +609,7 @@ fn render_quote(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> Markup
 
            // Poll
            @if let Some(ref poll) = quote.poll {
-               (render_poll(poll, config))
+               (render_poll(poll, config, proxy_media(prefs)))
            }
 
            // Community note for quoted tweet
@@ -640,7 +641,7 @@ fn render_quote(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> Markup
    clippy::cast_possible_truncation,
    reason = "poll vote counts fit in f64, leader index is always 0-3"
 )]
-fn render_poll(poll: &Poll, config: &Config) -> Markup {
+fn render_poll(poll: &Poll, config: &Config, proxy: bool) -> Markup {
    let total_votes = poll.votes.max(1); // Avoid division by zero
    let leader_idx = poll.leader as usize;
    let percentages = poll
@@ -661,7 +662,7 @@ fn render_poll(poll: &Poll, config: &Config) -> Markup {
            @if has_images {
                div class="poll-choice-images" {
                    @for img in &poll.choice_images {
-                       (gen_img(img, "poll-choice-img", config))
+                       (gen_img(img, "poll-choice-img", config, proxy))
                    }
                }
            }
@@ -686,11 +687,11 @@ fn render_poll(poll: &Poll, config: &Config) -> Markup {
 }
 
 /// Render card image container.
-fn render_card_image(card: &Card, config: &Config) -> Markup {
+fn render_card_image(card: &Card, config: &Config, proxy: bool) -> Markup {
    html! {
        div class="card-image-container" {
            div class="card-image" {
-               (gen_img(&card.image, "", config))
+               (gen_img(&card.image, "", config, proxy))
                @if matches!(card.kind, CardKind::Player) {
                    div class="card-overlay" {
                        div class="overlay-circle" {
@@ -753,7 +754,7 @@ fn render_card(card: &Card, config: &Config, prefs: Option<&Prefs>) -> Markup {
            } @else {
                a class="card-container" href=(card.url) {
                    @if !card.image.is_empty() {
-                       (render_card_image(card, config))
+                       (render_card_image(card, config, proxy_media(prefs)))
                    }
                    div class="card-content-container" {
                        (render_card_content(card))
@@ -780,7 +781,7 @@ fn render_tweet_date(time: Option<time::OffsetDateTime>, href: &str) -> Markup {
 
 /// Render user avatar image with proper class from prefs.
 fn render_user_avatar(user: &User, config: &Config, prefs: Option<&Prefs>) -> Markup {
-   let avatar_url = formatters::get_pic_url(&user.user_pic, config.config.base64_media);
+   let avatar_url = formatters::get_pic_url(&user.user_pic, config.config.base64_media, proxy_media(prefs));
    let avatar_class = get_avatar_class(prefs);
    html! {
        img src=(avatar_url) class=(avatar_class) alt="" loading="lazy";
@@ -789,7 +790,7 @@ fn render_user_avatar(user: &User, config: &Config, prefs: Option<&Prefs>) -> Ma
 
 /// Sticky reminder of the post the visible replies belong to, revealed by
 /// `threadContext.js` once the opening thread scrolls past.
-pub fn render_thread_context(tweet: &Tweet, config: &Config) -> Markup {
+pub fn render_thread_context(tweet: &Tweet, config: &Config, prefs: &Prefs) -> Markup {
    let display_tweet = tweet.retweet.as_deref().unwrap_or(tweet);
    if display_tweet.text.trim().is_empty() {
       return Markup::default();
@@ -798,7 +799,7 @@ pub fn render_thread_context(tweet: &Tweet, config: &Config) -> Markup {
    let text_html = render_tweet_text_html(&display_tweet.text, &display_tweet.entities, "", config);
    let text = super::layout::strip_html(&text_html);
    let avatar_url =
-      formatters::get_pic_url(&display_tweet.user.user_pic, config.config.base64_media);
+      formatters::get_pic_url(&display_tweet.user.user_pic, config.config.base64_media, prefs.proxy_media);
 
    html! {
        aside class="thread-context-bar" aria-label="Original post context" {
@@ -889,9 +890,9 @@ fn render_video(video: &Video, config: &Config, prefs: Option<&Prefs>, big_thumb
    let thumb = if video.thumb.is_empty() {
       String::new()
    } else if big_thumb {
-      get_medium_pic(&video.thumb, config)
+      get_medium_pic(&video.thumb, config, proxy_media(prefs))
    } else {
-      get_small_pic(&video.thumb, config)
+      get_small_pic(&video.thumb, config, proxy_media(prefs))
    };
 
    let duration = formatters::format_duration(video.duration_ms);
@@ -930,7 +931,7 @@ fn render_video(video: &Video, config: &Config, prefs: Option<&Prefs>, big_thumb
                        }
                    } @else if let Some(mp4_url) = video.best_mp4_url() {
                        // Render MP4 playback with a native video element and controls
-                       @let video_src = formatters::get_vid_url(mp4_url, &config.config.hmac_key, config.config.base64_media);
+                       @let video_src = formatters::get_vid_url(mp4_url, &config.config.hmac_key, config.config.base64_media, proxy_media(prefs));
                        video poster=(thumb) controls="" muted=[mute_videos.then_some("")] {
                            source src=(video_src) type="video/mp4";
                        }

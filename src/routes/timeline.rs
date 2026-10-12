@@ -292,13 +292,13 @@ async fn user_timeline(
          let canonical = format!("https://x.com/{}", profile_data.user.username);
          let rss_url = format!("/{}/rss", profile_data.user.username);
          let referer = format!("/{}", profile_data.user.username);
-         let og_image = format!(
-            "{}{}",
-            state.config.url_prefix(),
-            formatters::get_pic_url(
+         let og_image = formatters::join_base(
+            &state.config.url_prefix(),
+            &formatters::get_pic_url(
                &profile_data.user.user_pic.replace("_normal", "_400x400"),
                state.config.config.base64_media,
-            )
+               prefs.proxy_media,
+            ),
          );
          let newer = query
             .cursor

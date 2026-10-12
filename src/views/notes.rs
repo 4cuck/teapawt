@@ -35,10 +35,11 @@ pub fn render_note(
    config: &Config,
    prefs: Option<&Prefs>,
 ) -> Markup {
+   let proxy = prefs.is_some_and(|pref| pref.proxy_media);
    let cover = if article.cover_image.is_empty() {
       String::new()
    } else {
-      formatters::get_pic_url(&article.cover_image, config.config.base64_media)
+      formatters::get_pic_url(&article.cover_image, config.config.base64_media, proxy)
    };
 
    let time_str = article
@@ -56,7 +57,7 @@ pub fn render_note(
                h1 { (article.title) }
 
                div class="author" {
-                   (renderutils::gen_img(&formatters::get_user_pic(&article.user.user_pic, "_mini"), "avatar round mini", config))
+                   (renderutils::gen_img(&formatters::get_user_pic(&article.user.user_pic, "_mini"), "avatar round mini", config, proxy))
                    " "
                    a href=(format!("/{}", article.user.username)) class="fullname" {
                        (article.user.fullname)
@@ -159,13 +160,13 @@ fn render_paragraph(
    article: &Article,
    tweets: &HashMap<i64, Tweet>,
    config: &Config,
-   _prefs: Option<&Prefs>,
+   prefs: Option<&Prefs>,
 ) -> Markup {
    if para.base_type == ArticleBlockType::Atomic {
-      return render_atomic(para, article, tweets, config);
+      return render_atomic(para, article, tweets, config, proxy_from(prefs));
    }
 
-   let inner = render_text_with_entities(para, article);
+   let inner = render_text_with_entities(para, article, proxy_from(prefs));
 
    match para.base_type {
       ArticleBlockType::Blockquote => html! { blockquote { (inner) } },
@@ -180,12 +181,17 @@ fn render_paragraph(
    }
 }
 
+fn proxy_from(prefs: Option<&Prefs>) -> bool {
+   prefs.is_some_and(|pref| pref.proxy_media)
+}
+
 /// Render an atomic block (media, embedded tweet, markdown code block).
 fn render_atomic(
    para: &ArticleParagraph,
    article: &Article,
    tweets: &HashMap<i64, Tweet>,
    config: &Config,
+   proxy: bool,
 ) -> Markup {
    let Some(er) = para.entity_ranges.first() else {
       return html! {};
@@ -220,7 +226,7 @@ fn render_atomic(
             }
             match media.media_type {
                ArticleMediaType::ApiImage => {
-                  let pic = formatters::get_pic_url(&media.url, config.config.base64_media);
+                  let pic = formatters::get_pic_url(&media.url, config.config.base64_media, proxy);
                   markup_parts.push(html! {
                       span class="image" {
                           img src=(pic) alt="" loading="lazy";
@@ -232,6 +238,7 @@ fn render_atomic(
                      &media.url,
                      &config.config.hmac_key,
                      config.config.base64_media,
+                     proxy,
                   );
                   markup_parts.push(html! {
                       span class="image" {
@@ -272,7 +279,7 @@ fn strip_markdown_fences(md: &str) -> (&str, &str) {
 
 /// Render paragraph text with entity ranges (links, twemoji) and inline
 /// styles.
-fn render_text_with_entities(para: &ArticleParagraph, article: &Article) -> Markup {
+fn render_text_with_entities(para: &ArticleParagraph, article: &Article, proxy: bool) -> Markup {
    let text = &para.text;
    let chars: Vec<char> = text.chars().collect();
    let mut parts: Vec<Markup> = Vec::new();
@@ -295,7 +302,7 @@ fn render_text_with_entities(para: &ArticleParagraph, article: &Article) -> Mark
             parts.push(html! { a href=(entity.url) { (styled_inner) } });
          },
          ArticleEntityType::Twemoji => {
-            let pic = formatters::get_pic_url(&entity.twemoji, false);
+            let pic = formatters::get_pic_url(&entity.twemoji, false, proxy);
             parts.push(html! { img class="twemoji" src=(pic) alt=""; });
          },
          _ => {

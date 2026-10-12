@@ -123,8 +123,10 @@ async fn show_note_inner(state: AppState, jar: CookieJar, id: String) -> Result<
    let og_image = if article.cover_image.is_empty() {
       String::new()
    } else {
-      let proxied = formatters::get_pic_url(&article.cover_image, state.config.config.base64_media);
-      format!("{}{proxied}", state.config.url_prefix())
+      formatters::join_base(
+         &state.config.url_prefix(),
+         &formatters::get_pic_url(&article.cover_image, state.config.config.base64_media, prefs.proxy_media),
+      )
    };
 
    // twitter:card = summary_large_image for big cover preview in Discord/etc

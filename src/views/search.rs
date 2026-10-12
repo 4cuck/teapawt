@@ -177,6 +177,7 @@ pub fn render_list_search_results(
    config: &Config,
    cursor: Option<&str>,
    newer_url: Option<&str>,
+   proxy: bool,
 ) -> Markup {
    html! {
        div class="timeline-container search-results" {
@@ -205,7 +206,7 @@ pub fn render_list_search_results(
                    }
                } @else {
                    @for list in lists {
-                       (render_list_hit(list, config))
+                       (render_list_hit(list, config, proxy))
                    }
 
                    @if let Some(cur) = cursor {
@@ -225,7 +226,7 @@ pub fn render_list_search_results(
    }
 }
 
-fn render_list_hit(list: &List, config: &Config) -> Markup {
+fn render_list_hit(list: &List, config: &Config, proxy: bool) -> Markup {
    let href = format!("/i/lists/{}", list.id);
    let members = if list.members_text.is_empty() {
       match list.members {
@@ -247,7 +248,7 @@ fn render_list_hit(list: &List, config: &Config) -> Markup {
                        }
                    }
                } @else {
-                   img src=(formatters::get_pic_url(&list.cover, config.config.base64_media)) alt="" loading="lazy";
+                   img src=(formatters::get_pic_url(&list.cover, config.config.base64_media, proxy)) alt="" loading="lazy";
                }
            }
            div class="list-hit-copy" {
@@ -260,7 +261,7 @@ fn render_list_hit(list: &List, config: &Config) -> Markup {
                        @if !list.pictures.is_empty() {
                            span class="list-hit-faces" {
                                @for picture in &list.pictures {
-                                   img src=(formatters::get_pic_url(picture, config.config.base64_media)) alt="" loading="lazy";
+                                   img src=(formatters::get_pic_url(picture, config.config.base64_media, proxy)) alt="" loading="lazy";
                                }
                            }
                        }

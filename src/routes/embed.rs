@@ -23,6 +23,8 @@ use axum::{
 use maud::html;
 use serde::Deserialize;
 
+use axum_extra::extract::CookieJar;
+
 use super::helpers::get_cached_translation;
 use crate::{
    AppState,
@@ -34,7 +36,10 @@ use crate::{
       Error,
       Result,
    },
-   types::Conversation,
+   types::{
+      Conversation,
+      Prefs,
+   },
    utils::formatters::format_relative_time,
    views::{
       embed as embed_view,
@@ -91,28 +96,40 @@ async fn legacy_embed_redirect(Query(query): Query<LegacyEmbedQuery>) -> Respons
 /// Discord/etc.
 async fn tweet_embed(
    State(state): State<AppState>,
+   jar: CookieJar,
    Path((_username, id)): Path<(String, String)>,
    headers: HeaderMap,
 ) -> Result<Response> {
    let tweet = cached_conversation(&state, &id).await?.tweet;
+   let prefs = Prefs::from_cookies(&jar, &state.config);
 
    let discord_activity = headers
       .get(header::USER_AGENT)
       .and_then(|value| value.to_str().ok())
       .is_some_and(|user_agent| user_agent.contains("Discordbot"));
-   let markup = embed_view::render_tweet_embed(&tweet, &state.config, discord_activity);
+   let markup = embed_view::render_tweet_embed(
+      &tweet,
+      &state.config,
+      discord_activity,
+      prefs.proxy_media,
+   );
    Ok(Html(markup.into_string()).into_response())
 }
 
 /// Video embed endpoint - returns HTML with video player.
-async fn video_embed(State(state): State<AppState>, Path(id): Path<String>) -> Result<Response> {
+async fn video_embed(
+   State(state): State<AppState>,
+   jar: CookieJar,
+   Path(id): Path<String>,
+) -> Result<Response> {
    let tweet = cached_conversation(&state, &id).await?.tweet;
+   let prefs = Prefs::from_cookies(&jar, &state.config);
 
    if !embed_view::has_playable_video(&tweet) {
       return Err(Error::NotFound("No video found".into()));
    }
 
-   let markup = embed_view::render_video_embed(&tweet, &state.config);
+   let markup = embed_view::render_video_embed(&tweet, &state.config, prefs.proxy_media);
    Ok(Html(markup.into_string()).into_response())
 }
 

@@ -287,7 +287,7 @@ async fn search(
                Some(&prefs),
             )
          },
-         "lists" => search_view::render_list_search_results(&raw_q, &[], &state.config, None, None),
+         "lists" => search_view::render_list_search_results(&raw_q, &[], &state.config, None, None, prefs.proxy_media),
          _ => {
             let empty_tweets = Vec::new();
             search_view::render_search_results_with_prefs(
@@ -357,6 +357,7 @@ async fn search(
                &state.config,
                cursor,
                newer_url.as_deref(),
+               prefs.proxy_media,
             );
             let title = format!("Search ({raw_q}) | Lists");
             let canonical = format!(

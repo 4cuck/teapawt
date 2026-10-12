@@ -235,7 +235,7 @@ fn build_discord_embed_description(tweet: &Tweet) -> String {
 
 /// Render OG image, twitter:image, and video/gif meta tags for a tweet.
 /// Shared between `render_tweet_embed` and `render_status_page`.
-fn render_media_meta_tags(tweet: &Tweet, config: &Config, url_prefix: &str) -> Markup {
+fn render_media_meta_tags(tweet: &Tweet, config: &Config, url_prefix: &str, proxy: bool) -> Markup {
    let images = og_images_with_quote(tweet);
    let photos = photos_with_quote(tweet);
    let video_source = video_source_with_quote(tweet);
@@ -257,8 +257,8 @@ fn render_media_meta_tags(tweet: &Tweet, config: &Config, url_prefix: &str) -> M
        // Skip image meta tags for GIF tweets because their branch provides og:image
        @if !has_gif {
            @for image in &images {
-               @let pic_url = formatters::get_pic_url(image, config.config.base64_media);
-               @let full_pic_url = format!("{url_prefix}{pic_url}");
+               @let pic_url = formatters::get_pic_url(image, config.config.base64_media, proxy);
+               @let full_pic_url = formatters::join_base(url_prefix, &pic_url);
                meta property="og:image" content=(full_pic_url);
                @if let Some(photo) = photos.iter().find(|photo| photo.url == *image) {
                    @if photo.width > 0 && photo.height > 0 {
@@ -273,8 +273,8 @@ fn render_media_meta_tags(tweet: &Tweet, config: &Config, url_prefix: &str) -> M
            meta property="twitter:image" content="0";
        } @else if !has_gif {
            @for image in &images {
-               @let pic_url = formatters::get_pic_url(image, config.config.base64_media);
-               @let full_pic_url = format!("{url_prefix}{pic_url}");
+               @let pic_url = formatters::get_pic_url(image, config.config.base64_media, proxy);
+               @let full_pic_url = formatters::join_base(url_prefix, &pic_url);
                meta property="twitter:image" content=(full_pic_url);
                @if let Some(photo) = photos.iter().find(|photo| photo.url == *image) {
                    @if photo.width > 0 && photo.height > 0 {
@@ -292,8 +292,8 @@ fn render_media_meta_tags(tweet: &Tweet, config: &Config, url_prefix: &str) -> M
            @let embed_url = formatters::get_video_embed_url(config, media_tweet.id);
 
            @if let Some(mp4_url) = video.best_mp4_url() {
-               @let vid_url = formatters::get_vid_url(mp4_url, &config.config.hmac_key, config.config.base64_media);
-               @let full_vid_url = format!("{url_prefix}{vid_url}");
+               @let vid_url = formatters::get_vid_url(mp4_url, &config.config.hmac_key, config.config.base64_media, proxy);
+               @let full_vid_url = formatters::join_base(url_prefix, &vid_url);
 
                meta property="og:video" content=(full_vid_url);
                meta property="og:video:secure_url" content=(full_vid_url);
@@ -315,7 +315,7 @@ fn render_media_meta_tags(tweet: &Tweet, config: &Config, url_prefix: &str) -> M
            @match config.gif_transcoding.mode {
                GifTranscodingMode::Local => {
                    @let gif_url = formatters::get_gif_url(&gif.url, &config.config.hmac_key, config.config.base64_media);
-                   @let full_gif_url = format!("{url_prefix}{gif_url}");
+                   @let full_gif_url = formatters::join_base(url_prefix, &gif_url);
                    meta property="og:image" content=(full_gif_url);
                    meta property="twitter:image" content=(full_gif_url);
                },
@@ -325,8 +325,8 @@ fn render_media_meta_tags(tweet: &Tweet, config: &Config, url_prefix: &str) -> M
                    meta property="twitter:image" content=(ext_gif_url);
                },
                GifTranscodingMode::Off => {
-                   @let thumb_url = formatters::get_pic_url(&gif.thumb, config.config.base64_media);
-                   @let full_thumb_url = format!("{url_prefix}{thumb_url}");
+                   @let thumb_url = formatters::get_pic_url(&gif.thumb, config.config.base64_media, proxy);
+                   @let full_thumb_url = formatters::join_base(url_prefix, &thumb_url);
                    meta property="og:image" content=(full_thumb_url);
                    meta property="twitter:image" content=(full_thumb_url);
                },
@@ -342,7 +342,7 @@ fn render_media_meta_tags(tweet: &Tweet, config: &Config, url_prefix: &str) -> M
 
 /// Discord normally gets tweet media from `/api/v1/statuses/{id}`. Broadcasts
 /// keep an OG fallback because Discord sometimes skips that second request.
-fn render_discord_activity_meta_tags(tweet: &Tweet, config: &Config, url_prefix: &str) -> Markup {
+fn render_discord_activity_meta_tags(tweet: &Tweet, config: &Config, url_prefix: &str, proxy: bool) -> Markup {
    let has_video = video_source_with_quote(tweet).is_some();
    let has_gif = gif_source_with_quote(tweet).is_some();
    let has_photo = !tweet.photos.is_empty()
@@ -359,8 +359,8 @@ fn render_discord_activity_meta_tags(tweet: &Tweet, config: &Config, url_prefix:
 
    html! {
        @if let Some(image) = broadcast_image {
-           @let image_path = formatters::get_pic_url(image, config.config.base64_media);
-           @let image_url = format!("{url_prefix}{image_path}");
+           @let image_path = formatters::get_pic_url(image, config.config.base64_media, proxy);
+           @let image_url = formatters::join_base(url_prefix, &image_path);
            meta property="og:image" content=(image_url);
            meta property="og:image:width" content="1920";
            meta property="og:image:height" content="1080";
@@ -371,8 +371,9 @@ fn render_discord_activity_meta_tags(tweet: &Tweet, config: &Config, url_prefix:
            @let avatar_path = formatters::get_pic_url(
                &tweet.user.user_pic,
                config.config.base64_media,
+               proxy,
            );
-           @let avatar_url = format!("{url_prefix}{avatar_path}");
+           @let avatar_url = formatters::join_base(url_prefix, &avatar_path);
            meta property="og:image" content=(avatar_url);
            meta property="twitter:image" content="0";
        }
@@ -437,7 +438,7 @@ fn build_oembed_url(tweet: &Tweet, config: &Config) -> String {
    clippy::module_name_repetitions,
    reason = "public API name is clear and conventional"
 )]
-pub fn render_tweet_embed(tweet: &Tweet, config: &Config, discord_activity: bool) -> Markup {
+pub fn render_tweet_embed(tweet: &Tweet, config: &Config, discord_activity: bool, proxy: bool) -> Markup {
    let url_prefix = config.url_prefix();
    let oembed_url = build_oembed_url(tweet, config);
    let description = if discord_activity {
@@ -459,9 +460,9 @@ pub fn render_tweet_embed(tweet: &Tweet, config: &Config, discord_activity: bool
 
                @if discord_activity {
                    meta property="theme-color" content="#005ace";
-                   (render_discord_activity_meta_tags(tweet, config, url_prefix))
+                   (render_discord_activity_meta_tags(tweet, config, url_prefix, proxy))
                } @else {
-                   (render_media_meta_tags(tweet, config, url_prefix))
+                   (render_media_meta_tags(tweet, config, url_prefix, proxy))
                }
 
                @if discord_activity {
@@ -493,29 +494,30 @@ pub fn render_tweet_embed(tweet: &Tweet, config: &Config, discord_activity: bool
    clippy::module_name_repetitions,
    reason = "public API name is clear and conventional"
 )]
-pub fn render_video_embed(tweet: &Tweet, config: &Config) -> Markup {
+pub fn render_video_embed(tweet: &Tweet, config: &Config, proxy: bool) -> Markup {
    let url_prefix = config.url_prefix();
 
    let media = video_embed_media(tweet);
    let thumbnail_path = media
       .as_ref()
-      .map(|media| formatters::get_pic_url(media.thumbnail_url, config.config.base64_media))
+      .map(|media| formatters::get_pic_url(media.thumbnail_url, config.config.base64_media, proxy))
       .unwrap_or_default();
    let thumbnail_url = if thumbnail_path.is_empty() {
       String::new()
    } else {
-      format!("{url_prefix}{thumbnail_path}")
+      formatters::join_base(url_prefix, &thumbnail_path)
    };
    let stream_path = media.as_ref().map(|media| {
       formatters::get_vid_url(
          media.stream_url,
          &config.config.hmac_key,
          config.config.base64_media,
+         proxy,
       )
    });
    let stream_url = stream_path
       .as_ref()
-      .map(|path| format!("{url_prefix}{path}"));
+      .map(|path| formatters::join_base(url_prefix, path));
    let (width, height) = media
       .as_ref()
       .map_or((1280, 720), |media| (media.width, media.height));
@@ -593,14 +595,14 @@ pub fn render_status_page(
    let referer = format!("/{username}/status/{id}");
    let page_url = format!("{url_prefix}/{username}/status/{id}");
 
-   let avatar_url = formatters::get_pic_url(&tweet.user.user_pic, config.config.base64_media);
+   let avatar_url = formatters::get_pic_url(&tweet.user.user_pic, config.config.base64_media, prefs.proxy_media);
 
    let head_extra = html! {
        meta property="og:url" content=(page_url);
        meta property="twitter:site" content=(format!("@{}", tweet.user.username));
        meta property="twitter:creator" content=(format!("@{}", tweet.user.username));
        meta property="twitter:title" content=(og_title);
-       link rel="apple-touch-icon" href=(format!("{url_prefix}{avatar_url}"));
+       link rel="apple-touch-icon" href=(formatters::join_base(url_prefix, &avatar_url));
 
        // Publish time for Discord footer timestamp
        @if !discord_activity && let Some(ts) = tweet.time {
@@ -609,9 +611,9 @@ pub fn render_status_page(
        }
 
        @if discord_activity {
-           (render_discord_activity_meta_tags(tweet, config, url_prefix))
+           (render_discord_activity_meta_tags(tweet, config, url_prefix, prefs.proxy_media))
        } @else {
-           (render_media_meta_tags(tweet, config, url_prefix))
+           (render_media_meta_tags(tweet, config, url_prefix, prefs.proxy_media))
        }
 
        meta property="og:title" content=(og_title);

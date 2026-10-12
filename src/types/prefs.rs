@@ -58,7 +58,7 @@ impl Prefs {
          square_avatars:       true,
          use_twemoji:          true,
          sticky_nav:           true,
-         proxy_media:          true,
+         proxy_media:          false,
          font_size:            String::new(),
          replace_twitter:      config.preferences.replace_twitter.clone(),
          replace_youtube:      config.preferences.replace_youtube.clone(),

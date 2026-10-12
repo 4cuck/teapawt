@@ -44,23 +44,28 @@ pub fn tweet_link(tweet: &Tweet) -> String {
    format!("/{username}/status/{}", tweet.id)
 }
 
-/// Append small webp params and proxy the URL.
-pub fn get_small_pic(url: &str, config: &Config) -> String {
-   sized_pic(url, SMALL_WEBP, config)
+/// Whether this visitor asked to relay images and videos through teapawt.
+pub fn proxy_media(prefs: Option<&Prefs>) -> bool {
+   prefs.is_some_and(|pref| pref.proxy_media)
 }
 
-/// Append medium webp params and proxy the URL (gallery large columns).
-pub fn get_medium_pic(url: &str, config: &Config) -> String {
-   sized_pic(url, MEDIUM_WEBP, config)
+/// Append small webp params and build the image URL.
+pub fn get_small_pic(url: &str, config: &Config, proxy: bool) -> String {
+   sized_pic(url, SMALL_WEBP, config, proxy)
 }
 
-fn sized_pic(url: &str, suffix: &str, config: &Config) -> String {
+/// Append medium webp params and build the image URL (gallery large columns).
+pub fn get_medium_pic(url: &str, config: &Config, proxy: bool) -> String {
+   sized_pic(url, MEDIUM_WEBP, config, proxy)
+}
+
+fn sized_pic(url: &str, suffix: &str, config: &Config, proxy: bool) -> String {
    let url = if !url.contains('?') && !url.ends_with("placeholder.png") {
       format!("{url}{suffix}")
    } else {
       url.to_owned()
    };
-   formatters::get_pic_url(&url, config.config.base64_media)
+   formatters::get_pic_url(&url, config.config.base64_media, proxy)
 }
 
 /// Render an icon inside a container div.
@@ -170,8 +175,8 @@ pub fn button_referer(action: &str, text: &str, path: &str, class: &str, method:
 /// Render a proxied image.
 ///
 /// Produces: `<img src="{pic_url}" class="{class}" alt="" loading="lazy">`.
-pub fn gen_img(url: &str, class: &str, config: &Config) -> Markup {
-   let pic_url = formatters::get_pic_url(url, config.config.base64_media);
+pub fn gen_img(url: &str, class: &str, config: &Config, proxy: bool) -> Markup {
+   let pic_url = formatters::get_pic_url(url, config.config.base64_media, proxy);
    html! {
        img src=(pic_url) class=(class) alt="" loading="lazy";
    }

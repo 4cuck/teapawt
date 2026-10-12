@@ -64,7 +64,7 @@ pub fn render_user_list(
 /// Used by both `user_list` and `search` views.
 pub fn render_user(user: &User, config: &Config, prefs: Option<&Prefs>) -> Markup {
    let href = format!("/{}", user.username);
-   let avatar_url = formatters::get_pic_url(&user.user_pic, config.config.base64_media);
+   let avatar_url = formatters::get_pic_url(&user.user_pic, config.config.base64_media, crate::views::renderutils::proxy_media(prefs));
    let avatar_class = get_avatar_class(prefs);
 
    html! {

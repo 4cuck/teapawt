@@ -218,8 +218,8 @@ async fn main() -> eyre::Result<()> {
                 "default-src 'none'; \
                  script-src 'self'; \
                  style-src 'self' 'unsafe-inline'; \
-                 img-src 'self' data:; \
-                 media-src 'self' blob:; \
+                 img-src 'self' data: https://*.twimg.com https://video.pscp.tv https://*.video.pscp.tv; \
+                 media-src 'self' blob: https://*.twimg.com; \
                  font-src 'self'; \
                  connect-src 'self'; \
                  form-action 'self'; \

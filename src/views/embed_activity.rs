@@ -219,7 +219,7 @@ const fn dimensions_or(width: i32, height: i32, fallback: (i32, i32)) -> (i32, i
 }
 
 fn full_media_url(url_prefix: &str, path: &str) -> String {
-   format!("{url_prefix}{path}")
+   formatters::join_base(url_prefix, path)
 }
 
 fn application_name(source: &str) -> String {
@@ -268,7 +268,7 @@ fn build_preview_card(
    let image = (!card.image.is_empty()).then(|| {
       full_media_url(
          url_prefix,
-         &formatters::get_pic_url(&card.image, config.config.base64_media),
+         &formatters::get_pic_url(&card.image, config.config.base64_media, false),
       )
    });
 
@@ -317,11 +317,12 @@ fn build_media_attachments(
                   mp4_url,
                   &config.config.hmac_key,
                   config.config.base64_media,
+                  false,
                ),
             ),
             Some(full_media_url(
                url_prefix,
-               &formatters::get_pic_url(poster, config.config.base64_media),
+               &formatters::get_pic_url(poster, config.config.base64_media, false),
             )),
             None,
             width,
@@ -337,7 +338,7 @@ fn build_media_attachments(
          "image",
          full_media_url(
             url_prefix,
-            &formatters::get_orig_pic_url(&photo.url, config.config.base64_media),
+            &formatters::get_orig_pic_url(&photo.url, config.config.base64_media, false),
          ),
          None,
          (!photo.alt_text.is_empty()).then(|| photo.alt_text.clone()),
@@ -394,11 +395,12 @@ fn build_media_attachments(
                      &gif.url,
                      &config.config.hmac_key,
                      config.config.base64_media,
+                     false,
                   ),
                ),
                Some(full_media_url(
                   url_prefix,
-                  &formatters::get_pic_url(&gif.thumb, config.config.base64_media),
+                  &formatters::get_pic_url(&gif.thumb, config.config.base64_media, false),
                )),
                description,
                width,
@@ -865,12 +867,14 @@ pub fn build_activity_pub_with_reply(
 
    let status_url = format!("https://x.com/{}/status/{}", tweet.user.username, tweet.id);
    let profile_url = format!("https://x.com/{}", tweet.user.username);
-   let avatar_url = formatters::get_pic_url(&tweet.user.user_pic, config.config.base64_media);
-   let avatar_url = format!("{url_prefix}{avatar_url}");
+   let avatar_url = formatters::join_base(
+      url_prefix,
+      &formatters::get_pic_url(&tweet.user.user_pic, config.config.base64_media, false),
+   );
    let header_url = (!tweet.user.banner.is_empty()).then(|| {
-      format!(
-         "{url_prefix}{}",
-         formatters::get_pic_url(&tweet.user.banner, config.config.base64_media)
+      formatters::join_base(
+         url_prefix,
+         &formatters::get_pic_url(&tweet.user.banner, config.config.base64_media, false),
       )
    });
 

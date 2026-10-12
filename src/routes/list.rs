@@ -116,7 +116,7 @@ async fn list_by_slug(
 
    let content = html! {
        div class="timeline-container" {
-           (timeline_view::render_list_header(&list, "tweets", &state.config))
+           (timeline_view::render_list_header(&list, "tweets", &state.config, prefs.proxy_media))
            (timeline_view::render_timeline(&groups, &state.config, cursor, Some(&base_url)))
        }
    };
@@ -161,7 +161,7 @@ async fn list_by_id(
 
    let content = html! {
        div class="timeline-container" {
-           (timeline_view::render_list_header(&list, "tweets", &state.config))
+           (timeline_view::render_list_header(&list, "tweets", &state.config, prefs.proxy_media))
            (timeline_view::render_timeline(&groups, &state.config, cursor, Some(&base_url)))
        }
    };
@@ -227,7 +227,7 @@ async fn list_members(
 
          let content = html! {
              div class="timeline-container" {
-                 (timeline_view::render_list_header(&list, "members", &state.config))
+                 (timeline_view::render_list_header(&list, "members", &state.config, prefs.proxy_media))
                  (user_list::render_user_list(&members.content, &state.config, cursor, Some(&base_url), Some(&prefs)))
              }
          };

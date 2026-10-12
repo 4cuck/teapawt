@@ -440,7 +440,7 @@ fn render_conversation(
                div class="timeline-item show-more" {
                    a href=(format!("/{username}/status/{id}#r")) { "Back to tweet" }
                }
-               (tweet_view::render_thread_context(tweet, config))
+               (tweet_view::render_thread_context(tweet, config, prefs))
                div class="replies" id="r" {
                    (render_reply_chains(
                        &conversation.replies.content,
@@ -513,7 +513,7 @@ fn render_conversation(
 
                // Replies section
                @if has_replies {
-                   (tweet_view::render_thread_context(tweet, config))
+                   (tweet_view::render_thread_context(tweet, config, prefs))
                    div class="replies" id="r" {
                        (render_reply_chains(
                            &conversation.replies.content,
