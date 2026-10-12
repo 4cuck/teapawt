@@ -72,6 +72,11 @@ const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 /// multiplexed HTTP/2 and pinged, so a dead one is noticed rather than hung on.
 const POOL_IDLE: Duration = Duration::from_secs(300);
 const POOL_PER_HOST: usize = 4;
+/// CDN media normally answers in tens of milliseconds. A pooled connection the
+/// path has already forgotten sits in TCP retransmits for several seconds and
+/// then delivers, which is the video that "loads" after a long pause. Give up
+/// on headers by then and open another connection.
+const MEDIA_HEADER_DEADLINE: Duration = Duration::from_secs(2);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(45);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 /// After an HTML 429, skip the direct address this long and send every
@@ -499,6 +504,22 @@ impl HttpClient {
          }
          request.send()
       };
+      if self.purpose == Purpose::Media && is_idempotent(method) {
+         let inner = match tokio::time::timeout(MEDIA_HEADER_DEADLINE, send()).await {
+            Ok(Ok(inner)) => inner,
+            Ok(Err(err)) if is_transport_blip(&err) || err.is_connect() => {
+               tracing::warn!(uri, error = %err, "media fetch failed, retrying");
+               send().await.map_err(describe)?
+            },
+            Err(_elapsed) => {
+               tracing::warn!(uri, "media headers stalled, opening a new connection");
+               send().await.map_err(describe)?
+            },
+            Ok(Err(err)) => return Err(describe(err)),
+         };
+         return Ok(Response { inner });
+      }
+
       let inner = match send().await {
          Ok(inner) => inner,
          // A pooled connection the far end closed a moment ago fails on the
@@ -617,6 +638,10 @@ fn build_client(
    extra_headers: &HeaderMap,
    idle_per_host: usize,
 ) -> Result<primp::Client> {
+   // Images and video each get their own HTTP/1 connection, and none are
+   // kept afterwards. One shared HTTP/2 session to video.twimg.com was
+   // stalling every later fetch for seconds once the CDN had dropped it.
+   let media = purpose == Purpose::Media;
    let mut builder = primp::Client::builder()
       .impersonate(identity.profile())
       .impersonate_os(identity.os)
@@ -624,8 +649,8 @@ fn build_client(
       .redirect(primp::redirect::Policy::none())
       .timeout(purpose.timeout())
       .read_timeout(BODY_IDLE_TIMEOUT)
-      .pool_idle_timeout(POOL_IDLE)
-      .pool_max_idle_per_host(idle_per_host)
+      .pool_idle_timeout(if media { Duration::from_secs(1) } else { POOL_IDLE })
+      .pool_max_idle_per_host(if media { 0 } else { idle_per_host })
       .http2_keep_alive_interval(KEEP_ALIVE_INTERVAL)
       .http2_keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
       .http2_keep_alive_while_idle(true)
@@ -634,6 +659,12 @@ fn build_client(
       // use a different order, captured from Chrome 152, and headers missing
       // from that list are appended after `priority`.
       .http2_headers_order(wire_header_order(purpose));
+   if media {
+      builder = builder
+         .http1_only()
+         .connect_timeout(Duration::from_secs(3))
+         .tcp_keepalive(Duration::from_secs(10));
+   }
    builder = match proxy {
       Some(proxy) => {
          builder.proxy(
