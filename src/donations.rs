@@ -101,20 +101,29 @@ impl DonationLedger {
       self.write(&file).await;
    }
 
-   /// Record a confirmed payment once. Later notices for the same provider
-   /// reference do not add the amount again.
+   /// Record a confirmed payment. A later notice for the same provider
+   /// reference replaces the amount, so a partial crypto payment can be
+   /// corrected when more arrives, without counting twice.
    pub async fn mark_paid(&self, id: &str, provider: &str, provider_ref: &str, cents: i64) {
-      if id.is_empty() || provider_ref.is_empty() || cents <= 0 {
+      if provider_ref.is_empty() || cents <= 0 {
          return;
       }
       let _guard = self.lock.lock().await;
       let mut file = self.read().await.unwrap_or_default();
-      if file.entries.iter().any(|entry| {
+      if let Some(entry) = file.entries.iter_mut().find(|entry| {
          entry.status == "paid" && entry.provider == provider && entry.provider_ref == provider_ref
       }) {
+         if entry.cents == cents {
+            return;
+         }
+         entry.cents = cents;
+         if !id.is_empty() {
+            entry.id = id.to_owned();
+         }
+         self.write(&file).await;
          return;
       }
-      if let Some(entry) = file.entries.iter_mut().find(|entry| entry.id == id) {
+      if let Some(entry) = file.entries.iter_mut().find(|entry| !id.is_empty() && entry.id == id) {
          entry.status = "paid".to_owned();
          entry.provider = provider.to_owned();
          entry.provider_ref = provider_ref.to_owned();
@@ -431,12 +440,29 @@ pub fn nowpayments_signature_ok(raw: &[u8], header: &str, secret: &str) -> bool 
    })
 }
 
-pub fn nowpayments_is_paid(body: &Value) -> bool {
-   let status = body["payment_status"].as_str().unwrap_or("").to_ascii_lowercase();
-   if status == "partially_paid" {
-      return false;
+/// USD cents actually received. A partial crypto payment counts only the share
+/// of the invoice that arrived, not the full `price_amount`.
+pub fn nowpayments_received_cents(body: &Value) -> Option<i64> {
+   let status = body["payment_status"]
+      .as_str()
+      .unwrap_or("")
+      .to_ascii_lowercase();
+   if matches!(status.as_str(), "failed" | "expired" | "refunded") {
+      return None;
    }
-   status == "finished" || status == "confirmed" || body["invoice_status"] == "finished"
+   let price = json_f64(&body["price_amount"])?;
+   let expected = json_f64(&body["pay_amount"])?;
+   let received = json_f64(&body["actually_paid"]).unwrap_or(0.0);
+   if price <= 0.0 || expected <= 0.0 || received <= 0.0 {
+      return None;
+   }
+   let ratio = (received / expected).clamp(0.0, 1.0);
+   let cents = if ratio >= 0.999 && matches!(status.as_str(), "finished" | "confirmed") {
+      (price * 100.0).round() as i64
+   } else {
+      (ratio * price * 100.0).round() as i64
+   };
+   (cents > 0).then_some(cents)
 }
 
 pub async fn lzt_invoice(
@@ -538,6 +564,13 @@ pub fn provider_ready(config: &DonationsConfig, provider: &str) -> bool {
    }
 }
 
+fn json_f64(value: &Value) -> Option<f64> {
+   value
+      .as_f64()
+      .or_else(|| value.as_i64().map(|number| number as f64))
+      .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+}
+
 fn urlencoding_path(value: &str) -> String {
    form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
@@ -612,6 +645,28 @@ mod tests {
       assert!(!stripe_signature_ok(payload, &header, "whsec_other"));
    }
 
+   #[test]
+   fn partial_crypto_payment_counts_only_what_arrived() {
+      let body = serde_json::json!({
+         "payment_status": "partially_paid",
+         "price_amount": 25,
+         "pay_amount": 0.4069642,
+         "actually_paid": 0.02107742,
+         "invoice_status": "finished"
+      });
+      assert_eq!(nowpayments_received_cents(&body), Some(129));
+   }
+
+   #[test]
+   fn finished_crypto_payment_counts_the_invoice() {
+      let body = serde_json::json!({
+         "payment_status": "finished",
+         "price_amount": 25,
+         "pay_amount": 0.4,
+         "actually_paid": 0.4
+      });
+      assert_eq!(nowpayments_received_cents(&body), Some(2500));
+   }
    #[test]
    fn nowpayments_accepts_sorted_body() {
       let raw = br#"{"b":1,"a":{"d":2,"c":3}}"#;

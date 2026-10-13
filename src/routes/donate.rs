@@ -245,22 +245,21 @@ async fn nowpayments_ipn(State(state): State<AppState>, headers: HeaderMap, body
    let Ok(payload) = serde_json::from_slice::<Value>(&body) else {
       return StatusCode::BAD_REQUEST.into_response();
    };
-   if !donations::nowpayments_is_paid(&payload) {
+   let Some(cents) = donations::nowpayments_received_cents(&payload) else {
       return StatusCode::OK.into_response();
-   }
+   };
    let id = payload["order_id"].as_str().unwrap_or("");
    let reference = payload["payment_id"]
       .as_i64()
       .map(|value| value.to_string())
       .or_else(|| payload["payment_id"].as_str().map(str::to_owned))
       .unwrap_or_default();
-   let cents = donations::dollars_value_to_cents(payload.get("price_amount").unwrap_or(&Value::Null));
-   if donations::valid_donation_id(id) && cents > 0 && !reference.is_empty() {
+   if donations::valid_donation_id(id) && !reference.is_empty() {
       state
          .donations
          .mark_paid(id, "nowpayments", &reference, cents)
          .await;
-      tracing::info!(donation_id = id, cents, "nowpayments donation paid");
+      tracing::info!(donation_id = id, cents, "nowpayments donation received");
    }
    StatusCode::OK.into_response()
 }
