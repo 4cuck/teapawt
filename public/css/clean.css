@@ -1096,6 +1096,37 @@ input[type="text"], input[type="date"], input[type="number"], select {
 }
 .firefox-media-warning strong { display: block; margin-bottom: 4px; }
 .firefox-media-warning p { margin: 0; }
+
+.donate-drive {
+  width: min(100%, 640px);
+  margin: 0 auto 18px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  color: var(--text);
+  text-align: left;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.donate-drive strong { display: block; margin-bottom: 4px; }
+.donate-drive p { margin: 0; }
+.donate-page { max-width: 640px; margin: 28px auto; padding: 0 16px 48px; }
+.donate-page h1 { margin: 0 0 8px; font-size: 28px; }
+.donate-form { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-top: 16px; }
+.donate-form label { font-weight: 650; }
+.donate-form input[type="text"] {
+  position: static;
+  width: min(100%, 220px);
+  max-width: none;
+  height: 36px;
+  margin: 0;
+  padding: 0 8px;
+}
+.donate-methods { display: flex; flex-wrap: wrap; gap: 8px; }
+.donate-methods button { min-height: 36px; padding: 8px 14px; }
+.donate-note, .donate-status { color: var(--muted); font-size: 13px; }
+.donate-error { color: var(--text); }
+
 .firefox-warning-ignore { display: none; }
 .firefox-media-warning button {
   min-height: 0;

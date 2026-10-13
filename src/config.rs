@@ -60,6 +60,8 @@ pub struct Config {
    pub preferences: PreferencesConfig,
    #[serde(default, rename = "gifTranscoding")]
    pub gif_transcoding: GifTranscodingConfig,
+   #[serde(default)]
+   pub donations: DonationsConfig,
    /// Precomputed `{scheme}://{hostname}` value set in `Config::load`.
    #[serde(skip)]
    pub url_prefix: String,
@@ -158,6 +160,177 @@ pub struct AppConfig {
    /// Path to a file containing the Kagi session token.
    #[serde(default, rename = "kagiTokenFile")]
    pub kagi_token_file: String,
+}
+
+#[derive(Clone, Deserialize, Default)]
+pub struct DonationsConfig {
+   #[serde(default = "default_goal_cents", rename = "goalCents")]
+   pub goal_cents: i64,
+   /// Inclusive calendar day, `YYYY-MM-DD`, after which the homepage ask is hidden.
+   #[serde(default = "default_goal_deadline", rename = "goalDeadline")]
+   pub goal_deadline: String,
+   #[serde(default = "default_ledger_file", rename = "ledgerFile")]
+   pub ledger_file: String,
+   #[serde(default)]
+   pub stripe: StripeDonationConfig,
+   #[serde(default)]
+   pub nowpayments: NowPaymentsDonationConfig,
+   #[serde(default)]
+   pub lzt: LztDonationConfig,
+}
+
+impl std::fmt::Debug for DonationsConfig {
+   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+      formatter
+         .debug_struct("DonationsConfig")
+         .field("goal_cents", &self.goal_cents)
+         .field("goal_deadline", &self.goal_deadline)
+         .field("ledger_file", &self.ledger_file)
+         .field("stripe", &self.stripe.configured())
+         .field("nowpayments", &self.nowpayments.configured())
+         .field("lzt", &self.lzt.configured())
+         .finish()
+   }
+}
+
+#[derive(Clone, Deserialize, Default)]
+pub struct StripeDonationConfig {
+   #[serde(default, rename = "secretKey")]
+   pub secret_key: String,
+   #[serde(default, rename = "webhookSecret")]
+   pub webhook_secret: String,
+}
+
+impl StripeDonationConfig {
+   pub fn configured(&self) -> bool {
+      !self.secret_key.is_empty()
+   }
+}
+
+impl std::fmt::Debug for StripeDonationConfig {
+   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+      formatter
+         .debug_struct("StripeDonationConfig")
+         .field("configured", &self.configured())
+         .finish()
+   }
+}
+
+#[derive(Clone, Deserialize, Default)]
+pub struct NowPaymentsDonationConfig {
+   #[serde(default, rename = "apiKey")]
+   pub api_key: String,
+   #[serde(default, rename = "ipnSecret")]
+   pub ipn_secret: String,
+}
+
+impl NowPaymentsDonationConfig {
+   pub fn configured(&self) -> bool {
+      !self.api_key.is_empty()
+   }
+}
+
+impl std::fmt::Debug for NowPaymentsDonationConfig {
+   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+      formatter
+         .debug_struct("NowPaymentsDonationConfig")
+         .field("configured", &self.configured())
+         .field("ipn", &!self.ipn_secret.is_empty())
+         .finish()
+   }
+}
+
+#[derive(Clone, Deserialize)]
+pub struct LztDonationConfig {
+   #[serde(default, rename = "accessToken")]
+   pub access_token: String,
+   #[serde(default, rename = "merchantId")]
+   pub merchant_id: u64,
+   #[serde(default, rename = "secretKey")]
+   pub secret_key: String,
+   #[serde(default = "default_lzt_currency")]
+   pub currency: String,
+}
+
+impl Default for LztDonationConfig {
+   fn default() -> Self {
+      Self {
+         access_token: String::new(),
+         merchant_id: 0,
+         secret_key: String::new(),
+         currency: default_lzt_currency(),
+      }
+   }
+}
+
+impl LztDonationConfig {
+   pub fn configured(&self) -> bool {
+      !self.access_token.is_empty() && self.merchant_id > 0
+   }
+}
+
+impl std::fmt::Debug for LztDonationConfig {
+   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+      formatter
+         .debug_struct("LztDonationConfig")
+         .field("configured", &self.configured())
+         .field("merchant_id", &self.merchant_id)
+         .field("currency", &self.currency)
+         .field("webhook", &!self.secret_key.is_empty())
+         .finish()
+   }
+}
+
+fn default_goal_cents() -> i64 {
+   12_900
+}
+
+fn default_goal_deadline() -> String {
+   "2026-10-23".to_owned()
+}
+
+fn default_ledger_file() -> String {
+   "donations.json".to_owned()
+}
+
+fn default_lzt_currency() -> String {
+   "usd".to_owned()
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+   std::env::var(name)
+      .ok()
+      .map(|value| value.trim().to_owned())
+      .filter(|value| !value.is_empty())
+}
+
+fn apply_donation_env(donations: &mut DonationsConfig) {
+   if let Some(value) = env_nonempty("STRIPE_SECRET_KEY") {
+      donations.stripe.secret_key = value;
+   }
+   if let Some(value) = env_nonempty("STRIPE_WEBHOOK_SECRET") {
+      donations.stripe.webhook_secret = value;
+   }
+   if let Some(value) = env_nonempty("NOWPAYMENTS_API_KEY") {
+      donations.nowpayments.api_key = value;
+   }
+   if let Some(value) = env_nonempty("NOWPAYMENTS_IPN_SECRET") {
+      donations.nowpayments.ipn_secret = value;
+   }
+   if let Some(value) = env_nonempty("LZT_ACCESS_TOKEN") {
+      donations.lzt.access_token = value;
+   }
+   if let Some(value) = env_nonempty("LZT_SECRET_KEY") {
+      donations.lzt.secret_key = value;
+   }
+   if let Some(value) = env_nonempty("LZT_MERCHANT_ID")
+      && let Ok(id) = value.parse::<u64>()
+   {
+      donations.lzt.merchant_id = id;
+   }
+   if let Some(value) = env_nonempty("LZT_CURRENCY") {
+      donations.lzt.currency = value.to_ascii_lowercase();
+   }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -308,6 +481,14 @@ impl Config {
       if !config.config.kagi_token.is_empty() {
          tracing::info!("Kagi Translate enabled for server-side translations");
       }
+
+      apply_donation_env(&mut config.donations);
+      tracing::info!(
+         stripe = config.donations.stripe.configured(),
+         nowpayments = config.donations.nowpayments.configured(),
+         lzt = config.donations.lzt.configured(),
+         "donation providers"
+      );
 
       let scheme = if config.server.https { "https" } else { "http" };
       let default_port = if config.server.https { 443 } else { 80 };

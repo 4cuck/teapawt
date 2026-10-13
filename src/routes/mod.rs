@@ -4,6 +4,7 @@ mod app;
 mod broadcast;
 mod community;
 mod debug;
+mod donate;
 mod embed;
 pub mod helpers;
 mod intent;

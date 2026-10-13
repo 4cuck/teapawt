@@ -10,6 +10,7 @@ pub fn router() -> Router<AppState> {
    Router::new()
       .merge(super::seo::router())
       .merge(super::pages::router())
+      .merge(super::donate::router())
       .merge(super::unsupported::router())
       .merge(super::debug::router())
       .merge(super::redirect::router())

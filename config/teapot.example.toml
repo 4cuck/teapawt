@@ -97,6 +97,29 @@ cacheMaxMb = 512
 # External transcoding domain (external mode only, e.g. "gif.example.com")
 externalDomain = ""
 
+# Donation checkouts. Leave these empty in git. Set them here on the server, or
+# with STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, NOWPAYMENTS_API_KEY,
+# NOWPAYMENTS_IPN_SECRET, LZT_ACCESS_TOKEN, LZT_MERCHANT_ID, and LZT_SECRET_KEY.
+# Never commit live keys.
+[donations]
+ledgerFile = "donations.json"
+goalCents = 12900
+goalDeadline = "2026-10-23"
+
+[donations.stripe]
+secretKey = ""
+webhookSecret = ""
+
+[donations.nowpayments]
+apiKey = ""
+ipnSecret = ""
+
+[donations.lzt]
+accessToken = ""
+merchantId = 0
+secretKey = ""
+currency = "usd"
+
 [preferences]
 # Default theme
 theme = "black"

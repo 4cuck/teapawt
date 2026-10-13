@@ -37,6 +37,7 @@ primp = {
   version = "2.0.0",
 }
 regex = "1.13.1"
+reqwest = { version = "0.12.23", default-features = false, features = [ "json", "rustls-tls" ] }
 ring = "0.17.14"
 serde = { features = [ "derive" ], version = "1.0.228" }
 serde_json = "1.0.150"

@@ -32,6 +32,7 @@
 proxies.txt
 session-proxies.json
 config/teapot.toml
+donations.json
 sessions.jsonl
 session-limits.json
 search-denylist.json

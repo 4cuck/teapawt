@@ -1,3 +1,4 @@
+pub mod donate;
 pub mod embed;
 pub mod layout;
 pub mod notes;

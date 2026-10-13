@@ -1,6 +1,7 @@
 mod api;
 mod cache;
 mod config;
+mod donations;
 mod error;
 mod routes;
 mod transcode;
@@ -51,6 +52,7 @@ pub struct AppState {
    pub translation_limiter: Arc<translation::TranslationLimiter>,
    /// Peers permitted to name a different caller through forwarding headers.
    pub trusted_proxies: Arc<[IpAddr]>,
+   pub donations: Arc<donations::DonationLedger>,
 }
 
 #[tokio::main]
@@ -153,6 +155,7 @@ async fn main() -> eyre::Result<()> {
       gif_transcoder,
       translation_limiter: Arc::new(translation::TranslationLimiter::new()),
       trusted_proxies: trusted_proxies.into(),
+      donations: donations::DonationLedger::open(&config.donations.ledger_file),
    };
 
    // Build the router with specific routes before static files

@@ -13,7 +13,7 @@ use maud::{PreEscaped, html};
 use crate::{
    AppState,
    types::Prefs,
-   views::{layout::PageLayout, search as search_view},
+   views::{donate as donate_view, layout::PageLayout, search as search_view},
 };
 
 const HOME_DESCRIPTION: &str = "nitter.cf is a public Nitter replacement — a privacy-focused Twitter/X frontend. nitter.net shut down; this instance is a drop-in successor.";
@@ -107,9 +107,24 @@ async fn home(
            }
        }
    };
-   let notice = (firefox && !prefs.proxy_media && !warning_hidden).then(|| {
-      crate::views::preferences::firefox_media_warning(false)
-   });
+   let drive = if donate_view::campaign_is_open(&state.config.donations.goal_deadline) {
+      Some(donate_view::donate_drive_banner(
+         state.donations.raised_cents().await,
+         state.config.donations.goal_cents,
+      ))
+   } else {
+      None
+   };
+   let firefox_note = (firefox && !prefs.proxy_media && !warning_hidden)
+      .then(|| crate::views::preferences::firefox_media_warning(false));
+   let notice = if drive.is_none() && firefox_note.is_none() {
+      None
+   } else {
+      Some(html! {
+          @if let Some(drive) = drive { (drive) }
+          @if let Some(firefox_note) = firefox_note { (firefox_note) }
+      })
+   };
    let content = search_view::render_search_page(notice, Some(hub));
    let head = html! {
        meta property="og:type" content="website";
@@ -200,8 +215,9 @@ async fn about(State(state): State<AppState>, jar: CookieJar) -> impl IntoRespon
            h2 { "Donate" }
            p {
                "Running a public instance costs money for servers, bandwidth and the accounts "
-               "and exits that keep it working. If nitter.cf is useful to you, donations help keep "
-               "it online. Nothing is required."
+               "and exits that keep it working. "
+               a href="/donate" { "Donate by card, crypto, or LZT Market" }
+               ". Nothing is required."
            }
            ul class="donate-list" {
                @for &(coin, address) in DONATION_ADDRESSES {

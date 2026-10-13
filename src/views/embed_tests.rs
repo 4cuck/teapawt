@@ -49,6 +49,7 @@ fn test_config() -> Config {
       },
       preferences: PreferencesConfig::default(),
       gif_transcoding: GifTranscodingConfig::default(),
+      donations: crate::config::DonationsConfig::default(),
       url_prefix: "https://teapot.test".to_owned(),
    }
 }
