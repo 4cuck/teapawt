@@ -1109,7 +1109,9 @@ input[type="text"], input[type="date"], input[type="number"], select {
   line-height: 1.45;
 }
 .donate-drive strong { display: block; margin-bottom: 4px; }
-.donate-drive p { margin: 0; }
+.donate-drive p { margin: 0 0 6px; }
+.donate-drive p:last-child { margin-bottom: 0; }
+.donate-drive a, .donate-note a { color: var(--accent); }
 .donate-page { max-width: 640px; margin: 28px auto; padding: 0 16px 48px; }
 .donate-page h1 { margin: 0 0 8px; font-size: 28px; }
 .donate-form { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-top: 16px; }

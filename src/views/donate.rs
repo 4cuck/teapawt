@@ -14,6 +14,14 @@ pub fn donate_drive_banner(raised_cents: i64, goal_cents: i64) -> Markup {
                a href="/donate" { "Donate any amount" }
                " up to $10,000."
            }
+           p {
+               "If you are not satisfied with this site and do not want to donate because a feature is missing or it is too slow, "
+               a href="https://github.com/4cuck/teapot/issues" target="_blank" rel="noopener noreferrer" { "request it on GitHub" }
+               ". I will add it as quickly as I can."
+           }
+           p {
+               "If we raise more than it costs to keep the site running, I will add posting, liking, and reposting on nitter.cf, so you can post what you want through our residential proxies, consequence free."
+           }
        }
    }
 }
@@ -65,6 +73,14 @@ pub fn render_donate_page(
                    "Card payments go through Stripe. Crypto goes through NOWPayments. "
                    "LZT Market uses a balance on that site. "
                    "The minimum is $1 and the maximum is $10,000."
+               }
+               p class="donate-note" {
+                   "If you are not satisfied with this site and do not want to donate because a feature is missing or it is too slow, "
+                   a href="https://github.com/4cuck/teapot/issues" target="_blank" rel="noopener noreferrer" { "request it on GitHub" }
+                   ". I will add it as quickly as I can."
+               }
+               p class="donate-note" {
+                   "If we raise more than it costs to keep the site running, I will add posting, liking, and reposting on nitter.cf, so you can post what you want through our residential proxies, consequence free."
                }
            } @else {
                p class="donate-status" { "Donations are not set up on this instance yet." }
