@@ -54,8 +54,8 @@ pub fn render_unsupported_feature(state: &AppState, feature_name: &str) -> Respo
            p {
                "teapawt doesn't support this feature yet, but it might in the future. "
                "You can check for an issue and open one if needed here: "
-               a href="https://github.com/4cuck/teapot/issues" target="_blank" {
-                   "https://github.com/4cuck/teapot/issues"
+               a href="https://github.com/4cuck/teapawt/issues" target="_blank" {
+                   "https://github.com/4cuck/teapawt/issues"
                }
            }
            p {

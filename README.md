@@ -1,8 +1,6 @@
 # teapawt
 
-A privacy-focused Twitter/X frontend written in Rust. This is a
-[teapot](https://github.com/amaanq/teapot) fork with its own identity —
-same engine, different name and logo.
+A privacy-focused Twitter/X frontend written in Rust.
 
 Public instance: [nitter.cf](https://nitter.cf) (also [xitter.cf](https://xitter.cf)).
 

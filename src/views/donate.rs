@@ -16,11 +16,11 @@ pub fn donate_drive_banner(raised_cents: i64, goal_cents: i64) -> Markup {
            }
            p {
                "If you are not satisfied with this site and do not want to donate because a feature is missing or it is too slow, "
-               a href="https://github.com/4cuck/teapot/issues" target="_blank" rel="noopener noreferrer" { "request it on GitHub" }
+               a href="https://github.com/4cuck/teapawt/issues" target="_blank" rel="noopener noreferrer" { "request it on GitHub" }
                ". I will add it as quickly as I can."
            }
            p {
-               "If we raise more than it costs to keep the site running, I will add posting, liking, and reposting on nitter.cf, so you can post what you want through our residential proxies, consequence free."
+               "If we raise more than it costs to keep the site running, I will add posting, liking, and reposting on nitter.cf, so you can post what you want through our residential proxies, consequence free. I will also add thousands of accounts so you can ban evade on X effortlessly through this site."
            }
        }
    }
@@ -76,11 +76,11 @@ pub fn render_donate_page(
                }
                p class="donate-note" {
                    "If you are not satisfied with this site and do not want to donate because a feature is missing or it is too slow, "
-                   a href="https://github.com/4cuck/teapot/issues" target="_blank" rel="noopener noreferrer" { "request it on GitHub" }
+                   a href="https://github.com/4cuck/teapawt/issues" target="_blank" rel="noopener noreferrer" { "request it on GitHub" }
                    ". I will add it as quickly as I can."
                }
                p class="donate-note" {
-                   "If we raise more than it costs to keep the site running, I will add posting, liking, and reposting on nitter.cf, so you can post what you want through our residential proxies, consequence free."
+                   "If we raise more than it costs to keep the site running, I will add posting, liking, and reposting on nitter.cf, so you can post what you want through our residential proxies, consequence free. I will also add thousands of accounts so you can ban evade on X effortlessly through this site."
                }
            } @else {
                p class="donate-status" { "Donations are not set up on this instance yet." }

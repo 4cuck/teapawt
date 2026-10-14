@@ -174,7 +174,7 @@ async fn about(State(state): State<AppState>, jar: CookieJar) -> impl IntoRespon
 
            p {
                "This site runs "
-               a href="https://github.com/4cuck/teapot" { "teapawt" }
+               a href="https://github.com/4cuck/teapawt" { "teapawt" }
                ", a privacy-focused Twitter/X frontend."
            }
 
