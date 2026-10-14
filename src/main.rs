@@ -200,7 +200,10 @@ async fn main() -> eyre::Result<()> {
                  media-src 'self' blob: https://*.twimg.com; \
                  font-src 'self'; \
                  connect-src 'self' https://*.twimg.com https://video.pscp.tv https://*.video.pscp.tv; \
-                 form-action 'self'; \
+                 manifest-src 'self'; \
+                 form-action 'self' https://nitter.cf https://www.nitter.cf https://xitter.cf https://www.xitter.cf \
+                 https://checkout.stripe.com https://nowpayments.io https://*.nowpayments.io \
+                 https://lzt.market https://*.lzt.market; \
                  base-uri 'self'; \
                  frame-ancestors 'none'"
             ),
