@@ -5,7 +5,7 @@ use std::{
 
 use super::*;
 
-use crate::error::Error;
+use crate::{error::Error, types::Translation};
 
 /// The status id Discord echoes back from the activity link. A `/photo/N`
 /// link prefixes N to the tweet id zero-padded to 19 digits, a length no real
@@ -87,6 +87,10 @@ pub struct ActivityPubNote {
    pub emojis: Vec<()>,
    pub card: Option<MastodonPreviewCard>,
    pub poll: Option<()>,
+   /// Plain translated text for clients that should show the translation
+   /// instead of the "Original text" block in `content`. Discord ignores it.
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub translation: Option<Translation>,
 }
 
 #[derive(Debug, Serialize)]
@@ -928,6 +932,7 @@ pub fn build_activity_pub_with_reply(
       emojis: vec![],
       card,
       poll: None,
+      translation: tweet.translation.clone().filter(|tl| !tl.text.trim().is_empty()),
    }
 }
 
