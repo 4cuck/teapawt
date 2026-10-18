@@ -39,9 +39,9 @@ const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Idle connections are kept this long. A session's connection to X is
 /// multiplexed HTTP/2 and pinged, so a dead one is noticed rather than hung on.
 const POOL_IDLE: Duration = Duration::from_secs(300);
-/// Idle connections kept per account. High enough that in-flight calls are not
-/// stuck sharing a handful of sockets.
-const POOL_PER_HOST: usize = 256;
+/// A few idle sockets per account. Hundreds of them, times every account on
+/// one exit, fills the proxy and every later call waits on headers.
+const POOL_PER_HOST: usize = 8;
 /// CDN media normally answers in tens of milliseconds. A pooled connection the
 /// path has already forgotten sits in TCP retransmits for several seconds and
 /// then delivers, which is the video that "loads" after a long pause. Give up
@@ -51,7 +51,7 @@ const MEDIA_HEADER_DEADLINE: Duration = Duration::from_secs(2);
 /// connection the proxy has already dropped sits until the gateway gives up
 /// (about five seconds) and then returns 503 "remote refused stream reset".
 /// Abandon headers by now and open another connection.
-const API_HEADER_DEADLINE: Duration = Duration::from_secs(1);
+const API_HEADER_DEADLINE: Duration = Duration::from_secs(3);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(45);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 /// After an HTML 429, skip the direct address this long and send every
