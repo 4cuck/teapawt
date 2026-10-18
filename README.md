@@ -93,7 +93,10 @@ second search does not pay a new SOCKS + TLS handshake.
 
 ### Rate limits and cache
 
-- `maxConcurrentReqs` is **per cookie session**, not global.
+- `maxConcurrentReqs` is **per cookie session**, not global. A busy public
+  instance should set it to `1000000`. At that size the cap never queues a
+  call, which matters once the instance is popular enough that every account
+  would otherwise sit at a small limit.
 - `clientBudget` caps how fast one visitor IP can spend uncached X calls.
   Cache hits, media, and static files are free. SearchTimeline costs 2 tokens.
 - First-page search is cached for 60 seconds, then served stale for 4 more
