@@ -49,6 +49,26 @@ fn gen_font_size_select(selected: &str) -> Markup {
    }
 }
 
+/// One-click choices. A radio, not a menu, so picking one does not take a second click.
+fn gen_choice(name: &str, label: &str, selected: &str, options: &[(&str, &str)]) -> Markup {
+   let selected_norm = selected.trim().to_ascii_lowercase();
+   html! {
+       div class="pref-choices" title=(name) {
+           span class="choice-label" { (label) }
+           div class="choice-row" {
+               @for &(value, display) in options {
+                   @let id = format!("pref-{name}-{value}");
+                   @let is_selected = value.eq_ignore_ascii_case(&selected_norm);
+                   label for=(id) {
+                       input id=(id) type="radio" name=(name) value=(value) checked[is_selected];
+                       (display)
+                   }
+               }
+           }
+       }
+   }
+}
+
 /// Render a select preference row with title tooltip.
 /// `options` is a list of `(value, display_label)` pairs.
 fn gen_select(name: &str, label: &str, selected: &str, options: &[(&str, &str)]) -> Markup {
@@ -151,6 +171,11 @@ pub fn render_preferences_form(
                            (gen_checkbox("hideBanner", "Hide profile banner", prefs.hide_banner))
                            (gen_checkbox("hidePins", "Hide pinned tweets", prefs.hide_pins))
                            (gen_checkbox("hideReplies", "Hide tweet replies", prefs.hide_replies))
+                           (gen_choice("replySort", "Default reply sort", &prefs.reply_sort, &[
+                              ("relevance", "Relevant"),
+                              ("recency", "Recent"),
+                              ("likes", "Likes"),
+                           ]))
                            (gen_checkbox("hideCommunityNotes", "Hide community notes", prefs.hide_community_notes))
                            (gen_checkbox("squareAvatars", "Square profile pictures", prefs.square_avatars))
                            (gen_checkbox("useTwemoji", "Use Twitter emoji (Twemoji)", prefs.use_twemoji))

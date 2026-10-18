@@ -35,6 +35,8 @@ pub struct Prefs {
    pub media_view: String,
    pub gallery_size: String,
    pub compact_gallery: bool,
+   /// `relevance`, `recency`, or `likes`.
+   pub reply_sort: String,
 }
 
 impl Prefs {
@@ -66,6 +68,7 @@ impl Prefs {
          media_view: "Timeline".to_owned(),
          gallery_size: "Medium".to_owned(),
          compact_gallery: false,
+         reply_sort: "relevance".to_owned(),
       }
    }
 
@@ -107,6 +110,36 @@ impl Prefs {
          media_view: str_pref("mediaView", defaults.media_view),
          gallery_size: str_pref("gallerySize", defaults.gallery_size),
          compact_gallery: bool_pref("compactGallery", defaults.compact_gallery),
+         reply_sort: str_pref("replySort", defaults.reply_sort),
+      }
+   }
+
+   /// The reply order for this page. An explicit `?sort=` wins; otherwise the
+   /// saved default is used. Unknown values stay on Relevant.
+   #[must_use]
+   pub fn resolved_reply_sort(&self, requested: Option<&str>) -> &'static str {
+      Self::normalize_reply_sort(requested)
+         .or_else(|| Self::normalize_reply_sort(Some(self.reply_sort.as_str())))
+         .unwrap_or("relevance")
+   }
+
+   pub(crate) fn normalize_reply_sort(value: Option<&str>) -> Option<&'static str> {
+      let raw = value.unwrap_or("").trim().to_ascii_lowercase();
+      match raw.as_str() {
+         "recency" | "recent" => Some("recency"),
+         "likes" | "liked" => Some("likes"),
+         "relevance" | "relevant" => Some("relevance"),
+         _ => None,
+      }
+   }
+
+   /// Twitter's `rankingMode` for a [`resolved_reply_sort`](Self::resolved_reply_sort) key.
+   #[must_use]
+   pub fn reply_ranking_mode(sort_key: &str) -> &'static str {
+      match sort_key {
+         "recency" => "Recency",
+         "likes" => "Likes",
+         _ => "Relevance",
       }
    }
 
@@ -164,6 +197,7 @@ impl Prefs {
       "mediaView",
       "gallerySize",
       "compactGallery",
+      "replySort",
       "hideFirefoxWarning",
    ];
 
@@ -193,5 +227,6 @@ impl Prefs {
       "mediaView",
       "gallerySize",
       "compactGallery",
+      "replySort",
    ];
 }

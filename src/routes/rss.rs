@@ -4,6 +4,7 @@ use axum::{
    response::Response,
    routing::get,
 };
+use axum_extra::extract::CookieJar;
 use serde::Deserialize;
 
 use super::helpers::{
@@ -13,7 +14,7 @@ use crate::{
    AppState,
    cache::{Hit, keys as cache_keys},
    error::{Error, Result},
-   types::{Profile, Query as SearchQuery, QueryKind, Tweet},
+   types::{Prefs, Profile, Query as SearchQuery, QueryKind, Tweet},
    views::rss as rss_view,
 };
 
@@ -47,6 +48,15 @@ fn cached_profile_page(state: &AppState, username: &str, cursor: Option<&str>) -
    }
 }
 
+/// A proxied feed must not be served from the direct-media cache, or the other way around.
+fn feed_key(key: String, proxy: bool) -> String {
+   if proxy {
+      format!("{key}:proxy")
+   } else {
+      key
+   }
+}
+
 /// Return a 404 error when RSS is disabled.
 fn check_rss_enabled(state: &AppState) -> Result<()> {
    if !state.config.config.enable_rss {
@@ -69,6 +79,7 @@ async fn user_rss_handler(
    username: &str,
    cursor: Option<&str>,
    kind: UserRssKind,
+   proxy: bool,
 ) -> Result<Response> {
    let (feed_kind, cache_key_fn): (&str, fn(&str) -> String) = match kind {
       UserRssKind::Tweets => ("tweets", cache_keys::rss_user),
@@ -79,7 +90,7 @@ async fn user_rss_handler(
 
    // Check RSS cache (first page only)
    let rss_cache_key = if cursor.is_none() {
-      let key = cache_key_fn(username);
+      let key = feed_key(cache_key_fn(username), proxy);
       if let Some(cached) = check_rss_cache(state, &key) {
          return Ok(cached);
       }
@@ -99,7 +110,7 @@ async fn user_rss_handler(
          .into_iter()
          .flatten()
          .collect::<Vec<_>>();
-      let rss = rss_view::render_user_rss(&profile.user, &tweets, &state.config, feed_kind);
+      let rss = rss_view::render_user_rss(&profile.user, &tweets, &state.config, feed_kind, proxy);
       if let Some(ref key) = rss_cache_key {
          cache_rss(state, key, &rss, tweets.iter().map(|tweet| tweet.id).min());
       }
@@ -120,7 +131,7 @@ async fn user_rss_handler(
       UserRssKind::Media => state.api.get_user_media(&user.id, cursor).await?,
    };
    let tweets = timeline.content.into_iter().flatten().collect::<Vec<_>>();
-   let rss = rss_view::render_user_rss(&user, &tweets, &state.config, feed_kind);
+   let rss = rss_view::render_user_rss(&user, &tweets, &state.config, feed_kind, proxy);
 
    if let Some(ref key) = rss_cache_key {
       cache_rss(state, key, &rss, tweets.iter().map(|tweet| tweet.id).min());
@@ -131,75 +142,89 @@ async fn user_rss_handler(
 
 async fn user_rss(
    State(state): State<AppState>,
+   jar: CookieJar,
    Path(username): Path<String>,
    Query(query): Query<RssQuery>,
 ) -> Result<Response> {
    check_rss_enabled(&state)?;
+   let proxy = Prefs::from_cookies(&jar, &state.config).proxy_media;
    user_rss_handler(
       &state,
       &username,
       query.cursor.as_deref(),
       UserRssKind::Tweets,
+      proxy,
    )
    .await
 }
 
 async fn user_replies_rss(
    State(state): State<AppState>,
+   jar: CookieJar,
    Path(username): Path<String>,
    Query(query): Query<RssQuery>,
 ) -> Result<Response> {
    check_rss_enabled(&state)?;
+   let proxy = Prefs::from_cookies(&jar, &state.config).proxy_media;
    user_rss_handler(
       &state,
       &username,
       query.cursor.as_deref(),
       UserRssKind::Replies,
+      proxy,
    )
    .await
 }
 
 async fn user_reposts_rss(
    State(state): State<AppState>,
+   jar: CookieJar,
    Path(username): Path<String>,
    Query(query): Query<RssQuery>,
 ) -> Result<Response> {
    check_rss_enabled(&state)?;
+   let proxy = Prefs::from_cookies(&jar, &state.config).proxy_media;
    user_rss_handler(
       &state,
       &username,
       query.cursor.as_deref(),
       UserRssKind::Reposts,
+      proxy,
    )
    .await
 }
 
 async fn user_media_rss(
    State(state): State<AppState>,
+   jar: CookieJar,
    Path(username): Path<String>,
    Query(query): Query<RssQuery>,
 ) -> Result<Response> {
    check_rss_enabled(&state)?;
+   let proxy = Prefs::from_cookies(&jar, &state.config).proxy_media;
    user_rss_handler(
       &state,
       &username,
       query.cursor.as_deref(),
       UserRssKind::Media,
+      proxy,
    )
    .await
 }
 
 async fn search_rss(
    State(state): State<AppState>,
+   jar: CookieJar,
    Query(query): Query<super::search::SearchQuery>,
 ) -> Result<Response> {
    check_rss_enabled(&state)?;
+   let proxy = Prefs::from_cookies(&jar, &state.config).proxy_media;
    let search_query = query.query.as_deref().unwrap_or_default();
    if search_query.is_empty() {
       return Err(Error::InvalidUrl("Search query is required".into()));
    }
 
-   let rss_cache_key = cache_keys::rss_search(search_query);
+   let rss_cache_key = feed_key(cache_keys::rss_search(search_query), proxy);
    if let Some(cached) = check_rss_cache(&state, &rss_cache_key) {
       return Ok(cached);
    }
@@ -213,7 +238,7 @@ async fn search_rss(
       )
       .await?;
    let tweets = timeline.content.into_iter().flatten().collect::<Vec<_>>();
-   let rss = rss_view::render_search_rss(search_query, &tweets, &state.config);
+   let rss = rss_view::render_search_rss(search_query, &tweets, &state.config, proxy);
 
    cache_rss(
       &state,
@@ -233,17 +258,19 @@ pub struct UserSearchRssQuery {
 
 async fn user_search_rss(
    State(state): State<AppState>,
+   jar: CookieJar,
    Path(username): Path<String>,
    Query(query): Query<UserSearchRssQuery>,
 ) -> Result<Response> {
    check_rss_enabled(&state)?;
+   let proxy = Prefs::from_cookies(&jar, &state.config).proxy_media;
    let search_query = query.query.as_deref().unwrap_or_default();
    if search_query.is_empty() {
       return Err(Error::InvalidUrl("Search query is required".into()));
    }
 
    let api_query = format!("from:{username} {search_query}");
-   let rss_cache_key = cache_keys::rss_user_search(&username, search_query);
+   let rss_cache_key = feed_key(cache_keys::rss_user_search(&username, search_query), proxy);
    if let Some(cached) = check_rss_cache(&state, &rss_cache_key) {
       return Ok(cached);
    }
@@ -254,6 +281,7 @@ async fn user_search_rss(
       &format!("from:{username} {search_query}"),
       &tweets,
       &state.config,
+      proxy,
    );
 
    cache_rss(
@@ -268,11 +296,13 @@ async fn user_search_rss(
 /// RSS feed for a conversation thread (main tweet + self-thread).
 async fn thread_rss(
    State(state): State<AppState>,
+   jar: CookieJar,
    Path((_username, id)): Path<(String, String)>,
 ) -> Result<Response> {
    check_rss_enabled(&state)?;
+   let proxy = Prefs::from_cookies(&jar, &state.config).proxy_media;
 
-   let rss_cache_key = cache_keys::rss_thread(&id);
+   let rss_cache_key = feed_key(cache_keys::rss_thread(&id), proxy);
    if let Some(cached) = check_rss_cache(&state, &rss_cache_key) {
       return Ok(cached);
    }
@@ -295,7 +325,7 @@ async fn thread_rss(
       }
    }
 
-   let rss = rss_view::render_thread_rss(&conversation.tweet, &tweets, &state.config);
+   let rss = rss_view::render_thread_rss(&conversation.tweet, &tweets, &state.config, proxy);
    let min_id = tweets.iter().map(|tweet| tweet.id).min();
    cache_rss(&state, &rss_cache_key, &rss, min_id);
    Ok(rss_response_with_min_id(rss, min_id))
@@ -303,12 +333,14 @@ async fn thread_rss(
 
 async fn list_rss(
    State(state): State<AppState>,
+   jar: CookieJar,
    Path(id): Path<String>,
    Query(query): Query<RssQuery>,
 ) -> Result<Response> {
    check_rss_enabled(&state)?;
+   let proxy = Prefs::from_cookies(&jar, &state.config).proxy_media;
    let rss_cache_key = if query.cursor.is_none() {
-      let key = cache_keys::rss_list(&id);
+      let key = feed_key(cache_keys::rss_list(&id), proxy);
       if let Some(cached) = check_rss_cache(&state, &key) {
          return Ok(cached);
       }
@@ -324,7 +356,7 @@ async fn list_rss(
    let list = list?;
    let timeline = timeline?;
    let tweets = timeline.content.into_iter().flatten().collect::<Vec<_>>();
-   let rss = rss_view::render_list_rss(&list, &tweets, &state.config);
+   let rss = rss_view::render_list_rss(&list, &tweets, &state.config, proxy);
 
    if let Some(ref key) = rss_cache_key {
       cache_rss(&state, key, &rss, tweets.iter().map(|tweet| tweet.id).min());
@@ -335,12 +367,14 @@ async fn list_rss(
 /// List RSS by owner username and slug.
 async fn list_by_slug_rss(
    State(state): State<AppState>,
+   jar: CookieJar,
    Path((username, slug)): Path<(String, String)>,
    Query(query): Query<RssQuery>,
 ) -> Result<Response> {
    check_rss_enabled(&state)?;
+   let proxy = Prefs::from_cookies(&jar, &state.config).proxy_media;
    let rss_cache_key = if query.cursor.is_none() {
-      let key = cache_keys::rss_list_slug(&username, &slug);
+      let key = feed_key(cache_keys::rss_list_slug(&username, &slug), proxy);
       if let Some(cached) = check_rss_cache(&state, &key) {
          return Ok(cached);
       }
@@ -355,7 +389,7 @@ async fn list_by_slug_rss(
       .get_list_tweets(&list.id, query.cursor.as_deref())
       .await?;
    let tweets = timeline.content.into_iter().flatten().collect::<Vec<_>>();
-   let rss = rss_view::render_list_rss(&list, &tweets, &state.config);
+   let rss = rss_view::render_list_rss(&list, &tweets, &state.config, proxy);
 
    if let Some(ref key) = rss_cache_key {
       cache_rss(&state, key, &rss, tweets.iter().map(|tweet| tweet.id).min());

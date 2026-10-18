@@ -1020,7 +1020,14 @@ pub fn render_reply_chains(
    id: &str,
    config: &Config,
    prefs: &Prefs,
+   sort_key: &str,
 ) -> Markup {
+   let default_sort = prefs.resolved_reply_sort(None);
+   let page = if sort_key == default_sort {
+      format!("/{username}/status/{id}")
+   } else {
+      format!("/{username}/status/{id}?sort={sort_key}")
+   };
    html! {
        @for chain in chains {
            @if !chain.content.is_empty() {
@@ -1050,7 +1057,7 @@ pub fn render_reply_chains(
        }
        @if !bottom_cursor.is_empty() {
            div class="show-more" {
-               a href=(format!("{}#r", formatters::cursor_url(&format!("/{username}/status/{id}"), bottom_cursor))) {
+               a href=(format!("{}#r", formatters::cursor_url(&page, bottom_cursor))) {
                    "Load more replies"
                }
            }

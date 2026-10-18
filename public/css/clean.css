@@ -1211,6 +1211,37 @@ input[type="text"], input[type="date"], input[type="number"], select {
   margin: 0;
   padding: 0 6px;
 }
+.pref-choices {
+  margin: 8px 0 12px;
+}
+.pref-choices .choice-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text);
+}
+.pref-choices .choice-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pref-choices label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.pref-choices input {
+  margin: 0;
+}
+.pref-choices label:has(input:checked) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 .preferences-actions { padding: 8px 0; background: transparent; }
 .preferences-actions button { padding: 3px 8px; }
 

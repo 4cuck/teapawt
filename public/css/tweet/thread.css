@@ -148,17 +148,14 @@
 
 .reply-sort {
   margin-left: auto;
-  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
   pointer-events: all;
-
-  &:focus-within .reply-sort-menu {
-    display: flex;
-    flex-direction: column;
-  }
 }
 
-.reply-sort-btn {
-  cursor: pointer;
+.reply-sort-option {
   padding: 2px 10px;
   font-size: 13px;
   font-weight: 600;
@@ -166,51 +163,18 @@
   background-color: var(--bg_elements);
   border: 1px solid var(--dark_grey);
   border-radius: 4px;
-  user-select: none;
-  display: inline-block;
+  text-decoration: none;
+  line-height: 20px;
 
   &:hover {
     border-color: var(--accent);
-  }
-}
-
-.reply-sort-menu {
-  display: none;
-  position: absolute;
-  z-index: 10;
-  top: 100%;
-  right: 0;
-  margin-top: 4px;
-  background-color: var(--bg_elements);
-  border: 1px solid var(--dark_grey);
-  border-radius: 4px;
-  overflow: hidden;
-  min-width: 100px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-
-  & a,
-  & span {
-    display: block;
-    padding: 6px 12px;
-    font-size: 13px;
-    font-weight: 600;
     text-decoration: none;
-    white-space: nowrap;
   }
 
-  & a {
-    color: var(--fg_color);
-
-    &:hover {
-      background-color: var(--bg_hover);
-      text-decoration: none;
-    }
+  &.active {
+    color: var(--accent);
+    border-color: var(--accent);
   }
-}
-
-.reply-sort-active {
-  color: var(--accent);
-  background-color: var(--bg_hover);
 }
 
 .timeline-item.thread.more-replies-thread {

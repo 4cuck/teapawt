@@ -56,12 +56,13 @@ pub struct StatusQuery {
    pub sort: Option<String>,
 }
 
-/// Map the `?sort=` query parameter to a Twitter API `rankingMode` value.
-fn ranking_mode(sort: Option<&str>) -> &str {
-   match sort {
-      Some("recency") => "Recency",
-      Some("likes") => "Likes",
-      _ => "Relevance",
+/// Path for this post, keeping a non-default reply order in the query.
+fn status_path(username: &str, id: &str, sort_key: &str, default_key: &str) -> String {
+   let base = format!("/{username}/status/{id}");
+   if sort_key == default_key {
+      base
+   } else {
+      format!("{base}?sort={sort_key}")
    }
 }
 
@@ -184,7 +185,8 @@ async fn render_status(
       .and_then(|value| value.to_str().ok())
       .is_some_and(|user_agent| user_agent.contains("Discordbot"));
 
-   let sort = ranking_mode(query.sort.as_deref());
+   let sort_key = prefs.resolved_reply_sort(query.sort.as_deref());
+   let sort = Prefs::reply_ranking_mode(sort_key);
    let is_sorted = sort != "Relevance";
 
    // Fetch conversation (with cache for first page, default sort only)
@@ -256,6 +258,7 @@ async fn render_status(
                         &id,
                         &state.config,
                         &prefs,
+                        sort_key,
                     ))
                 }
             };
@@ -289,7 +292,7 @@ async fn render_status(
                &id,
                &prefs,
                &state.config,
-               query.sort.as_deref(),
+               sort_key,
                activity,
             ));
          }
@@ -324,7 +327,7 @@ async fn render_status(
             &id,
             &prefs,
             &state.config,
-            query.sort.as_deref(),
+            sort_key,
             activity,
          ))
       },
@@ -348,7 +351,7 @@ fn render_conversation(
    id: &str,
    prefs: &Prefs,
    config: &Config,
-   sort: Option<&str>,
+   sort_key: &str,
    activity: Option<embed::ActivityId>,
 ) -> Response {
    let tweet = &conversation.tweet;
@@ -364,30 +367,19 @@ fn render_conversation(
       return (StatusCode::NOT_FOUND, Html(markup.into_string())).into_response();
    }
 
-   // Build sort toggle markup (rendered inside the main tweet's stats row)
+   // The three orders sit in the stats row. The saved default is the link
+   // without `?sort=`, so changing order is one click and a post opens on it.
    let has_replies = !prefs.hide_replies && !conversation.replies.content.is_empty();
+   let default_sort = prefs.resolved_reply_sort(None);
    let sort_toggle = (has_replies && !has_cursor).then(|| {
-      let base = format!("/{username}/status/{id}");
-      let sort_label = match sort {
-         Some("recency") => "Recent",
-         Some("likes") => "Likes",
-         _ => "Relevant",
-      };
       html! {
           div class="reply-sort" {
-              button class="reply-sort-btn" type="button" {
-                  (sort_label) " \u{25BE}"
-              }
-              div class="reply-sort-menu" {
-                  @for (label, value) in [("Relevant", None), ("Recent", Some("recency")), ("Likes", Some("likes"))] {
-                      @let active = sort == value;
-                      @if active {
-                          span class="reply-sort-active" { (label) }
-                      } @else if let Some(val) = value {
-                          a href=(format!("{base}?sort={val}")) { (label) }
-                      } @else {
-                          a href=(base) { (label) }
-                      }
+              @for (label, value) in [("Relevant", "relevance"), ("Recent", "recency"), ("Likes", "likes")] {
+                  @let href = format!("{}#r", status_path(username, id, value, default_sort));
+                  @if value == sort_key {
+                      strong class="reply-sort-option active" { (label) }
+                  } @else {
+                      a class="reply-sort-option" href=(href) { (label) }
                   }
               }
           }
@@ -404,7 +396,7 @@ fn render_conversation(
                    }
                }
                div class="timeline-item show-more" {
-                   a href=(format!("/{username}/status/{id}#r")) { "Back to tweet" }
+                   a href=(format!("{}#r", status_path(username, id, sort_key, default_sort))) { "Back to tweet" }
                }
                (tweet_view::render_thread_context(tweet, config, prefs))
                div class="replies" id="r" {
@@ -415,6 +407,7 @@ fn render_conversation(
                        id,
                        config,
                        prefs,
+                       sort_key,
                    ))
                }
            } @else {
@@ -488,6 +481,7 @@ fn render_conversation(
                            id,
                            config,
                            prefs,
+                           sort_key,
                        ))
                    }
                }
@@ -524,7 +518,8 @@ async fn status_by_id(
       .get(header::USER_AGENT)
       .and_then(|value| value.to_str().ok())
       .is_some_and(|user_agent| user_agent.contains("Discordbot"));
-   let sort = ranking_mode(query.sort.as_deref());
+   let sort_key = prefs.resolved_reply_sort(query.sort.as_deref());
+   let sort = Prefs::reply_ranking_mode(sort_key);
 
    // Fetch the conversation directly and render the tweet page inline instead of
    // redirecting, matching X.com behaviour.
@@ -578,7 +573,7 @@ async fn status_by_id(
             &id,
             &prefs,
             &state.config,
-            query.sort.as_deref(),
+            sort_key,
             activity,
          ))
       },

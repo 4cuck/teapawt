@@ -59,6 +59,13 @@ pub async fn prefs_middleware(mut request: Request, next: Next) -> Response {
       .map(|(_, val)| val.to_string());
 
    if let Some(prefs_value) = prefs_param {
+      // A feed reader keeps the URL and often drops Set-Cookie, so `?prefs=`
+      // on an RSS path has to change this response instead of redirecting.
+      if uri.path().ends_with("/rss") {
+         inject_cookie_overrides(&mut request, pref_pairs(&prefs_value));
+         return next.run(request).await;
+      }
+
       // Parse prefs in "key=val,key2=val2" form
       let mut jar = CookieJar::new();
       let pref_names = Prefs::URL_PREF_NAMES;
@@ -111,33 +118,53 @@ pub async fn prefs_middleware(mut request: Request, next: Next) -> Response {
       })
       .map(|(key, value)| (key.into_owned(), value.into_owned()))
       .collect::<Vec<_>>();
-   if !overrides.is_empty() {
-      let mut cookies = request
-         .headers()
-         .get(header::COOKIE)
-         .and_then(|value| value.to_str().ok())
-         .unwrap_or_default()
-         .split(';')
-         .map(str::trim)
-         .filter(|cookie| {
-            cookie
-               .split_once('=')
-               .is_none_or(|(name, _)| !overrides.iter().any(|&(ref key, _)| key == name))
-         })
-         .filter(|cookie| !cookie.is_empty())
-         .map(str::to_owned)
-         .collect::<Vec<_>>();
-      cookies.extend(
-         overrides
-            .into_iter()
-            .map(|(key, value)| format!("{key}={value}")),
-      );
-      if let Ok(value) = HeaderValue::from_str(&cookies.join("; ")) {
-         request.headers_mut().insert(header::COOKIE, value);
-      }
-   }
+   inject_cookie_overrides(&mut request, overrides);
 
    next.run(request).await
+}
+
+fn pref_pairs(prefs_value: &str) -> Vec<(String, String)> {
+   let mut pairs = Vec::new();
+   for pair in prefs_value.split(',') {
+      let (key, value) = match pair.split_once('=') {
+         Some((pkey, pval)) => (pkey, pval),
+         None if !pair.is_empty() => (pair, ""),
+         _ => continue,
+      };
+      if Prefs::URL_PREF_NAMES.contains(&key) && valid_cookie_value(value) {
+         pairs.push((key.to_owned(), value.to_owned()));
+      }
+   }
+   pairs
+}
+
+fn inject_cookie_overrides(request: &mut Request, overrides: Vec<(String, String)>) {
+   if overrides.is_empty() {
+      return;
+   }
+   let mut cookies = request
+      .headers()
+      .get(header::COOKIE)
+      .and_then(|value| value.to_str().ok())
+      .unwrap_or_default()
+      .split(';')
+      .map(str::trim)
+      .filter(|cookie| {
+         cookie
+            .split_once('=')
+            .is_none_or(|(name, _)| !overrides.iter().any(|&(ref key, _)| key == name))
+      })
+      .filter(|cookie| !cookie.is_empty())
+      .map(str::to_owned)
+      .collect::<Vec<_>>();
+   cookies.extend(
+      overrides
+         .into_iter()
+         .map(|(key, value)| format!("{key}={value}")),
+   );
+   if let Ok(value) = HeaderValue::from_str(&cookies.join("; ")) {
+      request.headers_mut().insert(header::COOKIE, value);
+   }
 }
 
 fn valid_cookie_value(value: &str) -> bool {

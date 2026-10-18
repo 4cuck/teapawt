@@ -54,6 +54,7 @@ fn prefs_to_cookies(prefs: &Prefs, config: &Config) -> Vec<Cookie<'static>> {
       str_cookie("mediaView", &prefs.media_view),
       str_cookie("gallerySize", &prefs.gallery_size),
       bool_cookie("compactGallery", prefs.compact_gallery),
+      str_cookie("replySort", &prefs.reply_sort),
    ]
 }
 
@@ -109,6 +110,7 @@ fn encode_prefs(prefs: &Prefs, config: &Config) -> String {
    enc_string!("mediaView", media_view);
    enc_string!("gallerySize", gallery_size);
    enc_checkbox!("compactGallery", compact_gallery);
+   enc_string!("replySort", reply_sort);
    pairs.join(",")
 }
 
@@ -192,6 +194,8 @@ pub struct PrefsForm {
    pub gallery_size: Option<String>,
    #[serde(rename = "compactGallery")]
    pub compact_gallery: Option<String>,
+   #[serde(rename = "replySort")]
+   pub reply_sort: Option<String>,
 }
 
 impl PrefsForm {
@@ -227,6 +231,9 @@ impl PrefsForm {
          media_view: parse_str(&self.media_view, defaults.media_view),
          gallery_size: parse_str(&self.gallery_size, defaults.gallery_size),
          compact_gallery: parse_bool(&self.compact_gallery),
+         reply_sort: Prefs::normalize_reply_sort(self.reply_sort.as_deref())
+            .unwrap_or("relevance")
+            .to_owned(),
       }
    }
 }
