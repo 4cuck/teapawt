@@ -39,12 +39,19 @@ const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Idle connections are kept this long. A session's connection to X is
 /// multiplexed HTTP/2 and pinged, so a dead one is noticed rather than hung on.
 const POOL_IDLE: Duration = Duration::from_secs(300);
-const POOL_PER_HOST: usize = 4;
+/// Idle connections kept per account. High enough that in-flight calls are not
+/// stuck sharing a handful of sockets.
+const POOL_PER_HOST: usize = 256;
 /// CDN media normally answers in tens of milliseconds. A pooled connection the
 /// path has already forgotten sits in TCP retransmits for several seconds and
 /// then delivers, which is the video that "loads" after a long pause. Give up
 /// on headers by then and open another connection.
 const MEDIA_HEADER_DEADLINE: Duration = Duration::from_secs(2);
+/// X answers a healthy GraphQL call in well under a second. A pooled HTTP/2
+/// connection the proxy has already dropped sits until the gateway gives up
+/// (about five seconds) and then returns 503 "remote refused stream reset".
+/// Abandon headers by now and open another connection.
+const API_HEADER_DEADLINE: Duration = Duration::from_secs(1);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(45);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 /// After an HTML 429, skip the direct address this long and send every
@@ -286,10 +293,7 @@ impl HttpClient {
    /// time, so those clients belong to the browser rather than the account:
    /// every account presenting that browser shares them. Kept per account,
    /// each one would gather a client per exit and reuse almost none.
-   fn client_for(&self, via: Option<&Egress>) -> Result<primp::Client> {
-      let Some(egress) = via else {
-         return Ok(self.default.clone());
-      };
+   fn client_key(&self, egress: &Egress) -> (i64, u64) {
       let identity = browser::identity_for(egress.session);
       let tag = proxy_tag(egress.proxy.as_ref());
       let pooled = self
@@ -301,7 +305,27 @@ impl HttpClient {
       } else {
          egress.session
       };
-      let key = (owner, tag);
+      (owner, tag)
+   }
+
+   /// Drop the pooled connection for this account so the next call dials a
+   /// new one. A wedged HTTP/2 session otherwise accepts the next stream and
+   /// stalls it until the proxy resets it.
+   pub(crate) fn retire(&self, via: Option<&Egress>) {
+      let Some(egress) = via else {
+         return;
+      };
+      let key = self.client_key(egress);
+      if let Ok(mut clients) = self.sessions.lock() {
+         clients.remove(&key);
+      }
+   }
+
+   fn client_for(&self, via: Option<&Egress>) -> Result<primp::Client> {
+      let Some(egress) = via else {
+         return Ok(self.default.clone());
+      };
+      let key = self.client_key(egress);
       if let Some(client) = self
          .sessions
          .lock()
@@ -316,6 +340,7 @@ impl HttpClient {
       } else {
          POOL_PER_HOST
       };
+      let identity = browser::identity_for(egress.session);
       let client = build_client(
          identity,
          egress.proxy.as_ref(),
@@ -495,6 +520,35 @@ impl HttpClient {
          return Ok(Response { inner });
       }
 
+      if self.purpose == Purpose::Api && is_idempotent(method) {
+         let inner = match tokio::time::timeout(API_HEADER_DEADLINE, send()).await {
+            Ok(Ok(inner)) => inner,
+            Ok(Err(err)) if is_transport_blip(&err) || err.is_connect() => {
+               tracing::warn!(uri, error = %err, "API connection failed, opening another");
+               self.fresh_headers(method, uri, extra_headers, body, via).await?
+            },
+            Err(_elapsed) => {
+               tracing::warn!(uri, "API headers stalled, opening another connection");
+               match tokio::time::timeout(
+                  API_HEADER_DEADLINE,
+                  self.fresh_headers(method, uri, extra_headers, body, via),
+               )
+               .await
+               {
+                  Ok(Ok(inner)) => inner,
+                  Ok(Err(err)) => return Err(err),
+                  Err(_elapsed) => {
+                     self.retire(via);
+                     tracing::warn!(uri, "API headers stalled again");
+                     return Err(Error::Internal("API headers stalled".into()));
+                  },
+               }
+            },
+            Ok(Err(err)) => return Err(describe(err)),
+         };
+         return Ok(Response { inner });
+      }
+
       let inner = match send().await {
          Ok(inner) => inner,
          // A pooled connection the far end closed a moment ago fails on the
@@ -508,6 +562,26 @@ impl HttpClient {
          Err(err) => return Err(describe(err)),
       };
       Ok(Response { inner })
+   }
+
+   /// One more attempt on a connection that is not the one that just failed.
+   async fn fresh_headers(
+      &self,
+      method: &Method,
+      uri: &str,
+      extra_headers: &HeaderMap,
+      body: &Bytes,
+      via: Option<&Egress>,
+   ) -> Result<primp::Response> {
+      self.retire(via);
+      let client = self.client_for(via)?;
+      let mut request = client
+         .request(method.clone(), uri)
+         .headers(extra_headers.clone());
+      if !body.is_empty() {
+         request = request.body(body.clone());
+      }
+      request.send().await.map_err(describe)
    }
 }
 

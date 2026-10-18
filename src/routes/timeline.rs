@@ -74,16 +74,14 @@ async fn refresh_profile(state: &AppState, username: &str) {
 async fn fetch_profile(state: &AppState, username: &str) -> Result<Profile> {
    let hint = helpers::user_hint(state, username);
    let rail = helpers::cached_photo_rail(state, username);
-   let (profile_res, about) = tokio::join!(
-      state
-         .api
-         .get_profile_hinted(username, None, hint.as_ref(), rail),
-      helpers::load_account_context(state, username),
-   );
-   let mut profile = profile_res?;
-   if let Some(context) = about {
-      helpers::apply_context_to_user(&mut profile.user, &context);
-   }
+   let mut profile = state
+      .api
+      .get_profile_hinted(username, None, hint.as_ref(), rail)
+      .await?;
+   // About Account is a separate X call and is the one that sits on a dead
+   // connection. The timeline does not need it; a cached copy is applied and
+   // a miss is filled in the background.
+   helpers::apply_cached_account_context(state, &mut profile.user);
    helpers::store_profile(state, &profile);
    Ok(profile)
 }

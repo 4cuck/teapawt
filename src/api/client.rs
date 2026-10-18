@@ -38,6 +38,13 @@ const GRAPHQL_REPLACEMENTS: usize = 2;
 /// not walk the pool — that used to zero every cookie for 15 minutes.
 const RATE_LIMIT_REPLACEMENTS: usize = 5;
 
+/// Edge 502/503/504, including an empty body and a stream the proxy reset.
+fn is_gateway_blip(message: &str) -> bool {
+   message.starts_with("Status 502")
+      || message.starts_with("Status 503")
+      || message.starts_with("Status 504")
+}
+
 fn is_denylisted(message: &str) -> bool {
    message.contains("QueryDenylistedFailure") || message.contains("Query is denylisted")
 }
@@ -462,6 +469,19 @@ impl ApiClient {
             Err(Error::TransientUpstream) => {
                replacement == 0 && session.kind == SessionKind::Cookie
             },
+            // A 502/503/504 is the edge dropping the stream, not this account's
+            // quota. Try one other session. Do not mark the first as refused:
+            // that path is for an account X answers with an empty 404.
+            Err(Error::TwitterApi(message)) if is_gateway_blip(message) && replacement == 0 => {
+               true
+            },
+            // Headers never arrived, so the pooled connection is the thing
+            // that stalled. Another account is pinned to another exit.
+            Err(Error::Internal(message))
+               if message == "API headers stalled" && replacement == 0 =>
+            {
+               true
+            },
             Err(Error::RateLimited) if replacement < RATE_LIMIT_REPLACEMENTS => {
                self
                   .sessions
@@ -878,7 +898,16 @@ impl ApiClient {
             return Err(Error::NotFound("Not found".into()));
          }
 
-         if status.is_server_error() {
+         if matches!(status.as_u16(), 502 | 503 | 504) {
+            tracing::warn!(
+               session_id = session.id,
+               session_user = %session.username,
+               "API request failed: {status} - {body}"
+            );
+            // The gateway reset this stream. Drop the HTTP/2 session so the
+            // next call from this account does not wait on it again.
+            self.client.retire(Some(&self.egress_for(session)));
+         } else if status.is_server_error() {
             tracing::error!(
                session_id = session.id,
                session_user = %session.username,

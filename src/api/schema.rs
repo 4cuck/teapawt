@@ -88,7 +88,9 @@ pub struct BirdwatchSubtitle {
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BirdwatchEntity {
+   #[serde(default, deserialize_with = "deser_opt_index")]
    pub from_index: Option<u64>,
+   #[serde(default, deserialize_with = "deser_opt_index")]
    pub to_index: Option<u64>,
    #[serde(rename = "ref")]
    pub ref_data: Option<BirdwatchRef>,
@@ -299,7 +301,7 @@ pub struct Entities {
 
 #[derive(Deserialize, Default)]
 pub struct UrlEntity {
-   #[serde(default)]
+   #[serde(default, deserialize_with = "deser_index_list")]
    pub indices: Vec<u64>,
    pub url: Option<String>,
    pub expanded_url: Option<String>,
@@ -307,14 +309,14 @@ pub struct UrlEntity {
 
 #[derive(Deserialize, Default)]
 pub struct HashtagEntity {
-   #[serde(default)]
+   #[serde(default, deserialize_with = "deser_index_list")]
    pub indices: Vec<u64>,
    pub text: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 pub struct MentionEntity {
-   #[serde(default)]
+   #[serde(default, deserialize_with = "deser_index_list")]
    pub indices: Vec<u64>,
    pub screen_name: Option<String>,
    pub name: Option<String>,
@@ -322,7 +324,7 @@ pub struct MentionEntity {
 
 #[derive(Deserialize, Default)]
 pub struct SymbolEntity {
-   #[serde(default)]
+   #[serde(default, deserialize_with = "deser_index_list")]
    pub indices: Vec<u64>,
    pub text: Option<String>,
 }
@@ -534,6 +536,7 @@ pub struct TweetLegacy {
    pub conversation_id_str: Option<String>,
    pub self_thread: Option<SelfThread>,
    pub retweeted_status_result: Option<NestedResult<TweetData>>,
+   #[serde(default, deserialize_with = "deser_opt_index_list")]
    pub display_text_range: Option<Vec<u64>>,
    pub place: Option<Place>,
    pub withheld_in_countries: Option<Vec<String>>,
@@ -939,6 +942,37 @@ where
       .unwrap_or_default())
 }
 
+/// X sometimes sends `-1` for an unknown span. That is not a position.
+fn index_floor(value: i64) -> u64 {
+   u64::try_from(value).unwrap_or(0)
+}
+
+fn deser_index_list<'de, D>(deserializer: D) -> Result<Vec<u64>, D::Error>
+where
+   D: Deserializer<'de>,
+{
+   Ok(Vec::<i64>::deserialize(deserializer)?
+      .into_iter()
+      .map(index_floor)
+      .collect())
+}
+
+fn deser_opt_index_list<'de, D>(deserializer: D) -> Result<Option<Vec<u64>>, D::Error>
+where
+   D: Deserializer<'de>,
+{
+   Ok(Option::<Vec<i64>>::deserialize(deserializer)?.map(|values| {
+      values.into_iter().map(index_floor).collect()
+   }))
+}
+
+fn deser_opt_index<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+   D: Deserializer<'de>,
+{
+   Ok(Option::<i64>::deserialize(deserializer)?.map(index_floor))
+}
+
 /// Extract (start, end) from a raw indices array.
 #[expect(
    clippy::cast_possible_truncation,
@@ -949,6 +983,21 @@ pub fn indices(raw: &[u64]) -> (usize, usize) {
       raw.first().copied().unwrap_or(0) as usize,
       raw.get(1).copied().unwrap_or(0) as usize,
    )
+}
+
+#[cfg(test)]
+mod index_tests {
+   use super::*;
+
+   #[test]
+   fn negative_spans_do_not_reject_the_tweet() {
+      let legacy: TweetLegacy = serde_json::from_str(
+         r#"{"display_text_range":[-1,12],"entities":{"urls":[{"indices":[-5,4],"url":"https://t.co/abc"}]}}"#,
+      )
+      .unwrap();
+      assert_eq!(legacy.display_text_range, Some(vec![0, 12]));
+      assert_eq!(legacy.entities.unwrap().urls[0].indices, vec![0, 4]);
+   }
 }
 
 #[path = "schema_endpoints.rs"]

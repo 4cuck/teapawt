@@ -41,7 +41,7 @@ impl GifTranscoder {
          cache,
          http_client,
          cache_dir: PathBuf::from(config.cache_dir),
-         semaphore: Semaphore::new(3),
+         semaphore: Semaphore::new(64),
          inflight: Mutex::new(HashMap::new()),
       })
    }

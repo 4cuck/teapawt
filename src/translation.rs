@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 
 const MAX_TRANSLATIONS_PER_WINDOW: usize = 60;
 const WINDOW: Duration = Duration::from_secs(60);
-const MAX_CONCURRENT_TRANSLATIONS: usize = 2;
+const MAX_CONCURRENT_TRANSLATIONS: usize = 1024;
 
 /// Global guard for translation backends.
 pub struct TranslationLimiter {
