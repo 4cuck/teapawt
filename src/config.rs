@@ -166,7 +166,8 @@ pub struct AppConfig {
 pub struct DonationsConfig {
    #[serde(default = "default_goal_cents", rename = "goalCents")]
    pub goal_cents: i64,
-   /// Inclusive calendar day, `YYYY-MM-DD`, after which the homepage ask is hidden.
+   /// Kept so older config files still load. The public counter is monthly and
+   /// ignores this date.
    #[serde(default = "default_goal_deadline", rename = "goalDeadline")]
    pub goal_deadline: String,
    #[serde(default = "default_ledger_file", rename = "ledgerFile")]

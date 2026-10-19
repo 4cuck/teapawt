@@ -63,11 +63,10 @@ async fn donate_page(
 
 async fn page(state: &AppState, jar: &CookieJar, message: Option<&str>, canceled: bool) -> Response {
    let prefs = Prefs::from_cookies(jar, &state.config);
-   let raised = state.donations.raised_cents().await;
+   let progress = donations::month_progress(&state.donations, state.config.donations.goal_cents).await;
    let donations = &state.config.donations;
    let content = donate_view::render_donate_page(
-      raised,
-      donations.goal_cents,
+      &progress,
       donations.stripe.configured(),
       donations.nowpayments.configured(),
       donations.lzt.configured(),

@@ -46,6 +46,11 @@ struct Entry {
    provider_ref: String,
    cents: i64,
    status: String,
+   /// Unix time the payment was confirmed. Older ledger rows have no date;
+   /// the first time the monthly counter sees them, it stamps "now" so they
+   /// belong to the open period and then age out on the 23rd.
+   #[serde(default)]
+   paid_at: i64,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -85,6 +90,29 @@ impl DonationLedger {
          .sum()
    }
 
+   /// Paid total for the open month, which runs from the 23rd through the day
+   /// before the next 23rd (UTC). Undated paid rows are stamped once.
+   pub async fn raised_this_period(&self) -> (i64, time::OffsetDateTime) {
+      let now = time::OffsetDateTime::now_utc();
+      let period = donation_period(now);
+      let start = period.start.unix_timestamp();
+      let end = period.end.unix_timestamp();
+      let _guard = self.lock.lock().await;
+      let mut file = self.read().await.unwrap_or_default();
+      let mut dirty = false;
+      for entry in &mut file.entries {
+         if entry.status == "paid" && entry.cents > 0 && entry.paid_at <= 0 {
+            entry.paid_at = now.unix_timestamp();
+            dirty = true;
+         }
+      }
+      if dirty {
+         self.write(&file).await;
+      }
+      let raised = sum_paid_in_window(&file.entries, start, end);
+      (raised, period.end)
+   }
+
    pub async fn remember_pending(&self, id: &str, provider: &str, cents: i64) {
       let _guard = self.lock.lock().await;
       let mut file = self.read().await.unwrap_or_default();
@@ -97,6 +125,7 @@ impl DonationLedger {
          provider_ref: String::new(),
          cents,
          status: "pending".to_owned(),
+         paid_at: 0,
       });
       self.write(&file).await;
    }
@@ -110,10 +139,15 @@ impl DonationLedger {
       }
       let _guard = self.lock.lock().await;
       let mut file = self.read().await.unwrap_or_default();
+      let now = time::OffsetDateTime::now_utc().unix_timestamp();
       if let Some(entry) = file.entries.iter_mut().find(|entry| {
          entry.status == "paid" && entry.provider == provider && entry.provider_ref == provider_ref
       }) {
+         let stamped = entry.stamp_paid(now);
          if entry.cents == cents {
+            if stamped {
+               self.write(&file).await;
+            }
             return;
          }
          entry.cents = cents;
@@ -128,6 +162,7 @@ impl DonationLedger {
          entry.provider = provider.to_owned();
          entry.provider_ref = provider_ref.to_owned();
          entry.cents = cents;
+         entry.stamp_paid(now);
       } else {
          file.entries.push(Entry {
             id: id.to_owned(),
@@ -135,6 +170,7 @@ impl DonationLedger {
             provider_ref: provider_ref.to_owned(),
             cents,
             status: "paid".to_owned(),
+            paid_at: now,
          });
       }
       self.write(&file).await;
@@ -214,6 +250,108 @@ pub fn parse_amount_cents(raw: &str) -> Result<i64, &'static str> {
    Ok(cents)
 }
 
+impl Entry {
+   /// Keep the original confirmation time. Returns whether a missing date was filled in.
+   fn stamp_paid(&mut self, now: i64) -> bool {
+      if self.paid_at > 0 {
+         return false;
+      }
+      self.paid_at = now;
+      true
+   }
+}
+
+fn sum_paid_in_window(entries: &[Entry], start: i64, end: i64) -> i64 {
+   entries
+      .iter()
+      .filter(|entry| entry.status == "paid" && entry.paid_at >= start && entry.paid_at < end)
+      .map(|entry| entry.cents.max(0))
+      .sum()
+}
+
+/// Day of the month the public counter goes back to zero, at 00:00 UTC.
+pub const PERIOD_RESET_DAY: u8 = 23;
+
+pub struct DonationPeriod {
+   pub start: time::OffsetDateTime,
+   pub end: time::OffsetDateTime,
+}
+
+/// The open month. On the 23rd a new period starts; before that, the period
+/// that began on the previous 23rd is still open.
+pub fn donation_period(now: time::OffsetDateTime) -> DonationPeriod {
+   let today = now.date();
+   let end = if today.day() >= PERIOD_RESET_DAY {
+      let (year, month) = shift_month(today.year(), today.month(), 1);
+      reset_instant(year, month)
+   } else {
+      reset_instant(today.year(), today.month())
+   };
+   let (year, month) = shift_month(end.year(), end.month(), -1);
+   DonationPeriod {
+      start: reset_instant(year, month),
+      end,
+   }
+}
+
+fn reset_instant(year: i32, month: time::Month) -> time::OffsetDateTime {
+   time::Date::from_calendar_date(year, month, PERIOD_RESET_DAY)
+      .expect("the 23rd exists in every month")
+      .midnight()
+      .assume_utc()
+}
+
+fn shift_month(year: i32, month: time::Month, delta: i32) -> (i32, time::Month) {
+   let mut index = month as i32 - 1 + delta;
+   let mut year = year;
+   while index < 0 {
+      index += 12;
+      year -= 1;
+   }
+   while index >= 12 {
+      index -= 12;
+      year += 1;
+   }
+   (year, time::Month::try_from(index as u8 + 1).expect("month 1-12"))
+}
+
+/// What the homepage and donate page show for the open month.
+pub struct MonthProgress {
+   pub raised_cents: i64,
+   pub goal_cents: i64,
+   /// `YYYY-MM-DD` of the next reset, UTC.
+   pub reset_on: String,
+   pub reset_label: String,
+}
+
+impl MonthProgress {
+   pub fn percent(&self) -> i64 {
+      if self.goal_cents <= 0 {
+         return 0;
+      }
+      self.raised_cents.saturating_mul(100) / self.goal_cents
+   }
+
+   pub fn bar_percent(&self) -> i64 {
+      self.percent().clamp(0, 100)
+   }
+
+   pub fn met(&self) -> bool {
+      self.goal_cents > 0 && self.raised_cents >= self.goal_cents
+   }
+}
+
+pub async fn month_progress(ledger: &DonationLedger, goal_cents: i64) -> MonthProgress {
+   let (raised_cents, reset_at) = ledger.raised_this_period().await;
+   let format = time::macros::format_description!("[month repr:long] [day padding:none]");
+   MonthProgress {
+      raised_cents,
+      goal_cents,
+      reset_on: reset_at.date().to_string(),
+      reset_label: reset_at.format(format).unwrap_or_else(|_| reset_at.date().to_string()),
+   }
+}
+
 pub fn format_usd(cents: i64) -> String {
    let cents = cents.max(0);
    if cents % 100 == 0 {
@@ -225,32 +363,6 @@ pub fn format_usd(cents: i64) -> String {
 
 pub fn dollars_string(cents: i64) -> String {
    format!("{:.2}", cents as f64 / 100.0)
-}
-
-/// The homepage ask runs through the end of `deadline` (`YYYY-MM-DD`, UTC).
-pub fn campaign_open(deadline: &str) -> bool {
-   let Some((year, rest)) = deadline.split_once('-') else {
-      return false;
-   };
-   let Some((month, day)) = rest.split_once('-') else {
-      return false;
-   };
-   let Ok(year) = year.parse::<i32>() else {
-      return false;
-   };
-   let Ok(month) = month.parse::<u8>() else {
-      return false;
-   };
-   let Ok(day) = day.parse::<u8>() else {
-      return false;
-   };
-   let Ok(month) = time::Month::try_from(month) else {
-      return false;
-   };
-   let Ok(date) = time::Date::from_calendar_date(year, month, day) else {
-      return false;
-   };
-   time::OffsetDateTime::now_utc().date() <= date
 }
 
 pub fn allowed_checkout_url(provider: &str, url: &str) -> bool {
@@ -676,6 +788,82 @@ mod tests {
       let digest = HEXLOWER.encode(hmac::sign(&key, &sorted).as_ref());
       assert!(nowpayments_signature_ok(raw, &digest, secret));
       assert!(!nowpayments_signature_ok(raw, "00", secret));
+   }
+
+   #[test]
+   fn the_counter_resets_on_the_23rd() {
+      use time::macros::datetime;
+      let mid = donation_period(datetime!(2026-10-19 15:00 UTC));
+      assert_eq!(mid.start.date().to_string(), "2026-09-23");
+      assert_eq!(mid.end.date().to_string(), "2026-10-23");
+      let boundary = donation_period(datetime!(2026-10-23 00:00 UTC));
+      assert_eq!(boundary.start.date().to_string(), "2026-10-23");
+      assert_eq!(boundary.end.date().to_string(), "2026-11-23");
+      let new_year = donation_period(datetime!(2026-01-05 00:00 UTC));
+      assert_eq!(new_year.start.date().to_string(), "2025-12-23");
+      assert_eq!(new_year.end.date().to_string(), "2026-01-23");
+   }
+
+   #[test]
+   fn payments_before_this_period_are_left_out() {
+      use time::macros::datetime;
+      let old = datetime!(2026-08-23 00:00 UTC).unix_timestamp();
+      let current = datetime!(2026-09-23 00:00 UTC).unix_timestamp();
+      let entries = [
+         Entry {
+            id: "a".into(),
+            provider: "stripe".into(),
+            provider_ref: "old".into(),
+            cents: 1000,
+            status: "paid".into(),
+            paid_at: old,
+         },
+         Entry {
+            id: "b".into(),
+            provider: "stripe".into(),
+            provider_ref: "now".into(),
+            cents: 2500,
+            status: "paid".into(),
+            paid_at: current,
+         },
+         Entry {
+            id: "c".into(),
+            provider: "stripe".into(),
+            provider_ref: "wait".into(),
+            cents: 9000,
+            status: "pending".into(),
+            paid_at: current,
+         },
+      ];
+      let period = donation_period(datetime!(2026-10-01 00:00 UTC));
+      assert_eq!(
+         sum_paid_in_window(&entries, period.start.unix_timestamp(), period.end.unix_timestamp()),
+         2500
+      );
+   }
+
+   #[tokio::test]
+   async fn undated_payments_join_the_open_month_once() {
+      let path = std::env::temp_dir().join(format!("teapot-donations-{}.json", new_donation_id()));
+      let ledger = DonationLedger::open(path.to_str().unwrap());
+      let file = LedgerFile {
+         entries: vec![Entry {
+            id: "don_0123456789abcdef".into(),
+            provider: "stripe".into(),
+            provider_ref: "cs_old".into(),
+            cents: 500,
+            status: "paid".into(),
+            paid_at: 0,
+         }],
+      };
+      ledger.write(&file).await;
+      let (raised, _) = ledger.raised_this_period().await;
+      assert_eq!(raised, 500);
+      let (again, _) = ledger.raised_this_period().await;
+      assert_eq!(again, 500);
+      let stored = ledger.read().await.unwrap();
+      assert!(stored.entries[0].paid_at > 0);
+      let _ = tokio::fs::remove_file(path).await;
    }
 
    #[tokio::test]

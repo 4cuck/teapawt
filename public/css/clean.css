@@ -1112,6 +1112,85 @@ input[type="text"], input[type="date"], input[type="number"], select {
 .donate-drive p { margin: 0 0 6px; }
 .donate-drive p:last-child { margin-bottom: 0; }
 .donate-drive a, .donate-note a { color: var(--accent); }
+.donate-meter {
+  margin: 8px 0 10px;
+  padding: 10px 12px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 82%, var(--accent) 8%);
+}
+.donate-meter-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.donate-meter-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.donate-meter-live::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: donate-pulse 1.8s ease-in-out infinite;
+}
+.donate-meter-status {
+  color: var(--accent);
+  letter-spacing: 0.03em;
+}
+.donate-meter-top span:last-child {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.donate-meter-track {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+.donate-meter-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent_dark, var(--accent)), var(--accent));
+  transition: width 0.5s ease;
+}
+.donate-meter.is-met .donate-meter-bar {
+  background: var(--accent);
+}
+.donate-meter-figures {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 8px 0 0;
+}
+.donate-meter-figures strong {
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+}
+.donate-meter-figures span,
+.donate-meter-reset {
+  color: var(--muted);
+  font-size: 13px;
+}
+.donate-meter-reset { margin: 1px 0 0; }
+@keyframes donate-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .donate-meter-live::before { animation: none; }
+  .donate-meter-bar { transition: none; }
+}
 .donate-page { max-width: 640px; margin: 28px auto; padding: 0 16px 48px; }
 .donate-page h1 { margin: 0 0 8px; font-size: 28px; }
 .donate-form { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-top: 16px; }

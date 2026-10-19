@@ -1,17 +1,16 @@
 use maud::{Markup, html};
 
-use crate::donations::{self, format_usd};
+use crate::donations::{MonthProgress, format_usd};
 
-pub fn donate_drive_banner(raised_cents: i64, goal_cents: i64) -> Markup {
+pub fn donate_drive_banner(progress: &MonthProgress) -> Markup {
    html! {
        aside class="donate-drive" {
-           strong { "The " (format_usd(goal_cents)) " goal is met. xitter.cf needs another $120 for more X accounts." }
+           strong { "xitter.cf needs " (format_usd(progress.goal_cents)) " every month." }
+           (money_meter(progress))
            p {
-               "About 1,000 accounts are in rotation. Someone is spamming search, which rate-limits the proxy IPs and uses up those accounts. "
-               "Cloudflare Turnstile is on for now so that spam stops. "
-               @if raised_cents > 0 {
-                   "Raised " (format_usd(raised_cents)) " so far. "
-               }
+               "About 1,000 accounts are in rotation. Scraping from one IP is allowed. "
+               "Cloudflare Turnstile may turn on if someone starts spamming searches. "
+               "If you scrape from multiple IPs through proxies, Turnstile turns on for about 3 to 5 minutes, depending on how many requests arrive at once. "
                a href="/donate" { "Donate any amount" }
                " up to $10,000."
            }
@@ -21,15 +20,14 @@ pub fn donate_drive_banner(raised_cents: i64, goal_cents: i64) -> Markup {
                ". I will add it as quickly as I can."
            }
            p {
-               "If we raise more than it costs to keep the site running, I will add posting, liking, and reposting on xitter.cf, so you can post what you want through our residential proxies, consequence free. I will also add thousands of accounts so you can ban evade on X effortlessly through this site."
+               "It costs about $1,250 to add posting to this Nitter instance. Searching and viewing tweets will use separate account pools, so they do not mix and break the whole site. Posting, liking, and reposting would go through our residential proxies, consequence free. I will also add hundreds of thousands of accounts, about 100,000 of them for posting, so you can ban evade on X through this site."
            }
        }
    }
 }
 
 pub fn render_donate_page(
-   raised_cents: i64,
-   goal_cents: i64,
+   progress: &MonthProgress,
    stripe: bool,
    crypto: bool,
    lzt: bool,
@@ -41,14 +39,14 @@ pub fn render_donate_page(
        div class="overlay-panel donate-page" {
            h1 { "Donate" }
            p {
-               "The " (format_usd(goal_cents)) " goal is met. Another $120 buys more X accounts. "
-               "About 1,000 accounts are in rotation. Someone is spamming search, which rate-limits the proxy IPs and uses up those accounts. "
-               "Cloudflare Turnstile is on for now so that spam stops. "
-               @if raised_cents > 0 {
-                   "Raised " (format_usd(raised_cents)) " so far. "
-               }
+               "xitter.cf needs " (format_usd(progress.goal_cents)) " every month for accounts and proxies. "
+               "The counter resets on the 23rd. "
+               "About 1,000 accounts are in rotation. Scraping from one IP is allowed. "
+               "Cloudflare Turnstile may turn on if someone starts spamming searches. "
+               "If you scrape from multiple IPs through proxies, Turnstile turns on for about 3 to 5 minutes, depending on how many requests arrive at once. "
                "Choose an amount from $1 to $10,000."
            }
+           (money_meter(progress))
            @if canceled {
                p class="donate-status" { "The payment was canceled. Nothing was charged." }
            }
@@ -83,7 +81,7 @@ pub fn render_donate_page(
                    ". I will add it as quickly as I can."
                }
                p class="donate-note" {
-                   "If we raise more than it costs to keep the site running, I will add posting, liking, and reposting on xitter.cf, so you can post what you want through our residential proxies, consequence free. I will also add thousands of accounts so you can ban evade on X effortlessly through this site."
+                   "It costs about $1,250 to add posting to this Nitter instance. Searching and viewing tweets will use separate account pools, so they do not mix and break the whole site. Posting, liking, and reposting would go through our residential proxies, consequence free. I will also add hundreds of thousands of accounts, about 100,000 of them for posting, so you can ban evade on X through this site."
                }
            } @else {
                p class="donate-status" { "Donations are not set up on this instance yet." }
@@ -108,6 +106,37 @@ pub fn render_thanks(confirmed: bool, provider: &str) -> Markup {
    }
 }
 
-pub fn campaign_is_open(deadline: &str) -> bool {
-   donations::campaign_open(deadline)
+fn money_meter(progress: &MonthProgress) -> Markup {
+   let raised = format_usd(progress.raised_cents);
+   let goal = format_usd(progress.goal_cents);
+   let percent = progress.percent();
+   let bar = progress.bar_percent();
+   let met = if progress.met() { " is-met" } else { "" };
+   html! {
+       section class=(format!("donate-meter{met}")) aria-label="This month's donations" {
+           div class="donate-meter-top" {
+               span class="donate-meter-live" { "This month" }
+               @if progress.met() {
+                   span class="donate-meter-status" { "Goal met" }
+               }
+               span { (percent) "%" }
+           }
+           div class="donate-meter-track" role="meter"
+               aria-valuemin="0"
+               aria-valuemax=(progress.goal_cents)
+               aria-valuenow=(progress.raised_cents)
+               aria-label=(format!("Raised {raised} of {goal} this month")) {
+               div class="donate-meter-bar" style=(format!("width: {bar}%")) {}
+           }
+           p class="donate-meter-figures" {
+               strong { (raised) }
+               span { "of " span { (goal) } }
+           }
+           p class="donate-meter-reset" {
+               "Resets "
+               time datetime=(progress.reset_on) { (progress.reset_label) }
+               " (UTC)"
+           }
+       }
+   }
 }

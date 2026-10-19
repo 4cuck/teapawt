@@ -107,14 +107,12 @@ async fn home(
            }
        }
    };
-   let drive = if donate_view::campaign_is_open(&state.config.donations.goal_deadline) {
-      Some(donate_view::donate_drive_banner(
-         state.donations.raised_cents().await,
-         state.config.donations.goal_cents,
-      ))
-   } else {
-      None
-   };
+   let progress = crate::donations::month_progress(
+      &state.donations,
+      state.config.donations.goal_cents,
+   )
+   .await;
+   let drive = Some(donate_view::donate_drive_banner(&progress));
    let firefox_note = (firefox && !prefs.proxy_media && !warning_hidden)
       .then(|| crate::views::preferences::firefox_media_warning(false));
    let notice = if drive.is_none() && firefox_note.is_none() {

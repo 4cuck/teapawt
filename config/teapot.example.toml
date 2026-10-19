@@ -103,8 +103,8 @@ externalDomain = ""
 # Never commit live keys.
 [donations]
 ledgerFile = "donations.json"
+# Shown on the homepage and /donate. The counter resets at 00:00 UTC on the 23rd.
 goalCents = 12900
-goalDeadline = "2026-10-23"
 
 [donations.stripe]
 secretKey = ""
