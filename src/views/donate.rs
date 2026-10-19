@@ -5,11 +5,12 @@ use crate::donations::{self, format_usd};
 pub fn donate_drive_banner(raised_cents: i64, goal_cents: i64) -> Markup {
    html! {
        aside class="donate-drive" {
-           strong { "nitter.cf needs " (format_usd(goal_cents)) " by October 23 to stay online." }
+           strong { "The " (format_usd(goal_cents)) " goal is met. xitter.cf needs another $120 for more X accounts." }
            p {
-               "Servers, bandwidth, and the accounts that keep this instance up are due then. "
+               "About 1,000 accounts are in rotation. Someone is spamming search, which rate-limits the proxy IPs and uses up those accounts. "
+               "Cloudflare Turnstile is on for now so that spam stops. "
                @if raised_cents > 0 {
-                   "Raised " (format_usd(raised_cents)) " of " (format_usd(goal_cents)) ". "
+                   "Raised " (format_usd(raised_cents)) " so far. "
                }
                a href="/donate" { "Donate any amount" }
                " up to $10,000."
@@ -20,7 +21,7 @@ pub fn donate_drive_banner(raised_cents: i64, goal_cents: i64) -> Markup {
                ". I will add it as quickly as I can."
            }
            p {
-               "If we raise more than it costs to keep the site running, I will add posting, liking, and reposting on nitter.cf, so you can post what you want through our residential proxies, consequence free. I will also add thousands of accounts so you can ban evade on X effortlessly through this site."
+               "If we raise more than it costs to keep the site running, I will add posting, liking, and reposting on xitter.cf, so you can post what you want through our residential proxies, consequence free. I will also add thousands of accounts so you can ban evade on X effortlessly through this site."
            }
        }
    }
@@ -40,7 +41,9 @@ pub fn render_donate_page(
        div class="overlay-panel donate-page" {
            h1 { "Donate" }
            p {
-               "nitter.cf needs " (format_usd(goal_cents)) " by October 23, 2026 to keep running. "
+               "The " (format_usd(goal_cents)) " goal is met. Another $120 buys more X accounts. "
+               "About 1,000 accounts are in rotation. Someone is spamming search, which rate-limits the proxy IPs and uses up those accounts. "
+               "Cloudflare Turnstile is on for now so that spam stops. "
                @if raised_cents > 0 {
                    "Raised " (format_usd(raised_cents)) " so far. "
                }
@@ -80,7 +83,7 @@ pub fn render_donate_page(
                    ". I will add it as quickly as I can."
                }
                p class="donate-note" {
-                   "If we raise more than it costs to keep the site running, I will add posting, liking, and reposting on nitter.cf, so you can post what you want through our residential proxies, consequence free. I will also add thousands of accounts so you can ban evade on X effortlessly through this site."
+                   "If we raise more than it costs to keep the site running, I will add posting, liking, and reposting on xitter.cf, so you can post what you want through our residential proxies, consequence free. I will also add thousands of accounts so you can ban evade on X effortlessly through this site."
                }
            } @else {
                p class="donate-status" { "Donations are not set up on this instance yet." }
@@ -94,7 +97,7 @@ pub fn render_thanks(confirmed: bool, provider: &str) -> Markup {
        div class="overlay-panel donate-page" {
            h1 { "Thank you" }
            @if confirmed {
-               p { "Your donation was received. It keeps nitter.cf online." }
+               p { "Your donation was received. It keeps xitter.cf online." }
            } @else if provider == "nowpayments" {
                p { "If the crypto payment has been sent, it shows up here after the network confirms it." }
            } @else {

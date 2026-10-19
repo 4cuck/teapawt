@@ -75,7 +75,7 @@ async fn page(state: &AppState, jar: &CookieJar, message: Option<&str>, canceled
       canceled,
    );
    let markup = PageLayout::new(&state.config, "Donate", content)
-      .description("Donate to keep nitter.cf online")
+      .description("Donate to keep xitter.cf online")
       .prefs(&prefs)
       .referer("/donate")
       .render();
@@ -187,7 +187,7 @@ async fn thanks(
    let prefs = Prefs::from_cookies(&jar, &state.config);
    let content = donate_view::render_thanks(confirmed, &provider);
    let markup = PageLayout::new(&state.config, "Thank you", content)
-      .description("Thank you for donating to nitter.cf")
+      .description("Thank you for donating to xitter.cf")
       .prefs(&prefs)
       .referer("/donate")
       .render();
