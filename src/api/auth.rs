@@ -556,13 +556,27 @@ impl SessionPool {
    }
 
    /// Leave a session out of one operation X answers it nothing for, while
-   /// other accounts get results. The rest of its endpoints stay in use.
+   /// other accounts get results. Search stays out for good. The rest of its
+   /// endpoints stay in use, and a non-search refusal expires after a day.
    pub async fn mark_refused(&self, session_id: i64, api: &str) {
+      let username = self
+         .sessions
+         .iter()
+         .find(|slot| slot.credentials.id == session_id)
+         .map(|slot| slot.credentials.username.clone())
+         .unwrap_or_default();
       let mut limits = self.limits.write().await;
       if let Some(lim) = limits.get_mut(&session_id) {
          lim.refuse(api);
       }
       drop(limits);
+      if api.ends_with("SearchTimeline") {
+         tracing::info!(
+            session_id,
+            session_user = %username,
+            "account cannot search; leaving it out permanently"
+         );
+      }
       self.persist_now().await;
    }
 

@@ -63,7 +63,8 @@ pub struct SessionLimits {
 const GLOBAL_LIMIT_DURATION_SECS: i64 = 15 * 60;
 
 /// How long an account sits out an operation X refused it, before it is
-/// tried again in case X lifted the restriction.
+/// tried again in case X lifted the restriction. Search is not included:
+/// an account that returns nothing for `SearchTimeline` stays out.
 const REFUSED_OP_SECS: i64 = 24 * 60 * 60;
 
 /// `SearchTimeline` from `ph2fARFabkwfxqmSKQ1OPw/SearchTimeline`, so a mark
@@ -98,22 +99,31 @@ impl SessionLimits {
       false
    }
 
-   /// Whether X refused this account `api` recently.
+   /// Whether X refuses this account `api`. A search refusal is permanent.
+   /// Other operations are tried again after a day.
    #[must_use]
    pub fn refuses(&self, api: &str) -> bool {
+      let name = operation_name(api);
+      let Some(&at) = self.refused_ops.get(name) else {
+         return false;
+      };
+      if name == "SearchTimeline" {
+         return true;
+      }
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
-      self
-         .refused_ops
-         .get(operation_name(api))
-         .is_some_and(|at| now - at < REFUSED_OP_SECS)
+      now - at < REFUSED_OP_SECS
    }
 
-   /// Leave this account out of `api` for [`REFUSED_OP_SECS`].
+   /// Leave this account out of `api`. Search stays out. Anything else is
+   /// dropped once it is older than [`REFUSED_OP_SECS`].
    pub fn refuse(&mut self, api: &str) {
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
-      self.refused_ops.retain(|_, at| now - *at < REFUSED_OP_SECS);
-      self.refused_ops.insert(operation_name(api).to_owned(), now);
-      self.verified_ops.remove(operation_name(api));
+      let name = operation_name(api);
+      self.refused_ops.retain(|op, at| {
+         op == "SearchTimeline" || now - *at < REFUSED_OP_SECS
+      });
+      self.refused_ops.insert(name.to_owned(), now);
+      self.verified_ops.remove(name);
    }
 
    /// Whether this account has been seen getting results for `api`.
@@ -249,5 +259,24 @@ impl Session {
             verified_ops: HashMap::new(),
          },
       )
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn a_search_refusal_is_kept() {
+      let mut limits = SessionLimits::default();
+      limits.refuse("old/SearchTimeline");
+      let day = 25 * 60 * 60;
+      *limits.refused_ops.get_mut("SearchTimeline").unwrap() -= day;
+      assert!(limits.refuses("new/SearchTimeline"));
+
+      limits.refuse("x/UserTweets");
+      *limits.refused_ops.get_mut("UserTweets").unwrap() -= day;
+      assert!(!limits.refuses("x/UserTweets"));
+      assert!(limits.refuses("new/SearchTimeline"));
    }
 }

@@ -518,10 +518,12 @@ impl ApiClient {
             .graphql_request_inner(&session, endpoint, variables, features, field_toggles)
             .await;
          if empty && last.is_ok() {
+            let permanent = endpoint.ends_with("SearchTimeline");
             tracing::info!(
                session_id,
                endpoint,
-               "X answers this account nothing for this operation while others get results; leaving it out for a day"
+               permanent,
+               "X answers this account nothing for this operation while others get results"
             );
             self.sessions.mark_refused(session_id, endpoint).await;
          }

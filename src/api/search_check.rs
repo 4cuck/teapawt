@@ -4,7 +4,7 @@
 //! is an empty 404, while the same account still loads profiles and posts.
 //! Accounts nobody has checked are searched once each in the background,
 //! spaced out. Those that get results go first for search from then on; the
-//! refused ones sit out search for a day and are checked again after that.
+//! refused ones stay out of search and are not tried again.
 
 use std::time::{Duration, Instant};
 
