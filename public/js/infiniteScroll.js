@@ -29,10 +29,10 @@ function setLoadMoreLabel(loadMore, text) {
 }
 
 const GAP = 10;
-// X can put several duplicate or text-only pages between useful media pages.
-// Follow their cursors automatically, but cap one scroll cycle so a broken
-// upstream cursor cannot spin forever.
-const EMPTY_PAGE_LIMIT = 8;
+// SearchTimeline normally returns about 20 entries. Scan at most two empty
+// pages (roughly 40 raw tweets), then require a manual click so an all-text
+// query cannot burn through account quota in the background.
+const EMPTY_PAGE_LIMIT = 2;
 
 class Masonry {
     constructor(container) {
@@ -168,9 +168,10 @@ window.onload = function () {
     const masonryEl = container?.querySelector(".gallery-masonry");
     const masonry = masonryEl ? new Masonry(masonryEl) : null;
     let loading = false;
+    let emptyPagePaused = false;
 
     function handleScroll(failed, skipped) {
-        if (loading) return;
+        if (loading || emptyPagePaused) return;
         if (html.scrollTop + html.clientHeight < html.scrollHeight - 3000) return;
 
         const loadMore = getLoadMore(document);
@@ -223,9 +224,10 @@ window.onload = function () {
                 loading = false;
                 if (newItems.length === 0 && newLoadMore != null) {
                     const emptyPages = (skipped || 0) + 1;
-                    if (emptyPages <= EMPTY_PAGE_LIMIT) {
+                    if (emptyPages < EMPTY_PAGE_LIMIT) {
                         setTimeout(() => handleScroll(0, emptyPages), 0);
                     } else {
+                        emptyPagePaused = true;
                         setLoadMoreLabel(newLoadMore, "Load more");
                     }
                 }
@@ -265,9 +267,10 @@ window.onload = function () {
             loading = false;
             if (items.length === 0 && newLoadMore != null) {
                 const emptyPages = (skipped || 0) + 1;
-                if (emptyPages <= EMPTY_PAGE_LIMIT) {
+                if (emptyPages < EMPTY_PAGE_LIMIT) {
                     setTimeout(() => handleScroll(0, emptyPages), 0);
                 } else {
+                    emptyPagePaused = true;
                     setLoadMoreLabel(newLoadMore, "Load more");
                 }
             }
