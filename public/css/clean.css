@@ -509,6 +509,48 @@ main .container {
 .show-more { padding: 0; }
 .show-more a { display: block; padding: 8px; color: var(--accent); }
 
+/* Timeline pagination: compact centered controls instead of full-width bars. */
+.timeline > .show-more,
+.timeline > .timeline-item.show-more,
+.timeline.media-gallery-view > .show-more {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  width: min(100%, 900px);
+  margin: 0 auto;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+.timeline.media-gallery-view > .show-more {
+  margin-top: 8px;
+}
+.timeline > .show-more a,
+.timeline > .timeline-item.show-more a,
+.timeline.media-gallery-view > .show-more a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  min-width: 132px;
+  min-height: 32px;
+  padding: 6px 18px;
+  border: 0;
+  border-radius: 2px;
+  background: var(--surface-raised);
+  color: var(--accent);
+  font-size: 13px;
+  line-height: 1.2;
+  text-decoration: none;
+}
+.timeline > .show-more a:hover,
+.timeline > .timeline-item.show-more a:hover,
+.timeline.media-gallery-view > .show-more a:hover {
+  background: color-mix(in srgb, var(--surface-raised) 78%, var(--text) 12%);
+  color: var(--accent);
+  text-decoration: none;
+}
+
 .profile-tabs {
   width: min(100%, var(--page-width));
   max-width: var(--page-width);
