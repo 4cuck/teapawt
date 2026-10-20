@@ -19,9 +19,7 @@ pub fn donate_drive_banner(progress: &MonthProgress) -> Markup {
                a href="https://github.com/4cuck/teapawt/issues" target="_blank" rel="noopener noreferrer" { "request it on GitHub" }
                ". I will add it as quickly as I can."
            }
-           p {
-               "It costs about $1,250 to add posting to this Nitter instance. Searching and viewing tweets will use separate account pools, so they do not mix and break the whole site. Posting, liking, and reposting would go through our residential proxies, consequence free. I will also add hundreds of thousands of accounts, about 100,000 of them for posting, so you can ban evade on X through this site."
-           }
+           p { (posting_plans()) }
        }
    }
 }
@@ -80,9 +78,7 @@ pub fn render_donate_page(
                    a href="https://github.com/4cuck/teapawt/issues" target="_blank" rel="noopener noreferrer" { "request it on GitHub" }
                    ". I will add it as quickly as I can."
                }
-               p class="donate-note" {
-                   "It costs about $1,250 to add posting to this Nitter instance. Searching and viewing tweets will use separate account pools, so they do not mix and break the whole site. Posting, liking, and reposting would go through our residential proxies, consequence free. I will also add hundreds of thousands of accounts, about 100,000 of them for posting, so you can ban evade on X through this site."
-               }
+               p class="donate-note" { (posting_plans()) }
            } @else {
                p class="donate-status" { "Donations are not set up on this instance yet." }
            }
@@ -103,6 +99,15 @@ pub fn render_thanks(confirmed: bool, provider: &str) -> Markup {
            }
            p { a href="/" { "Back to the front page" } }
        }
+   }
+}
+
+fn posting_plans() -> Markup {
+   html! {
+       "It costs about $1,250 to add posting to this Nitter instance. Searching and viewing tweets will use separate account pools, so they do not mix and break the whole site. Posting, liking, and reposting would go through our residential proxies, consequence free. I will also add hundreds of thousands of accounts, about 100,000 of them for posting, so you can ban evade on X through this site. "
+       "Posting onto X through those accounts will be added, but slowly. If the money does not come in quickly, expect about 6 to 8 months, or up to a year. Musk's anti-bot system is why that takes so long. "
+       a href="https://emusks.tiago.zip/internals/castle" target="_blank" rel="noopener noreferrer" { "This write-up" }
+       " is an outdated example of that system."
    }
 }
 
