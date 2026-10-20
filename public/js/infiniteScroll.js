@@ -29,6 +29,10 @@ function setLoadMoreLabel(loadMore, text) {
 }
 
 const GAP = 10;
+// X can put several duplicate or text-only pages between useful media pages.
+// Follow their cursors automatically, but cap one scroll cycle so a broken
+// upstream cursor cannot spin forever.
+const EMPTY_PAGE_LIMIT = 8;
 
 class Masonry {
     constructor(container) {
@@ -165,7 +169,7 @@ window.onload = function () {
     const masonry = masonryEl ? new Masonry(masonryEl) : null;
     let loading = false;
 
-    function handleScroll(failed) {
+    function handleScroll(failed, skipped) {
         if (loading) return;
         if (html.scrollTop + html.clientHeight < html.scrollHeight - 3000) return;
 
@@ -217,6 +221,14 @@ window.onload = function () {
                     newLoadMore.classList.add("masonry-visible");
                 }
                 loading = false;
+                if (newItems.length === 0 && newLoadMore != null) {
+                    const emptyPages = (skipped || 0) + 1;
+                    if (emptyPages <= EMPTY_PAGE_LIMIT) {
+                        setTimeout(() => handleScroll(0, emptyPages), 0);
+                    } else {
+                        setLoadMoreLabel(newLoadMore, "Load more");
+                    }
+                }
                 return;
             }
 
@@ -251,6 +263,14 @@ window.onload = function () {
                 loadMore.replaceWith(newLoadMore);
             }
             loading = false;
+            if (items.length === 0 && newLoadMore != null) {
+                const emptyPages = (skipped || 0) + 1;
+                if (emptyPages <= EMPTY_PAGE_LIMIT) {
+                    setTimeout(() => handleScroll(0, emptyPages), 0);
+                } else {
+                    setLoadMoreLabel(newLoadMore, "Load more");
+                }
+            }
         }).catch(function (err) {
             console.warn("Something went wrong.", err);
             const next = (failed || 0) + 1;
@@ -262,11 +282,11 @@ window.onload = function () {
             setLoadMoreLabel(loadMore, "Load more");
             setTimeout(function () {
                 loading = false;
-                handleScroll(next);
+                handleScroll(next, skipped);
             }, 1500);
         });
     }
 
-    window.addEventListener("scroll", () => handleScroll());
+    window.addEventListener("scroll", () => handleScroll(0, 0));
 };
 // @license-end

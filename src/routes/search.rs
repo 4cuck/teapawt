@@ -13,7 +13,7 @@ use serde::Deserialize;
 use super::helpers;
 use crate::{
    AppState,
-   cache::{keys as cache_keys, ttl},
+   cache::{Hit, keys as cache_keys, ttl},
    config::Config,
    error::Result,
    types::{PaginatedResult, Prefs, Query, QueryKind, Timeline, Tweet, User},
@@ -473,15 +473,37 @@ async fn search(
             result
          }
       } else {
-         state
-            .api
-            .search(&api_query, params.cursor.as_deref(), product)
-            .await
+         let cursor = params.cursor.as_deref().unwrap_or_default();
+         let cache_key = cache_keys::search_timeline(&api_query, product, Some(cursor));
+         match state.cache.lookup::<Timeline>(&cache_key) {
+            Some(Hit::Fresh(cached) | Hit::Stale(cached)) => Ok(cached),
+            None => {
+               let result = state.api.search(&api_query, Some(cursor), product).await;
+               if let Ok(ref data) = result {
+                  // Cache even pages that contain only text/duplicates. Their
+                  // next cursor lets later gallery visitors cross the gap
+                  // without spending another SearchTimeline call.
+                  state.cache.set_swr(
+                     &cache_key,
+                     data,
+                     ttl::SEARCH_CURSOR,
+                     ttl::SEARCH_CURSOR_STALE,
+                  );
+               }
+               result
+            },
+         }
       };
 
       match search_result {
          Ok(timeline) => {
             let mut tweets = dedup_search_tweets(timeline.content.into_iter().flatten().collect());
+            // X's Media product occasionally mixes in plain-text posts. They
+            // are useful in timeline mode, but become blank masonry cells in
+            // grid/gallery (especially with compactGallery enabled).
+            if active_tab == "media" && matches!(media_view, "grid" | "gallery") {
+               tweets.retain(Tweet::has_gallery_media);
+            }
             helpers::enrich_tweet_groups(&state, slice::from_mut(&mut tweets)).await;
             helpers::remember_tweets(&state, &tweets);
             helpers::prefetch_profiles(&state, &tweets);

@@ -256,7 +256,7 @@ impl<'a> PageLayout<'a> {
                   script src="/js/threadContext.js" defer="" {}
                   script src="/js/imageLightbox.js" defer="" {}
                   @if infinite_scroll {
-                      script src="/js/infiniteScroll.js?teapawt=2" defer="" {}
+                      script src="/js/infiniteScroll.js?teapawt=3" defer="" {}
                   }
                   @if hls_playback {
                       script src="/js/hls.min.js" defer="" {}

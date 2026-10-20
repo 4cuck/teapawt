@@ -209,30 +209,36 @@ fn render_timeline_full(
                }
            }
 
-           @if !has_tweets {
-               (render_none_found())
-           } @else {
-               @if is_gallery {
-                   div class=(masonry_class) data-col-size=(col_size) {
+           // Keep an empty masonry root and the next cursor when X returns a
+           // page with no visual cards. Infinite scroll can then skip that
+           // page instead of mistaking it for the end of the timeline.
+           @if is_gallery {
+               div class=(masonry_class) data-col-size=(col_size) {
+                   @if has_tweets {
                        (render_timeline_items(groups, config, pinned, prefs, pinned_id, big_thumb, true))
                    }
-               } @else {
-                   (render_timeline_items(groups, config, pinned, prefs, pinned_id, big_thumb, view == "grid"))
                }
+           } @else if has_tweets {
+               (render_timeline_items(groups, config, pinned, prefs, pinned_id, big_thumb, view == "grid"))
+           }
 
-               // Pagination
-               @if let Some(ref url) = load_more_url {
-                   div class="show-more" {
-                       a href=(url) { "Load more" }
-                   }
-               } @else if has_tweets {
-                   (render_no_more())
-               }
+           @if !has_tweets && load_more_url.is_none() {
+               (render_none_found())
+           }
 
-               // Scroll to top
-               @if has_tweets {
-                   (render_to_top())
+           // Pagination is independent of visible cards. A media page can be
+           // all text/duplicates while still carrying a valid next cursor.
+           @if let Some(ref url) = load_more_url {
+               div class="show-more" {
+                   a href=(url) { "Load more" }
                }
+           } @else if has_tweets {
+               (render_no_more())
+           }
+
+           // Scroll to top
+           @if has_tweets {
+               (render_to_top())
            }
        }
    }

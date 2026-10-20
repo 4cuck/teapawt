@@ -17,6 +17,15 @@ pub const SEARCH: u64 = 60;
 /// Serve a stale first search page this long after [`SEARCH`].
 pub const SEARCH_STALE: u64 = 4 * 60;
 
+/// A paginated search result is tied to an opaque cursor and changes much
+/// less than the first page. Cache it long enough for other visitors to cross
+/// the same duplicate/text-only gaps without spending another X call.
+pub const SEARCH_CURSOR: u64 = 3 * 60;
+
+/// Keep cursor pages reusable after [`SEARCH_CURSOR`]. Serving the saved next
+/// cursor is preferable to exhausting another account on an old scroll path.
+pub const SEARCH_CURSOR_STALE: u64 = 15 * 60;
+
 /// Long TTL for immutable mappings like user ID -> username.
 pub const USER_ID_MAPPING: u64 = 24 * 60 * 60; // 1 day
 

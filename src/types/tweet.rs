@@ -406,6 +406,27 @@ impl Tweet {
          || !self.gifs.is_empty()
    }
 
+   /// Whether the card rendered for this result has visual media.
+   ///
+   /// X's media search can return retweet wrappers, quoted media, link cards,
+   /// and an occasional plain-text result. Grid/gallery views should keep the
+   /// first three and drop only cards that would render no image or video.
+   pub fn has_gallery_media(&self) -> bool {
+      let tweet = self.retweet.as_deref().unwrap_or(self);
+      tweet.has_media()
+         || tweet.card.as_ref().is_some_and(|card| {
+            !card.image.is_empty() || card.video.is_some()
+         })
+         || tweet.poll.as_ref().is_some_and(|poll| {
+            poll.image.as_ref().is_some_and(|image| !image.is_empty())
+               || !poll.choice_images.is_empty()
+         })
+         || tweet
+            .quote
+            .as_deref()
+            .is_some_and(Self::has_gallery_media)
+   }
+
    /// A reply to someone other than the author. A self-thread stays.
    pub fn replies_to_someone_else(&self) -> bool {
       self
@@ -466,5 +487,44 @@ mod tests {
       assert!(!video(2_000_000, 10_000).exceeds_cloudflare_cache());
       assert!(video(8_000_000, 600_000).exceeds_cloudflare_cache());
       assert!(!video(0, 3_600_000).exceeds_cloudflare_cache());
+   }
+
+   #[test]
+   fn gallery_media_follows_retweets_quotes_and_cards() {
+      let text = Tweet::default();
+      assert!(!text.has_gallery_media());
+
+      let photo = Tweet {
+         photos: vec![Photo {
+            url: "photo".into(),
+            ..Photo::default()
+         }],
+         ..Tweet::default()
+      };
+      assert!(photo.has_gallery_media());
+      assert!(
+         Tweet {
+            retweet: Some(Box::new(photo.clone())),
+            ..Tweet::default()
+         }
+         .has_gallery_media()
+      );
+      assert!(
+         Tweet {
+            quote: Some(Box::new(photo)),
+            ..Tweet::default()
+         }
+         .has_gallery_media()
+      );
+      assert!(
+         Tweet {
+            card: Some(Card {
+               image: "preview".into(),
+               ..Card::default()
+            }),
+            ..Tweet::default()
+         }
+         .has_gallery_media()
+      );
    }
 }

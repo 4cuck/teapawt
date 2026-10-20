@@ -50,21 +50,6 @@ fn snowflake(id: &str) -> Result<()> {
    Ok(())
 }
 
-fn search_page_is_stuck(timeline: &Timeline) -> bool {
-   let mut ids = timeline.content.iter().flatten().map(Tweet::original_id);
-   let Some(first) = ids.next() else {
-      return false;
-   };
-   let mut count = 1_usize;
-   for id in ids {
-      if id != first {
-         return false;
-      }
-      count += 1;
-   }
-   count >= 3
-}
-
 #[expect(
    clippy::multiple_inherent_impl,
    reason = "endpoint methods are split from transport/authentication internals"
@@ -586,11 +571,11 @@ impl ApiClient {
          .await?;
       let mut timeline = parser::parse_search_timeline(&data);
 
-      // X often repeats the last page with a new cursor that still shares a
-      // long prefix. Stop only when the cursor is unchanged or this page is
-      // the same tweet over and over.
+      // The same cursor cannot advance. Do not stop merely because a page is
+      // duplicates of one viral post: X still supplies a new cursor after
+      // those pages, and its own client skips the duplicates and continues.
       if let Some(after) = cursor
-         && (timeline.bottom.as_deref() == Some(after) || search_page_is_stuck(&timeline))
+         && timeline.bottom.as_deref() == Some(after)
       {
          timeline.content.clear();
          timeline.bottom = None;
