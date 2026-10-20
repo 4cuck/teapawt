@@ -28,6 +28,12 @@ function setLoadMoreLabel(loadMore, text) {
     }
 }
 
+// Replies inserted by scroll are not part of the original page, so htmx
+// never binds them. Translate buttons are hx-get and otherwise do nothing.
+function activateInserted(node) {
+    if (node && window.htmx) window.htmx.process(node);
+}
+
 const GAP = 10;
 // SearchTimeline normally returns about 20 entries. Scan at most two empty
 // pages (roughly 40 raw tweets), then require a manual click so an all-text
@@ -148,6 +154,7 @@ class Masonry {
         for (const item of newItems) {
             item.style.width = `${colWidth}px`;
             this.container.appendChild(item);
+            activateInserted(item);
         }
 
         this._position(newItems, newItems.map(item => item.offsetHeight), colWidth);
@@ -258,6 +265,7 @@ window.onload = function () {
                 } else {
                     container.insertBefore(item, loadMore);
                 }
+                activateInserted(item);
             }
             if (newLoadMore == null) {
                 loadMore.remove();
