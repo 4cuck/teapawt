@@ -28,6 +28,25 @@ use crate::{
    utils::formatters,
 };
 
+/// True when the 429 carries X's account window rather than a bare edge page.
+fn account_rate_window(headers: &axum::http::HeaderMap) -> bool {
+   headers.get("x-rate-limit-remaining").is_some()
+      || headers
+         .get(header::CONTENT_TYPE)
+         .and_then(|value| value.to_str().ok())
+         .is_some_and(|value| value.to_ascii_lowercase().contains("json"))
+}
+
+/// Empty or HTML 429 with no account window. Those are the proxy IP, and
+/// retrying more cookies on that same path only burns the pool.
+fn ip_throttle(body: &str, account_window: bool) -> bool {
+   if account_window {
+      return false;
+   }
+   let body = body.trim_start();
+   body.is_empty() || body.starts_with('<')
+}
+
 /// A search spends a `SearchTimeline` call and is never served from cache.
 const SEARCH_COST: f64 = 2.0;
 /// First try plus this many replacements when the account itself is rejected
@@ -464,11 +483,13 @@ impl ApiClient {
          .graphql_request_inner(&session, endpoint, variables, features, field_toggles)
          .await;
 
-      for replacement in 0..GRAPHQL_REPLACEMENTS {
+      // Quota failures may walk RATE_LIMIT_REPLACEMENTS accounts. The other
+      // cases stay capped at GRAPHQL_REPLACEMENTS inside the match.
+      for replacement in 0..RATE_LIMIT_REPLACEMENTS {
          let session_id = session.id;
          let empty = matches!(last, Err(Error::TransientUpstream));
          let retry = match &last {
-            Err(Error::SessionRejected(_)) => true,
+            Err(Error::SessionRejected(_)) if replacement < GRAPHQL_REPLACEMENTS => true,
             Err(Error::TransientUpstream) => {
                replacement == 0 && session.kind == SessionKind::Cookie
             },
@@ -485,7 +506,7 @@ impl ApiClient {
             {
                true
             },
-            Err(Error::RateLimited) if replacement < RATE_LIMIT_REPLACEMENTS => {
+            Err(Error::RateLimited) => {
                self
                   .sessions
                   .has_unlimited(endpoint, retry_kind, session_id)
@@ -837,12 +858,17 @@ impl ApiClient {
 
       if !response.status().is_success() {
          let status = response.status();
+         // Headers have to be read before `text` consumes the response.
+         // An empty or HTML body is only an IP block when X did not also
+         // send an account window. Search 429s often arrive with
+         // `x-rate-limit-*` and no body; treating those as an IP block
+         // skipped the other accounts that still had budget and returned
+         // 429 to the visitor.
+         let account_window = account_rate_window(response.headers());
          let body = response.text().await.unwrap_or_default();
 
          if status.as_u16() == 429 {
-            let body_trim = body.trim_start();
-            let ip_throttle = body_trim.is_empty() || body_trim.starts_with('<');
-            if ip_throttle {
+            if ip_throttle(&body, account_window) {
                tracing::warn!(
                   session_id = session.id,
                   session_user = %session.username,
@@ -853,10 +879,16 @@ impl ApiClient {
                self.sessions.refund_if_metered(session, endpoint).await;
                return Err(Error::IpThrottled);
             }
+            let shown = if body.trim_start().is_empty() || body.trim_start().starts_with('<') {
+               "Rate limit exceeded"
+            } else {
+               body.as_str()
+            };
             tracing::warn!(
                session_id = session.id,
                session_user = %session.username,
-               "API request failed: {status} - {body}"
+               endpoint,
+               "API request failed: {status} - {shown}"
             );
             self.sessions.disarm_meter(session);
             if !limit_recorded {
@@ -1202,6 +1234,28 @@ mod tests {
       )
       .unwrap();
       assert_eq!(request_errors(&denylisted, true).len(), 1);
+   }
+
+   #[test]
+   fn empty_429_with_an_account_window_is_not_an_ip_block() {
+      use axum::http::{HeaderMap, HeaderValue};
+
+      let mut window = HeaderMap::new();
+      window.insert("x-rate-limit-remaining", HeaderValue::from_static("0"));
+      window.insert("x-rate-limit-limit", HeaderValue::from_static("50"));
+      assert!(account_rate_window(&window));
+      assert!(!ip_throttle("", true));
+      assert!(!ip_throttle("<html>blocked</html>", true));
+
+      let mut html = HeaderMap::new();
+      html.insert(
+         header::CONTENT_TYPE,
+         HeaderValue::from_static("text/html; charset=utf-8"),
+      );
+      assert!(!account_rate_window(&html));
+      assert!(ip_throttle("<!DOCTYPE html><title>1015</title>", false));
+      assert!(ip_throttle("   ", false));
+      assert!(!ip_throttle("Rate limit exceeded", false));
    }
 
    #[test]
