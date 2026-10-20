@@ -57,6 +57,9 @@ const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 /// After an HTML 429, skip the direct address this long and send every
 /// request through the fallback exits.
 const DIRECT_BLOCK_FOR: Duration = Duration::from_secs(5 * 60);
+/// An X/Cloudflare HTML 429 is tied to the public IP, not the account. Park
+/// that SOCKS exit long enough for the edge window to clear.
+const EXIT_BLOCK_FOR: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProxyKind {
@@ -148,6 +151,74 @@ impl FallbackPool {
    }
 }
 
+/// The stable SOCKS exits used by cookie sessions. A session normally stays
+/// pinned, but temporarily moves to another healthy exit when X rate-limits
+/// its public IP.
+struct PrimaryPool {
+   proxies: Vec<ProxyConfig>,
+   tags: HashSet<u64>,
+   blocked_until: Mutex<HashMap<u64, u64>>,
+}
+
+impl PrimaryPool {
+   fn contains(&self, proxy: &ProxyConfig) -> bool {
+      self.tags.contains(&proxy_tag(Some(proxy)))
+   }
+
+   fn is_blocked(&self, proxy: &ProxyConfig) -> bool {
+      let tag = proxy_tag(Some(proxy));
+      self
+         .blocked_until
+         .lock()
+         .ok()
+         .and_then(|blocked| blocked.get(&tag).copied())
+         .is_some_and(|until| until > unix_millis())
+   }
+
+   /// Returns true only for the first report in a cooldown window, so a burst
+   /// of in-flight responses produces one useful warning rather than hundreds.
+   fn block(&self, proxy: &ProxyConfig) -> bool {
+      let tag = proxy_tag(Some(proxy));
+      if !self.tags.contains(&tag) {
+         return false;
+      }
+      let now = unix_millis();
+      let until = now.saturating_add(EXIT_BLOCK_FOR.as_millis() as u64);
+      let Ok(mut blocked) = self.blocked_until.lock() else {
+         return false;
+      };
+      let previous = blocked.entry(tag).or_insert(0);
+      let newly_blocked = *previous <= now;
+      *previous = (*previous).max(until);
+      newly_blocked
+   }
+
+   /// Pick a deterministic healthy failover for this account. Stability keeps
+   /// one temporary IP per account and avoids building clients for every exit.
+   fn alternate(&self, session: i64, current: &ProxyConfig) -> Option<ProxyConfig> {
+      let now = unix_millis();
+      let current_tag = proxy_tag(Some(current));
+      let mut blocked = self.blocked_until.lock().ok()?;
+      blocked.retain(|_, until| *until > now);
+      let healthy = self
+         .proxies
+         .iter()
+         .filter(|proxy| {
+            let tag = proxy_tag(Some(proxy));
+            tag != current_tag && !blocked.contains_key(&tag)
+         })
+         .collect::<Vec<_>>();
+      if healthy.is_empty() {
+         return None;
+      }
+      let mut hasher = std::collections::hash_map::DefaultHasher::new();
+      session.hash(&mut hasher);
+      current_tag.hash(&mut hasher);
+      let index = (hasher.finish() as usize) % healthy.len();
+      Some(healthy[index].clone())
+   }
+}
+
 /// Browser-impersonating client with one connection pool per account.
 #[derive(Clone)]
 #[expect(
@@ -163,6 +234,9 @@ pub struct HttpClient {
    fallback_proxy: Option<ProxyConfig>,
    /// Round-robin exits for the same window. Each call takes the next one.
    fallback_pool: Option<Arc<FallbackPool>>,
+   /// Stable session exits plus the shared circuit breaker for an IP that X
+   /// temporarily rate-limited.
+   primary_pool: Option<Arc<PrimaryPool>>,
    /// Unix millis until which the direct exit is skipped.
    direct_blocked_until: Arc<AtomicU64>,
    extra_headers: HeaderMap,
@@ -205,6 +279,7 @@ impl HttpClient {
          default_proxy,
          fallback_proxy: None,
          fallback_pool: None,
+         primary_pool: None,
          direct_blocked_until: Arc::new(AtomicU64::new(0)),
          extra_headers,
          sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -239,6 +314,27 @@ impl HttpClient {
             proxies,
             tags,
             next: AtomicUsize::new(0),
+         }));
+      }
+      self
+   }
+
+   /// Register all stable session exits so one Cloudflare 1015 can park only
+   /// the affected port while requests continue through the healthy ports.
+   #[must_use]
+   pub fn with_primary_proxies(mut self, mut proxies: Vec<ProxyConfig>) -> Self {
+      let mut tags = HashSet::new();
+      proxies.retain(|proxy| tags.insert(proxy_tag(Some(proxy))));
+      if !proxies.is_empty() {
+         tracing::info!(
+            exits = proxies.len(),
+            cooldown_secs = EXIT_BLOCK_FOR.as_secs(),
+            "proxy exit circuit breaker ready"
+         );
+         self.primary_pool = Some(Arc::new(PrimaryPool {
+            proxies,
+            tags,
+            blocked_until: Mutex::new(HashMap::new()),
          }));
       }
       self
@@ -356,12 +452,64 @@ impl HttpClient {
    }
 
    fn is_fallback(&self, proxy: Option<&ProxyConfig>) -> bool {
-      match (proxy, self.fallback_proxy.as_ref()) {
-         (Some(proxy), Some(fallback)) => {
-            proxy.host == fallback.host && proxy.port == fallback.port
-         },
-         _ => false,
+      let Some(proxy) = proxy else {
+         return false;
+      };
+      if self
+         .fallback_pool
+         .as_ref()
+         .is_some_and(|pool| pool.tags.contains(&proxy_tag(Some(proxy))))
+      {
+         return true;
       }
+      self
+         .fallback_proxy
+         .as_ref()
+         .is_some_and(|fallback| proxy.host == fallback.host && proxy.port == fallback.port)
+   }
+
+   fn primary_is_blocked(&self, egress: &Egress) -> bool {
+      let Some(proxy) = egress.proxy.as_ref() else {
+         return false;
+      };
+      self
+         .primary_pool
+         .as_ref()
+         .is_some_and(|pool| pool.is_blocked(proxy))
+   }
+
+   fn alternate_primary(&self, egress: &Egress) -> Option<Egress> {
+      let proxy = egress.proxy.as_ref()?;
+      let alternate = self
+         .primary_pool
+         .as_ref()?
+         .alternate(egress.session, proxy)?;
+      Some(Egress {
+         session: egress.session,
+         proxy: Some(alternate),
+      })
+   }
+
+   /// Park a primary exit after an HTML 429. Returns true when this call
+   /// opened a new cooldown window.
+   fn block_primary(&self, egress: &Egress) -> bool {
+      let Some(proxy) = egress.proxy.as_ref() else {
+         return false;
+      };
+      self
+         .primary_pool
+         .as_ref()
+         .is_some_and(|pool| pool.block(proxy))
+   }
+
+   fn is_primary(&self, egress: &Egress) -> bool {
+      let Some(proxy) = egress.proxy.as_ref() else {
+         return false;
+      };
+      self
+         .primary_pool
+         .as_ref()
+         .is_some_and(|pool| pool.contains(proxy))
    }
 
    fn direct_is_blocked(&self) -> bool {
@@ -444,20 +592,80 @@ impl HttpClient {
    ) -> Result<Response> {
       let direct = via.is_some_and(|egress| egress.proxy.is_none());
       let skip_direct = direct && self.has_fallback() && self.direct_is_blocked();
-      let proxied;
-      let first_via = if skip_direct {
-         proxied = Egress {
+      let routed = if skip_direct {
+         Some(Egress {
             session: via.expect("direct egress").session,
             proxy: self.take_fallback(),
-         };
-         Some(&proxied)
+         })
+      } else if let Some(egress) = via
+         && self.primary_is_blocked(egress)
+      {
+         self.alternate_primary(egress)
       } else {
-         via
+         None
       };
+      let first_via = routed.as_ref().or(via);
 
       let first = self
          .dispatch(&method, uri, extra_headers, &body, first_via)
          .await;
+
+      // An HTML 429 is a per-IP Cloudflare block. Park this exact proxy port
+      // for every account and retry safe calls once through another healthy
+      // primary exit. Future POSTs also avoid the parked exit, but this first
+      // POST is not repeated because X may have applied it before answering.
+      let edge_block =
+         matches!(&first, Ok(response) if is_edge_block(response.status(), response.headers()));
+      if edge_block
+         && let Some(blocked_via) = first_via
+         && self.is_primary(blocked_via)
+      {
+         let port = blocked_via
+            .proxy
+            .as_ref()
+            .map(|proxy| proxy.port)
+            .unwrap_or(0);
+         if self.block_primary(blocked_via) {
+            tracing::warn!(
+               port,
+               cooldown_secs = EXIT_BLOCK_FOR.as_secs(),
+               "X edge rate-limited proxy exit; parking it"
+            );
+         }
+         self.retire(Some(blocked_via));
+         if is_idempotent(&method)
+            && let Some(alternate) = self.alternate_primary(blocked_via)
+         {
+            let alternate_port = alternate
+               .proxy
+               .as_ref()
+               .map(|proxy| proxy.port)
+               .unwrap_or(0);
+            tracing::warn!(
+               port,
+               alternate_port,
+               "retrying through a healthy proxy exit"
+            );
+            let retry = self
+               .dispatch(&method, uri, extra_headers, &body, Some(&alternate))
+               .await;
+            if matches!(&retry, Ok(response) if is_edge_block(response.status(), response.headers()))
+            {
+               let retry_port = alternate_port;
+               if self.block_primary(&alternate) {
+                  tracing::warn!(
+                     port = retry_port,
+                     cooldown_secs = EXIT_BLOCK_FOR.as_secs(),
+                     "X edge rate-limited replacement proxy exit; parking it"
+                  );
+               }
+               self.retire(Some(&alternate));
+            }
+            return retry;
+         }
+         return first;
+      }
+
       // Already on a proxy, or this client has no fallback exits.
       if !direct || !self.has_fallback() || skip_direct {
          return first;
@@ -998,6 +1206,39 @@ mod tests {
       };
       let ports: Vec<u16> = (0..5).map(|_| pool.next().port).collect();
       assert_eq!(ports, vec![10001, 10002, 10003, 10001, 10002]);
+   }
+
+   #[test]
+   fn a_rate_limited_primary_exit_is_parked_for_every_account() {
+      let client = HttpClient::new("", "", Purpose::Api).with_primary_proxies(vec![
+         proxy_on(10001),
+         proxy_on(10002),
+         proxy_on(10003),
+      ]);
+      let pinned = Egress {
+         session: 42,
+         proxy: Some(proxy_on(10001)),
+      };
+      assert!(!client.primary_is_blocked(&pinned));
+      assert!(client.block_primary(&pinned));
+      assert!(!client.block_primary(&pinned));
+      assert!(client.primary_is_blocked(&pinned));
+
+      let alternate = client.alternate_primary(&pinned).unwrap();
+      let alternate_again = client.alternate_primary(&pinned).unwrap();
+      assert_ne!(alternate.proxy.as_ref().unwrap().port, 10001);
+      assert_eq!(
+         alternate.proxy.as_ref().unwrap().port,
+         alternate_again.proxy.as_ref().unwrap().port
+      );
+
+      // If the replacement is blocked too, the remaining healthy exit wins.
+      assert!(client.block_primary(&alternate));
+      let next = client.alternate_primary(&pinned).unwrap();
+      assert_ne!(
+         next.proxy.as_ref().unwrap().port,
+         alternate.proxy.as_ref().unwrap().port
+      );
    }
 
    #[test]

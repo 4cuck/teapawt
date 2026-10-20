@@ -143,6 +143,17 @@ impl ProxyPool {
       self.at_port(self.endpoints[0].port)
    }
 
+   /// Every configured exit. The HTTP layer uses this list to move traffic
+   /// away from a port that X temporarily rate-limited at the edge.
+   #[must_use]
+   pub fn all(&self) -> Vec<ProxyConfig> {
+      self
+         .endpoints
+         .iter()
+         .map(|endpoint| self.at_port(endpoint.port))
+         .collect()
+   }
+
    fn at_port(&self, port: u16) -> ProxyConfig {
       let endpoint = self
          .endpoints

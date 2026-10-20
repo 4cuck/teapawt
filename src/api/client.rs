@@ -290,6 +290,9 @@ impl ApiClient {
       } else if let Some(ref pool) = proxies {
          client = client.with_default_proxy(pool.first());
       }
+      if let Some(ref pool) = proxies {
+         client = client.with_primary_proxies(pool.all());
+      }
       if !fallback_proxies.is_empty() {
          client = client.with_fallback_proxies(fallback_proxies);
       }
@@ -837,18 +840,24 @@ impl ApiClient {
          let body = response.text().await.unwrap_or_default();
 
          if status.as_u16() == 429 {
+            let body_trim = body.trim_start();
+            let ip_throttle = body_trim.is_empty() || body_trim.starts_with('<');
+            if ip_throttle {
+               tracing::warn!(
+                  session_id = session.id,
+                  session_user = %session.username,
+                  endpoint,
+                  "X edge rate-limited this proxy exit"
+               );
+               // The edge block is the IP, not this account's window.
+               self.sessions.refund_if_metered(session, endpoint).await;
+               return Err(Error::IpThrottled);
+            }
             tracing::warn!(
                session_id = session.id,
                session_user = %session.username,
                "API request failed: {status} - {body}"
             );
-            let body_trim = body.trim_start();
-            let ip_throttle = body_trim.is_empty() || body_trim.starts_with('<');
-            if ip_throttle {
-               // The edge block is the IP, not this account's window.
-               self.sessions.refund_if_metered(session, endpoint).await;
-               return Err(Error::IpThrottled);
-            }
             self.sessions.disarm_meter(session);
             if !limit_recorded {
                self
