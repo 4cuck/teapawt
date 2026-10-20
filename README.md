@@ -105,9 +105,14 @@ second search does not pay a new SOCKS + TLS handshake.
 - Search result pages seed user ids and prefetch a few profiles so a click
   often hits cache.
 
-Empty HTTP 404s from SearchTimeline are treated as a brief X/WAF blip
-(`TransientUpstream`) and retried on another session. Dead cookies are 401,
-or 403 with code 326 — not those empty 404s.
+Some otherwise valid cookie accounts are not allowed to search: X answers
+their `SearchTimeline` calls with an empty HTTP 404. teapawt retries the same
+search on another session. When that session returns results, the first
+account is recorded in `session-limits.json` and permanently left out of
+search rotation; it can still serve other operations. If both sessions return
+nothing, teapawt treats it as an upstream/query-id problem instead of blaming
+either account. Dead cookies are 401, or 403 with code 326 — not those empty
+404s.
 
 Some queries fail with X error 214 (`Query is denylisted in Search Content
 Control tool`). That is X's platform denylist, not a teapawt setting.
