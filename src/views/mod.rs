@@ -1,5 +1,7 @@
 pub mod donate;
 pub mod embed;
+pub mod explore;
+pub mod game;
 pub mod layout;
 pub mod notes;
 pub mod preferences;

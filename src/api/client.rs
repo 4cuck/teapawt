@@ -1018,6 +1018,9 @@ impl ApiClient {
                headers.insert("x-client-transaction-id", val);
             }
             if let Some(referer) = endpoints::search_referer(endpoint, variables)
+               .or_else(|| endpoints::explore_referer(endpoint, variables))
+               .or_else(|| endpoints::trend_referer(endpoint, variables))
+               .or_else(|| endpoints::game_referer(endpoint, variables))
                && let Ok(val) = header::HeaderValue::from_str(&referer)
             {
                headers.insert(header::REFERER, val);

@@ -5,6 +5,9 @@ mod conversation;
 pub mod edit_history;
 mod entity;
 mod media;
+mod explore;
+mod game;
+mod story;
 mod search;
 mod timeline;
 mod tweet;
@@ -15,6 +18,12 @@ pub use community::{CommunityInfo, CommunityQueryData, parse_community, parse_co
 pub use conversation::parse_conversation;
 pub use search::{
    parse_list, parse_list_members, parse_list_search, parse_retweeters, parse_user_search,
+};
+pub use explore::parse_explore;
+pub use story::{parse_trend_story, story_clues, story_post_refs};
+pub use game::{
+   GameSide, NflGame, ScheduledGame, json_skeleton, parse_nfl_game, parse_nfl_schedule,
+   parse_tweets_by_ids, tweets_in_timeline,
 };
 pub use timeline::{parse_list_timeline, parse_search_timeline, parse_timeline};
 pub use user::parse_user;

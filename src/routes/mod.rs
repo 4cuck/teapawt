@@ -6,6 +6,8 @@ mod community;
 mod debug;
 mod donate;
 mod embed;
+mod explore;
+mod game;
 pub mod helpers;
 mod intent;
 mod list;
@@ -20,6 +22,7 @@ mod search;
 mod seo;
 mod status;
 mod timeline;
+mod trending;
 mod unsupported;
 
 pub use app::router;

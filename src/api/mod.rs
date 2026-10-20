@@ -16,6 +16,10 @@ mod tid;
 pub use auth::*;
 pub use client::*;
 pub use http::HttpClient;
-pub use parser::CommunityInfo;
+pub use parser::{
+   CommunityInfo, GameSide, NflGame, ScheduledGame, json_skeleton, parse_nfl_game,
+   parse_nfl_schedule, parse_trend_story, parse_tweets_by_ids, story_clues, story_post_refs,
+   tweets_in_timeline,
+};
 pub use proxy_pool::{ProxyPool, load_fallback_proxies};
 pub use tid::*;

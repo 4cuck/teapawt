@@ -73,6 +73,22 @@ pub fn rss_search(query: &str) -> String {
    rss(&format!("search:{}", query.to_lowercase()))
 }
 
+pub fn explore(slug: &str, cursor: Option<&str>) -> String {
+   format!("explore:{slug}:{}", cursor.unwrap_or(""))
+}
+
+pub fn explore_tabs() -> String {
+   "explore:tabs".to_owned()
+}
+
+pub fn nfl_schedule() -> String {
+   "nfl:schedule".to_owned()
+}
+
+pub fn trend_story(id: &str) -> String {
+   format!("trend:{id}")
+}
+
 pub fn search_timeline(query: &str, product: &str, cursor: Option<&str>) -> String {
    format!(
       "search:{}:{}:{}",

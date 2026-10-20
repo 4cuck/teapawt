@@ -1,4 +1,5 @@
 /// Twitter/X API constants and endpoints.
+use data_encoding::BASE64;
 use serde_json::json;
 
 pub const CONSUMER_KEY: &str = "3nVuSoBZnx6U4vzUxf5w";
@@ -22,6 +23,21 @@ pub const GRAPH_TWEET_DETAIL: &str = "flqCy6kvOMolEquuRpOaHQ/TweetDetail";
 /// Web `SearchTimeline` query, from a logged-in Chrome 152 capture of Latest,
 /// Top, People, and Media.
 pub const GRAPH_SEARCH_TIMELINE: &str = "ph2fARFabkwfxqmSKQ1OPw/SearchTimeline";
+/// Web `ExplorePage` query, from a logged-in Chrome capture of `/explore`.
+pub const GRAPH_EXPLORE_PAGE: &str = "BMib5Px-wibex8mYlOUhmQ/ExplorePage";
+/// Web `GenericTimelineById` query. Each Explore tab is one of these timelines.
+pub const GRAPH_GENERIC_TIMELINE: &str = "cW93hZ3nlNYbYcUROF5r5A/GenericTimelineById";
+/// Score, teams, and play ids for one NFL game. Chrome sends this from the
+/// game Highlights page.
+pub const GRAPH_NFL_GAME: &str = "CN2G3v-dUfNQe3NNv-Lxqw/NFLGameHydrate";
+/// Posts attached to a game. The Highlights page loads this timeline.
+pub const GRAPH_SPORTS_GAME_TOP: &str = "kYTK7T6VUvMvsIUab_n_cA/SportsGameTopTimeline";
+/// Hydrates the clip ids the game page already knows.
+pub const GRAPH_TWEETS_BY_IDS: &str = "aiX7QIJ4jp1QR8wT32vkHQ/TweetResultsByRestIds";
+/// Season schedule. Used to list games on the Sports tab.
+pub const GRAPH_NFL_SCHEDULE: &str = "I0s-QbdS2Bq_PRCSTCoz8g/NFLSchedule";
+/// Web `AiTrendByRestId`. `/i/trending/{id}` loads the story writeup and posts.
+pub const GRAPH_AI_TREND: &str = "70JIli1rci1EkuMbkjGBiw/AiTrendByRestId";
 /// Lists search uses the same query id with `product=Lists`.
 pub const GRAPH_SEARCH_LISTS: &str = GRAPH_SEARCH_TIMELINE;
 pub const GRAPH_LIST_BY_ID: &str = "T-YE5ZY0cd0UVtWu8AP04Q/ListByRestId";
@@ -73,6 +89,12 @@ pub const USER_REPOSTS_FEATURES: &str = r#"{"rweb_video_screen_enabled":false,"r
 /// Same feature set the web client sent with `SearchTimeline` (tweets, people,
 /// media, and lists) in the Chrome 152 capture.
 pub const SEARCH_FEATURES: &str = USER_REPOSTS_FEATURES;
+/// Features sent with `ExplorePage` and `GenericTimelineById` in the Chrome
+/// capture of Explore. Sports context is off; otherwise this matches search.
+pub const EXPLORE_FEATURES: &str = r#"{"articles_preview_enabled":true,"c9s_tweet_anatomy_moderator_badge_enabled":true,"communities_web_enable_tweet_community_results_fetch":true,"content_disclosure_ai_generated_indicator_enabled":true,"content_disclosure_indicator_enabled":true,"creator_subscriptions_tweet_preview_api_enabled":true,"freedom_of_speech_not_reach_fetch_enabled":true,"graphql_is_translatable_rweb_tweet_is_translatable_enabled":true,"longform_notetweets_consumption_enabled":true,"longform_notetweets_inline_media_enabled":false,"longform_notetweets_rich_text_read_enabled":true,"post_ctas_fetch_enabled":false,"premium_content_api_read_enabled":false,"profile_label_improvements_pcf_label_in_post_enabled":true,"responsive_web_edit_tweet_api_enabled":true,"responsive_web_enhance_cards_enabled":false,"responsive_web_graphql_timeline_navigation_enabled":true,"responsive_web_grok_analysis_button_from_backend":true,"responsive_web_grok_analyze_button_fetch_trends_enabled":false,"responsive_web_grok_analyze_post_followups_enabled":true,"responsive_web_grok_annotations_enabled":true,"responsive_web_grok_community_note_auto_translation_is_enabled":true,"responsive_web_grok_image_annotation_enabled":true,"responsive_web_grok_imagine_annotation_enabled":true,"responsive_web_grok_share_attachment_enabled":true,"responsive_web_grok_show_grok_translated_post":true,"responsive_web_jetfuel_frame":true,"responsive_web_nested_quote_preview_enabled":true,"responsive_web_profile_redirect_enabled":true,"responsive_web_twitter_article_tweet_consumption_enabled":true,"rweb_cashtags_composer_attachment_enabled":true,"rweb_cashtags_enabled":true,"rweb_conversational_replies_downvote_enabled":false,"rweb_sports_post_context_enabled":false,"rweb_tipjar_consumption_enabled":false,"rweb_video_screen_enabled":false,"standardized_nudges_misinfo":true,"tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled":true,"verified_phone_label_enabled":false,"view_counts_everywhere_api_enabled":true}"#;
+/// Features sent with `TweetResultsByRestIds` on the game Highlights page.
+pub const TWEET_RESULTS_FEATURES: &str = r#"{"creator_subscriptions_tweet_preview_api_enabled":true,"premium_content_api_read_enabled":false,"communities_web_enable_tweet_community_results_fetch":true,"c9s_tweet_anatomy_moderator_badge_enabled":true,"responsive_web_grok_analyze_button_fetch_trends_enabled":false,"responsive_web_grok_analyze_post_followups_enabled":true,"rweb_cashtags_composer_attachment_enabled":true,"responsive_web_jetfuel_frame":true,"rweb_sports_post_context_enabled":false,"responsive_web_grok_share_attachment_enabled":true,"responsive_web_grok_annotations_enabled":true,"articles_preview_enabled":true,"responsive_web_edit_tweet_api_enabled":true,"rweb_conversational_replies_downvote_enabled":false,"graphql_is_translatable_rweb_tweet_is_translatable_enabled":true,"view_counts_everywhere_api_enabled":true,"longform_notetweets_consumption_enabled":true,"responsive_web_twitter_article_tweet_consumption_enabled":true,"content_disclosure_indicator_enabled":true,"content_disclosure_ai_generated_indicator_enabled":true,"responsive_web_grok_show_grok_translated_post":true,"responsive_web_grok_analysis_button_from_backend":true,"post_ctas_fetch_enabled":false,"freedom_of_speech_not_reach_fetch_enabled":true,"standardized_nudges_misinfo":true,"tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled":true,"rweb_cashtags_enabled":true,"longform_notetweets_rich_text_read_enabled":true,"longform_notetweets_inline_media_enabled":false,"profile_label_improvements_pcf_label_in_post_enabled":true,"responsive_web_profile_redirect_enabled":true,"rweb_tipjar_consumption_enabled":false,"verified_phone_label_enabled":false,"responsive_web_nested_quote_preview_enabled":true,"responsive_web_grok_image_annotation_enabled":true,"responsive_web_grok_imagine_annotation_enabled":true,"responsive_web_grok_community_note_auto_translation_is_enabled":true,"responsive_web_graphql_timeline_navigation_enabled":true}"#;
+pub const TWEET_RESULTS_TOGGLES: &str = r#"{"withArticleRichContentState":true,"withArticlePlainText":false,"withArticleSummaryText":true,"withArticleVoiceOver":true,"withPayments":false}"#;
 /// Same feature set the web client sent with the Lists search query.
 pub const LIST_SEARCH_FEATURES: &str = SEARCH_FEATURES;
 /// Features sent with `ListByRestId` when a list page opens.
@@ -218,6 +240,94 @@ pub fn community_media_vars(community_id: &str, cursor: Option<&str>) -> String 
    }))
 }
 
+/// Prefix of every Explore tab id in the Chrome capture:
+/// `Timeline:` plus the fixed bytes that precede the tab name.
+const EXPLORE_TIMELINE_MARK: &[u8] = b"Timeline:\x0c\x00\xb6\x0b\x00\x01\x00\x00\x00";
+
+/// `ExplorePage` always sends `cursor`, empty on the first page.
+pub fn nfl_game_vars(game_id: &str) -> String {
+   json!({ "includeRecentGames": false, "rest_id": game_id }).to_string()
+}
+
+pub fn sports_game_top_vars(game_id: &str) -> String {
+   json!({ "gameId": game_id, "count": 20 }).to_string()
+}
+
+pub fn tweets_by_ids_vars(ids: &[String]) -> String {
+   json!({
+      "tweetIds": ids,
+      "includePromotedContent": true,
+      "withBirdwatchNotes": true,
+      "withVoice": true,
+      "withCommunity": true,
+   })
+   .to_string()
+}
+
+/// The schedule window Chrome sent while the Highlights page was open.
+pub fn ai_trend_vars(trend_id: &str) -> String {
+   json!({
+      "trendId": trend_id,
+      "includePromotedContent": false,
+      "withBirdwatchNotes": false,
+      "withVoice": false,
+      "withCommunity": false,
+   })
+   .to_string()
+}
+
+pub fn nfl_schedule_vars() -> String {
+   json!({
+      "start_time": "1785556800000",
+      "end_time": "1803877200000",
+   })
+   .to_string()
+}
+
+pub fn explore_page_vars(cursor: Option<&str>) -> String {
+   json!({ "cursor": cursor.unwrap_or("") }).to_string()
+}
+
+/// Variables for one Explore tab. The cursor is omitted on the first page,
+/// matching the capture.
+pub fn generic_timeline_vars(timeline_id: &str, cursor: Option<&str>) -> String {
+   vars(json!({
+      "timelineId": timeline_id,
+      "count": 20,
+      "cursor": cursor,
+      "withQuickPromoteEligibilityTweetFields": true,
+   }))
+}
+
+/// Base64 timeline id for an Explore tab name (`trending`, `highlights`,
+/// `for_you`). The shape is the one Chrome sent for each `/explore/tabs/` page.
+pub fn explore_timeline_id(name: &str) -> Option<String> {
+   if name.is_empty() || name.len() > 40 || !name.is_ascii() {
+      return None;
+   }
+   let mut raw = Vec::with_capacity(EXPLORE_TIMELINE_MARK.len() + name.len() + 3);
+   raw.extend_from_slice(EXPLORE_TIMELINE_MARK);
+   let Ok(len) = u8::try_from(name.len()) else {
+      return None;
+   };
+   raw.push(len);
+   raw.extend_from_slice(name.as_bytes());
+   raw.extend_from_slice(&[0, 0]);
+   Some(BASE64.encode(&raw))
+}
+
+pub fn explore_timeline_name(id: &str) -> Option<String> {
+   let raw = BASE64.decode(id.as_bytes()).ok()?;
+   let rest = raw.strip_prefix(EXPLORE_TIMELINE_MARK)?;
+   let (len, rest) = rest.split_first()?;
+   let len = usize::from(*len);
+   if rest.len() != len + 2 || rest.get(len..)? != [0, 0] {
+      return None;
+   }
+   let name = str::from_utf8(rest.get(..len)?).ok()?;
+   Some(name.to_owned())
+}
+
 pub fn search_vars(raw_query: &str, cursor: Option<&str>, product: &str) -> String {
    vars(json!({
       "rawQuery": raw_query,
@@ -262,6 +372,54 @@ pub fn search_referer(endpoint: &str, variables: &str) -> Option<String> {
       "https://x.com/search?q={}&src=typed_query{tab}",
       percent_encoding::utf8_percent_encode(query, URI_COMPONENT)
    ))
+}
+
+/// The Explore page a tab request is made from. Chrome sends `/explore` for
+/// the home of Explore and `/explore/tabs/{name}` for every other tab.
+pub fn explore_referer(endpoint: &str, variables: &str) -> Option<String> {
+   if endpoint.ends_with("/ExplorePage") {
+      return Some("https://x.com/explore".to_owned());
+   }
+   if !endpoint.ends_with("/GenericTimelineById") {
+      return None;
+   }
+   let variables: serde_json::Value = serde_json::from_str(variables).ok()?;
+   let id = variables.get("timelineId")?.as_str()?;
+   let name = explore_timeline_name(id)?;
+   if name == "for_you" {
+      Some("https://x.com/explore".to_owned())
+   } else {
+      Some(format!("https://x.com/explore/tabs/{name}"))
+   }
+}
+
+/// Referer for a trending story. Chrome calls `AiTrendByRestId` from
+/// `/i/trending/{id}`.
+pub fn trend_referer(endpoint: &str, variables: &str) -> Option<String> {
+   if !endpoint.ends_with("/AiTrendByRestId") {
+      return None;
+   }
+   let variables: serde_json::Value = serde_json::from_str(variables).ok()?;
+   let id = variables.get("trendId")?.as_str()?;
+   Some(format!("https://x.com/i/trending/{id}"))
+}
+
+/// Referer for the NFL game APIs, which Chrome calls from the Highlights page.
+pub fn game_referer(endpoint: &str, variables: &str) -> Option<String> {
+   let game_call = endpoint.ends_with("/NFLGameHydrate")
+      || endpoint.ends_with("/SportsGameTopTimeline")
+      || endpoint.ends_with("/TweetResultsByRestIds")
+      || endpoint.ends_with("/NFLSchedule");
+   if !game_call {
+      return None;
+   }
+   let variables: serde_json::Value = serde_json::from_str(variables).ok()?;
+   let id = variables
+      .get("rest_id")
+      .or_else(|| variables.get("gameId"))
+      .and_then(serde_json::Value::as_str)
+      .unwrap_or("2055084502741811200");
+   Some(format!("https://x.com/i/nfl/game/{id}?page=highlights"))
 }
 
 /// Variables for the web client's Lists tab. `querySource` is `typed_query`
@@ -320,6 +478,67 @@ mod tests {
          Some("https://x.com/search?q=cats%20and%20dogs&src=typed_query")
       );
       assert!(search_referer("x/UserTweets", "{}").is_none());
+   }
+
+   #[test]
+   fn explore_timeline_ids_match_the_chrome_capture() {
+      assert_eq!(
+         explore_timeline_id("trending").as_deref(),
+         Some("VGltZWxpbmU6DAC2CwABAAAACHRyZW5kaW5nAAA=")
+      );
+      assert_eq!(
+         explore_timeline_id("news").as_deref(),
+         Some("VGltZWxpbmU6DAC2CwABAAAABG5ld3MAAA==")
+      );
+      assert_eq!(
+         explore_timeline_id("sports").as_deref(),
+         Some("VGltZWxpbmU6DAC2CwABAAAABnNwb3J0cwAA")
+      );
+      assert_eq!(
+         explore_timeline_id("entertainment").as_deref(),
+         Some("VGltZWxpbmU6DAC2CwABAAAADWVudGVydGFpbm1lbnQAAA==")
+      );
+      assert_eq!(
+         explore_timeline_id("for_you").as_deref(),
+         Some("VGltZWxpbmU6DAC2CwABAAAAB2Zvcl95b3UAAA==")
+      );
+      assert_eq!(
+         explore_timeline_id("highlights").as_deref(),
+         Some("VGltZWxpbmU6DAC2CwABAAAACmhpZ2hsaWdodHMAAA==")
+      );
+      assert_eq!(
+         explore_timeline_name("VGltZWxpbmU6DAC2CwABAAAACHRyZW5kaW5nAAA=").as_deref(),
+         Some("trending")
+      );
+      assert!(explore_timeline_id("").is_none());
+   }
+
+   #[test]
+   fn explore_referer_is_the_explore_page() {
+      assert_eq!(
+         explore_referer("BMib5Px-wibex8mYlOUhmQ/ExplorePage", r#"{"cursor":""}"#).as_deref(),
+         Some("https://x.com/explore")
+      );
+      let trending = generic_timeline_vars(
+         &explore_timeline_id("highlights").expect("highlights id"),
+         None,
+      );
+      assert_eq!(
+         explore_referer("cW93hZ3nlNYbYcUROF5r5A/GenericTimelineById", &trending).as_deref(),
+         Some("https://x.com/explore/tabs/highlights")
+      );
+      let first: serde_json::Value = serde_json::from_str(&explore_page_vars(None)).expect("vars");
+      assert_eq!(first["cursor"], "");
+      let page: serde_json::Value =
+         serde_json::from_str(&generic_timeline_vars("ID", Some("CURSOR"))).expect("vars");
+      assert_eq!(page["cursor"], "CURSOR");
+      assert_eq!(page["count"], 20);
+      assert!(
+         serde_json::from_str::<serde_json::Value>(&generic_timeline_vars("ID", None))
+            .expect("vars")
+            .get("cursor")
+            .is_none()
+      );
    }
 }
 

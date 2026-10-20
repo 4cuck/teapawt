@@ -609,7 +609,7 @@ async fn sitemap_static(State(state): State<AppState>, headers: HeaderMap) -> Re
    let static_paths = [
       ("/", "daily", "1.0"),
       ("/about", "weekly", "0.9"),
-      ("/explore", "weekly", "0.4"),
+      ("/explore", "hourly", "0.7"),
       ("/help", "weekly", "0.4"),
       ("/search", "hourly", "0.8"),
       ("/robots.txt", "daily", "0.2"),

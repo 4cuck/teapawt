@@ -26,6 +26,17 @@ pub const SEARCH_CURSOR: u64 = 3 * 60;
 /// cursor is preferable to exhausting another account on an old scroll path.
 pub const SEARCH_CURSOR_STALE: u64 = 15 * 60;
 
+/// First page of an Explore tab. Short, same as search, so topics stay current.
+pub const EXPLORE: u64 = 60;
+
+/// Serve a stale Explore page while one refresh runs.
+pub const EXPLORE_STALE: u64 = 4 * 60;
+
+/// A later Explore page. The cursor is opaque and stable for a few minutes.
+pub const EXPLORE_CURSOR: u64 = 3 * 60;
+
+pub const EXPLORE_CURSOR_STALE: u64 = 15 * 60;
+
 /// Long TTL for immutable mappings like user ID -> username.
 pub const USER_ID_MAPPING: u64 = 24 * 60 * 60; // 1 day
 

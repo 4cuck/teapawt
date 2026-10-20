@@ -73,6 +73,8 @@ pub struct SessionPool {
    limits: Arc<RwLock<HashMap<i64, SessionLimits>>>,
    cursor: Arc<AtomicUsize>,
    state: Option<Arc<LimitState>>,
+   /// `sessions.jsonl` this pool was loaded from.
+   source_path: String,
 }
 
 /// Writes the rate-limit map to disk so a restart does not forget which
@@ -173,6 +175,7 @@ impl SessionPool {
          limits: Arc::new(RwLock::new(limits)),
          cursor: Arc::new(AtomicUsize::new(0)),
          state,
+         source_path: path.to_owned(),
       };
       pool.spawn_flusher();
 
@@ -690,6 +693,74 @@ impl SessionPool {
       self.persist_now().await;
    }
 
+   /// The account refused the settings write (`You may not change this
+   /// setting`). Take it out of the live pool and keep the credentials in a
+   /// side file so they can be fixed later.
+   pub async fn retire_filter_blocked(&self, session_id: i64) {
+      self.mark_rejected(session_id).await;
+      let Some(credentials) = self
+         .sessions
+         .iter()
+         .find(|slot| slot.credentials.id == session_id)
+         .map(|slot| Arc::clone(&slot.credentials))
+      else {
+         return;
+      };
+      let limits = self
+         .limits
+         .read()
+         .await
+         .get(&session_id)
+         .cloned()
+         .unwrap_or_default();
+      let session = Session {
+         id: credentials.id,
+         username: credentials.username.clone(),
+         pending: 0,
+         limited: limits.limited,
+         limited_at: limits.limited_at,
+         apis: limits.apis,
+         kind: credentials.kind,
+         oauth_token: credentials.oauth_token.clone(),
+         oauth_secret: credentials.oauth_secret.clone(),
+         auth_token: credentials.auth_token.clone(),
+         ct0: credentials.ct0.clone(),
+      };
+      let Ok(line) = serde_json::to_string(&session) else {
+         return;
+      };
+      let blocked = filter_blocked_path(&self.source_path);
+      match append_session_line(&blocked, session_id, &line).await {
+         Ok(true) => {
+            if let Err(err) = rewrite_sessions_without(&self.source_path, session_id).await {
+               tracing::warn!(
+                  session_id,
+                  "saved the blocked session but could not remove it from {}: {err}",
+                  self.source_path
+               );
+            } else {
+               tracing::warn!(
+                  session_id,
+                  username = %credentials.username,
+                  path = %blocked,
+                  "moved session that cannot change account settings"
+               );
+            }
+         },
+         Ok(false) => {
+            tracing::warn!(
+               session_id,
+               path = %blocked,
+               "session was already in the filter-blocked file"
+            );
+            let _ = rewrite_sessions_without(&self.source_path, session_id).await;
+         },
+         Err(err) => {
+            tracing::warn!(session_id, "failed to save filter-blocked session: {err}");
+         },
+      }
+   }
+
    /// A cookie session's id and cookie header, for requests that fetch x.com's
    /// web app rather than the API. Takes no concurrency permit, since those
    /// pages are outside the per-session API rate limits. The id lets the fetch
@@ -860,6 +931,69 @@ pub fn oauth1_sign(
       .join(", ");
 
    format!("OAuth {auth_header}")
+}
+
+fn filter_blocked_path(sessions_path: &str) -> String {
+   if let Ok(path) = env::var("TEAPOT_FILTER_BLOCKED_FILE")
+      && !path.is_empty()
+   {
+      return path;
+   }
+   let path = Path::new(sessions_path);
+   let name = "sessions-filter-blocked.jsonl";
+   path.parent()
+      .filter(|dir| !dir.as_os_str().is_empty())
+      .map(|dir| dir.join(name).to_string_lossy().into_owned())
+      .unwrap_or_else(|| name.to_owned())
+}
+
+/// `true` when the line was written. `false` when this id is already there.
+async fn append_session_line(path: &str, session_id: i64, line: &str) -> Result<bool> {
+   if file_has_session(path, session_id).await? {
+      return Ok(false);
+   }
+   let mut file = fs::OpenOptions::new()
+      .create(true)
+      .append(true)
+      .open(path)
+      .await?;
+   use tokio::io::AsyncWriteExt as _;
+   file.write_all(line.as_bytes()).await?;
+   file.write_all(b"\n").await?;
+   Ok(true)
+}
+
+async fn file_has_session(path: &str, session_id: i64) -> Result<bool> {
+   let content = match fs::read_to_string(path).await {
+      Ok(content) => content,
+      Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+      Err(err) => return Err(err.into()),
+   };
+   Ok(content.lines().any(|line| session_line_id(line) == Some(session_id)))
+}
+
+async fn rewrite_sessions_without(path: &str, session_id: i64) -> Result<()> {
+   let content = fs::read_to_string(path).await?;
+   let mut kept = String::with_capacity(content.len());
+   for line in content.lines() {
+      if line.trim().is_empty() {
+         continue;
+      }
+      if session_line_id(line) == Some(session_id) {
+         continue;
+      }
+      kept.push_str(line);
+      kept.push('\n');
+   }
+   let tmp = format!("{path}.tmp");
+   fs::write(&tmp, kept).await?;
+   fs::rename(&tmp, path).await?;
+   Ok(())
+}
+
+fn session_line_id(line: &str) -> Option<i64> {
+   let value: serde_json::Value = serde_json::from_str(line).ok()?;
+   value.get("id")?.as_i64()
 }
 
 fn percent_encode(input: &str) -> String {
@@ -1094,5 +1228,48 @@ mod tests {
       assert_eq!(pool.unchecked_for("b/SearchTimeline").await, vec![1, 3]);
 
       fs::remove_file(path).await.unwrap();
+   }
+
+   #[tokio::test]
+   async fn a_locked_filter_session_leaves_the_pool_file() {
+      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
+      unsafe { env::set_var("TEAPOT_FILTER_BLOCKED_FILE", "") };
+      let path = env::temp_dir().join(format!(
+         "teapot-session-pool-blocked-{}.jsonl",
+         process::id()
+      ));
+      fs::write(
+         &path,
+         concat!(
+            r#"{"id":790,"username":"christina69nh5","kind":"cookie","auth_token":"a","ct0":"c"}"#,
+            "\n",
+            r#"{"id":2,"username":"fine","kind":"cookie","auth_token":"b","ct0":"d"}"#,
+            "\n"
+         ),
+      )
+      .await
+      .unwrap();
+      let pool = SessionPool::load(path.to_str().unwrap(), 4).await.unwrap();
+      pool.retire_filter_blocked(790).await;
+
+      let kept = fs::read_to_string(&path).await.unwrap();
+      assert!(!kept.contains("christina69nh5"));
+      assert!(kept.contains("\"id\":2"));
+      let blocked = path
+         .parent()
+         .unwrap()
+         .join("sessions-filter-blocked.jsonl");
+      let side = fs::read_to_string(&blocked).await.unwrap();
+      assert!(side.contains("christina69nh5"));
+      assert!(side.contains("\"auth_token\":\"a\""));
+
+      let lease = pool
+         .acquire("x/UserTweets", Some(SessionKind::Cookie))
+         .await
+         .unwrap();
+      assert_eq!(lease.id, 2);
+
+      fs::remove_file(&path).await.unwrap();
+      fs::remove_file(&blocked).await.unwrap();
    }
 }

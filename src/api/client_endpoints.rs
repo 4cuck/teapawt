@@ -10,6 +10,83 @@ use super::{
    audio_space_host, audio_space_status, broadcast_id_from_url, broadcast_status,
    clamp_community_value, endpoints, header, hosted_by, parser, space_id_from_url, timeout,
 };
+use crate::types::ExploreFeed;
+
+/// Entry ids only, so an empty Explore tab can be diagnosed without logging posts.
+fn explore_shape(value: &serde_json::Value) -> String {
+   let mut ids = Vec::new();
+   collect_entry_ids(value, &mut ids);
+   if !ids.is_empty() {
+      return ids.join(",");
+   }
+   let mut out = String::new();
+   skim_shape(value, 0, &mut out);
+   out
+}
+
+fn skim_shape(value: &serde_json::Value, depth: usize, out: &mut String) {
+   if depth > 3 || out.len() > 500 {
+      return;
+   }
+   match value {
+      serde_json::Value::Object(map) => {
+         out.push('{');
+         for (index, (key, child)) in map.iter().enumerate() {
+            if index > 6 {
+               out.push('…');
+               break;
+            }
+            if index > 0 {
+               out.push(',');
+            }
+            out.push_str(key);
+            out.push(':');
+            skim_shape(child, depth + 1, out);
+         }
+         out.push('}');
+      },
+      serde_json::Value::Array(items) => {
+         out.push('[');
+         out.push_str(&items.len().to_string());
+         if let Some(first) = items.first() {
+            skim_shape(first, depth + 1, out);
+         }
+         out.push(']');
+      },
+      serde_json::Value::Null => out.push_str("null"),
+      serde_json::Value::String(text) => {
+         out.push_str("s");
+         out.push_str(&text.len().to_string());
+      },
+      serde_json::Value::Bool(_) => out.push('b'),
+      serde_json::Value::Number(_) => out.push('n'),
+   }
+}
+
+fn collect_entry_ids(value: &serde_json::Value, ids: &mut Vec<String>) {
+   match value {
+      serde_json::Value::Array(items) => {
+         for item in items {
+            collect_entry_ids(item, ids);
+         }
+      },
+      serde_json::Value::Object(object) => {
+         if ids.len() >= 12 {
+            return;
+         }
+         if let Some(id) = object.get("entryId").and_then(serde_json::Value::as_str) {
+            ids.push(id.to_owned());
+         }
+         for child in object.values() {
+            collect_entry_ids(child, ids);
+         }
+      },
+      serde_json::Value::Null
+      | serde_json::Value::Bool(_)
+      | serde_json::Value::Number(_)
+      | serde_json::Value::String(_) => {},
+   }
+}
 
 /// Where a profile's photo rail comes from.
 enum Rail {
@@ -671,6 +748,100 @@ impl ApiClient {
          )
          .await?;
       Ok(parser::parse_list_search(&data))
+   }
+
+   /// The Explore home. Chrome loads this on `/explore`.
+   pub async fn explore_page(&self, cursor: Option<&str>) -> Result<ExploreFeed> {
+      let data = self
+         .graphql_request::<serde_json::Value>(
+            endpoints::GRAPH_EXPLORE_PAGE,
+            &endpoints::explore_page_vars(cursor),
+            endpoints::EXPLORE_FEATURES,
+            None,
+         )
+         .await?;
+      Ok(parser::parse_explore(&data))
+   }
+
+   /// One Explore tab (`trending`, `news`, `highlights`, …).
+   pub async fn explore_timeline(&self, name: &str, cursor: Option<&str>) -> Result<ExploreFeed> {
+      let timeline_id = endpoints::explore_timeline_id(name)
+         .ok_or_else(|| Error::InvalidUrl("Invalid explore tab".into()))?;
+      let data = self
+         .graphql_request::<serde_json::Value>(
+            endpoints::GRAPH_GENERIC_TIMELINE,
+            &endpoints::generic_timeline_vars(&timeline_id, cursor),
+            endpoints::EXPLORE_FEATURES,
+            None,
+         )
+         .await?;
+      let feed = parser::parse_explore(&data);
+      if feed.items.is_empty() {
+         tracing::debug!(name, shape = %explore_shape(&data), "explore timeline had no rows");
+      }
+      Ok(feed)
+   }
+
+   pub async fn nfl_game(&self, game_id: &str) -> Result<serde_json::Value> {
+      self.graphql_request(
+         endpoints::GRAPH_NFL_GAME,
+         &endpoints::nfl_game_vars(game_id),
+         "{}",
+         None,
+      )
+      .await
+   }
+
+   pub async fn sports_game_top(&self, game_id: &str) -> Result<serde_json::Value> {
+      self.graphql_request(
+         endpoints::GRAPH_SPORTS_GAME_TOP,
+         &endpoints::sports_game_top_vars(game_id),
+         endpoints::EXPLORE_FEATURES,
+         None,
+      )
+      .await
+   }
+
+   pub async fn tweets_by_ids(&self, ids: &[String]) -> Result<serde_json::Value> {
+      self.graphql_request(
+         endpoints::GRAPH_TWEETS_BY_IDS,
+         &endpoints::tweets_by_ids_vars(ids),
+         endpoints::TWEET_RESULTS_FEATURES,
+         Some(endpoints::TWEET_RESULTS_TOGGLES),
+      )
+      .await
+   }
+
+   /// One timeline by the id X already returned, such as a story's Top posts.
+   pub async fn timeline_by_id(&self, timeline_id: &str) -> Result<serde_json::Value> {
+      self.graphql_request(
+         endpoints::GRAPH_GENERIC_TIMELINE,
+         &endpoints::generic_timeline_vars(timeline_id, None),
+         endpoints::EXPLORE_FEATURES,
+         None,
+      )
+      .await
+   }
+
+   /// The writeup and posts for one trending story.
+   pub async fn ai_trend(&self, trend_id: &str) -> Result<serde_json::Value> {
+      self.graphql_request(
+         endpoints::GRAPH_AI_TREND,
+         &endpoints::ai_trend_vars(trend_id),
+         endpoints::EXPLORE_FEATURES,
+         None,
+      )
+      .await
+   }
+
+   pub async fn nfl_schedule(&self) -> Result<serde_json::Value> {
+      self.graphql_request(
+         endpoints::GRAPH_NFL_SCHEDULE,
+         &endpoints::nfl_schedule_vars(),
+         "{}",
+         None,
+      )
+      .await
    }
 
    /// Get list by ID.

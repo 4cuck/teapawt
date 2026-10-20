@@ -61,6 +61,9 @@ impl ApiClient {
                   session_id = id,
                   "failed to clear NSFW filters or age gate: {err}"
                );
+               if filter_setting_locked(&err.to_string()) {
+                  self.sessions.retire_filter_blocked(id).await;
+               }
             },
          }
          sleep(Duration::from_millis(250)).await;
@@ -285,6 +288,10 @@ impl ApiClient {
       }
       Ok(headers)
    }
+}
+
+fn filter_setting_locked(message: &str) -> bool {
+   message.to_ascii_lowercase().contains("may not change this setting")
 }
 
 fn birthdate_already_locked(message: &str) -> bool {

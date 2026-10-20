@@ -13,7 +13,9 @@ use maud::{PreEscaped, html};
 use crate::{
    AppState,
    types::Prefs,
-   views::{donate as donate_view, layout::PageLayout, search as search_view},
+   views::{
+      donate as donate_view, explore as explore_view, layout::PageLayout, search as search_view,
+   },
 };
 
 const HOME_DESCRIPTION: &str = "nitter.cf is a public Nitter replacement — a privacy-focused Twitter/X frontend. nitter.net shut down; this instance is a drop-in successor.";
@@ -70,7 +72,6 @@ pub fn router() -> Router<AppState> {
    Router::new()
       .route("/", get(home))
       .route("/about", get(about))
-      .route("/explore", get(|| async { Redirect::to("/about") }))
       .route("/help", get(|| async { Redirect::to("/about") }))
 }
 
@@ -99,6 +100,8 @@ async fn home(
                }
            }
            p class="landing-hub-more" {
+               a href="/explore" { "Explore" }
+               " · "
                a href="/about" { "About this instance" }
                " · "
                a href="/search" { "Search posts" }
@@ -107,11 +110,15 @@ async fn home(
            }
        }
    };
-   let progress = crate::donations::month_progress(
-      &state.donations,
-      state.config.donations.goal_cents,
-   )
-   .await;
+   let (trends, progress) = tokio::join!(
+      super::explore::trending_preview(&state),
+      crate::donations::month_progress(&state.donations, state.config.donations.goal_cents),
+   );
+   let preview = explore_view::render_explore_preview(&trends);
+   let below = html! {
+       (hub)
+       (preview)
+   };
    let drive = Some(donate_view::donate_drive_banner(&progress));
    let firefox_note = (firefox && !prefs.proxy_media && !warning_hidden)
       .then(|| crate::views::preferences::firefox_media_warning(false));
@@ -123,7 +130,7 @@ async fn home(
           @if let Some(firefox_note) = firefox_note { (firefox_note) }
       })
    };
-   let content = search_view::render_search_page(notice, Some(hub));
+   let content = search_view::render_search_page(notice, Some(below));
    let head = html! {
        meta property="og:type" content="website";
        script type="application/ld+json" {
