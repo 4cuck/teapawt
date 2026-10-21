@@ -37,6 +37,7 @@ sessions.jsonl
 session-limits.json
 search-denylist.json
 graphql-ops.json
+web-bot-auth.pkcs8
 
 # Documented dummy list only — never a real vendor file
 !proxies.example.txt

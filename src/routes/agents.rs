@@ -28,7 +28,8 @@ const DISCOVERY_LINKS: &str = "\
 </.well-known/agent-card.json>; rel=\"describedby\", \
 </.well-known/agent-skills/index.json>; rel=\"describedby\", \
 </.well-known/ai-catalog.json>; rel=\"describedby\", \
-</.well-known/poppy.json>; rel=\"describedby\"";
+</.well-known/poppy.json>; rel=\"describedby\", \
+</.well-known/http-message-signatures-directory>; rel=\"describedby\"";
 
 const SKILL_MD: &str = r#"# Read public posts on teapawt
 
@@ -68,6 +69,10 @@ pub fn router() -> Router<AppState> {
       .route("/.well-known/agent-skills/read-teapawt/SKILL.md", get(skill_md))
       .route("/.well-known/ai-catalog.json", get(ai_catalog))
       .route("/.well-known/poppy.json", get(poppy))
+      .route(
+         "/.well-known/http-message-signatures-directory",
+         get(signature_directory),
+      )
       .route("/.well-known/oauth-protected-resource", get(protected_resource))
       .route("/.well-known/oauth-authorization-server", get(authorization_server))
       .route("/.well-known/openid-configuration", get(authorization_server))
@@ -726,6 +731,10 @@ async fn skill_md() -> Response {
    markdown_doc(SKILL_MD)
 }
 
+async fn signature_directory(headers: HeaderMap) -> Response {
+   crate::web_bot_auth::directory(&headers)
+}
+
 async fn poppy(State(state): State<AppState>, headers: HeaderMap) -> Response {
    let domain = requested_domain(&headers, &state);
    json_doc(
@@ -1052,7 +1061,7 @@ fn hex(bytes: &[u8]) -> String {
    out
 }
 
-fn sha256(message: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(message: &[u8]) -> [u8; 32] {
    const K: [u32; 64] = [
       0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
       0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,

@@ -9,6 +9,7 @@ mod translation;
 mod types;
 mod utils;
 mod views;
+mod web_bot_auth;
 
 use std::{
    env,

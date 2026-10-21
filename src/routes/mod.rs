@@ -1,6 +1,6 @@
 //! HTTP routes.
 
-mod agents;
+pub(crate) mod agents;
 mod app;
 mod broadcast;
 mod community;
