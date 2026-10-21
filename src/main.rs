@@ -216,6 +216,7 @@ async fn main() -> eyre::Result<()> {
             header::STRICT_TRANSPORT_SECURITY,
             HeaderValue::from_static("max-age=31536000; includeSubDomains"),
         ))
+        .layer(middleware::from_fn(routes::negotiate))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(45),

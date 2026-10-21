@@ -9,6 +9,7 @@ use crate::AppState;
 pub fn router() -> Router<AppState> {
    Router::new()
       .merge(super::seo::router())
+      .merge(super::agents::router())
       .merge(super::pages::router())
       .merge(super::donate::router())
       .merge(super::unsupported::router())

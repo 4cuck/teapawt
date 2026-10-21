@@ -211,6 +211,8 @@ impl<'a> PageLayout<'a> {
                   meta name="bingbot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1";
                   meta name="yandex" content="index, follow";
                   link rel="sitemap" type="application/xml" title="Sitemap" href="/sitemap.xml";
+                  link rel="ai-catalog" href="/.well-known/ai-catalog.json";
+                  link rel="describedby" href="/llms.txt" type="text/plain";
 
                   @if let Some(page_url) = self.page_url() {
                       link rel="canonical" href=(page_url);
@@ -252,6 +254,7 @@ impl<'a> PageLayout<'a> {
 
                   // Scripts in <head> with defer
                   script src="/js/htmx.min.js" defer="" {}
+                  script src="/js/webmcp.js" defer="" {}
                   script src="/js/site.js" defer="" {}
                   script src="/js/threadContext.js" defer="" {}
                   script src="/js/imageLightbox.js" defer="" {}

@@ -406,157 +406,209 @@ async fn robots_txt(State(state): State<AppState>, headers: HeaderMap) -> Respon
 
 User-agent: *
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Googlebot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Googlebot-Image
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Googlebot-News
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Googlebot-Video
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: AdsBot-Google
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: APIs-Google
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Mediapartners-Google
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Bingbot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: bingbot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: BingPreview
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: msnbot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: AdIdxBot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Yandex
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: YandexBot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: YandexImages
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: YandexVideo
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: YandexMedia
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: YandexNews
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: DuckDuckBot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: DuckAssistBot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Slurp
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Yahoo
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Baiduspider
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Baiduspider-image
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Baiduspider-video
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Sogou
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Sogou web spider
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Applebot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Applebot-Extended
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: FacebookBot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: facebookexternalhit
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Facebot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Twitterbot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: LinkedInBot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Pinterest
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Pinterestbot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: ia_archiver
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: archive.org_bot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: ia_archiver-web.archive.org
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Qwantify
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: SeznamBot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: MojeekBot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: PetalBot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: Bytespider
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: GPTBot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: ChatGPT-User
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: ClaudeBot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: anthropic-ai
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: PerplexityBot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: YouBot
 Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
+Agentmap: {origin}/.well-known/ai-catalog.json
 Sitemap: {origin}/sitemap.xml
 "
    );
