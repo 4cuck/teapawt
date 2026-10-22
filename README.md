@@ -2,7 +2,9 @@
 
 A privacy-focused Twitter/X frontend written in Rust.
 
-Public instance: [nitter.cf](https://nitter.cf) (also [xitter.cf](https://xitter.cf)).
+Public instances: [nitter.cf](https://nitter.cf), [xitter.cf](https://xitter.cf), [teapaw.org](https://teapaw.org), [teapawt.net](https://teapawt.net), and [teapawt.org](https://teapawt.org).
+
+Live status for those instances: [status.d420.net](https://status.d420.net). Scraping is allowed on them. Ask the operator before scraping any other Nitter instance.
 
 ## Features
 
