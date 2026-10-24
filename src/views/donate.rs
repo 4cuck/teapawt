@@ -4,22 +4,8 @@ use crate::donations::{MonthProgress, format_usd};
 
 pub fn donate_drive_banner(progress: &MonthProgress) -> Markup {
    html! {
-       aside class="donate-drive" {
-           strong { "xitter.cf needs " (format_usd(progress.goal_cents)) " every month." }
-           (money_meter(progress))
-           p {
-               "About 1,000 accounts are in rotation. Scraping from one IP is allowed. "
-               "Cloudflare Turnstile may turn on if someone starts spamming searches. "
-               "If you scrape from multiple IPs through proxies, Turnstile turns on for about 3 to 5 minutes, depending on how many requests arrive at once. "
-               a href="/donate" { "Donate any amount" }
-               " up to $10,000."
-           }
-           p {
-               "If you are not satisfied with this site and do not want to donate because a feature is missing or it is too slow, "
-               a href="https://github.com/4cuck/teapawt/issues" target="_blank" rel="noopener noreferrer" { "request it on GitHub" }
-               ". I will add it as quickly as I can."
-           }
-           p { (posting_plans()) }
+       div class="donate-drive donate-drive-meter" {
+           (money_meter(progress, true))
        }
    }
 }
@@ -44,7 +30,7 @@ pub fn render_donate_page(
                "If you scrape from multiple IPs through proxies, Turnstile turns on for about 3 to 5 minutes, depending on how many requests arrive at once. "
                "Choose an amount from $1 to $10,000."
            }
-           (money_meter(progress))
+           (money_meter(progress, false))
            @if canceled {
                p class="donate-status" { "The payment was canceled. Nothing was charged." }
            }
@@ -111,7 +97,7 @@ fn posting_plans() -> Markup {
    }
 }
 
-fn money_meter(progress: &MonthProgress) -> Markup {
+fn money_meter(progress: &MonthProgress, donate_link: bool) -> Markup {
    let raised = format_usd(progress.raised_cents);
    let goal = format_usd(progress.goal_cents);
    let percent = progress.percent();
@@ -124,7 +110,10 @@ fn money_meter(progress: &MonthProgress) -> Markup {
                @if progress.met() {
                    span class="donate-meter-status" { "Goal met" }
                }
-               span { (percent) "%" }
+               span class="donate-meter-percent" { (percent) "%" }
+               @if donate_link {
+                   a class="donate-meter-button" href="/donate" { "Donate" }
+               }
            }
            div class="donate-meter-track" role="meter"
                aria-valuemin="0"

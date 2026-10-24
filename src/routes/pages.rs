@@ -116,6 +116,7 @@ async fn home(
    );
    let preview = explore_view::render_explore_preview(&trends);
    let below = html! {
+       (mirror_announcement())
        (hub)
        (preview)
    };
@@ -152,6 +153,32 @@ async fn home(
       HeaderValue::from_static("private, no-store"),
    );
    response
+}
+
+fn mirror_announcement() -> maud::Markup {
+   html! {
+       aside class="home-announce" {
+           strong { "Spare addresses" }
+           p {
+               "This site is also "
+               a href="https://nitter.gq" { "nitter.gq" }
+               ", "
+               a href="https://xitter.gq" { "xitter.gq" }
+               ", "
+               a href="https://teapawt.net" { "teapawt.net" }
+               ", "
+               a href="https://teapawt.org" { "teapawt.org" }
+               ", and "
+               a href="https://teapaw.org" { "teapaw.org" }
+               ". If a spam filter blocks nitter.cf or xitter.cf, open one of those. "
+               a href="https://d420.net/" { "d420.net" }
+               " lists which names are up."
+           }
+           p {
+               "429s from X are watched. When they start, more accounts and proxy IPs go into rotation."
+           }
+       }
+   }
 }
 
 async fn about(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {

@@ -998,11 +998,10 @@ input[type="text"], input[type="date"], input[type="number"], select {
 .landing-page {
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: flex-start;
   width: min(100%, 760px);
-  min-height: calc(100vh - 128px);
   margin: 0 auto;
-  padding: clamp(48px, 10vh, 120px) 24px 48px;
+  padding: 16px 24px 48px;
   text-align: center;
 }
 .landing-copy { max-width: 650px; margin: 0 auto; }
@@ -1303,6 +1302,22 @@ nav.explore-tabbar {
 .firefox-media-warning strong { display: block; margin-bottom: 4px; }
 .firefox-media-warning p { margin: 0; }
 
+.home-announce {
+  width: min(100%, 640px);
+  margin: 22px auto 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.home-announce strong { display: block; margin-bottom: 4px; }
+.home-announce p { margin: 0 0 6px; }
+.home-announce p:last-child { margin-bottom: 0; }
+.home-announce a { color: var(--accent); }
+
 .donate-drive {
   width: min(100%, 640px);
   margin: 0 auto 18px;
@@ -1318,6 +1333,12 @@ nav.explore-tabbar {
 .donate-drive p { margin: 0 0 6px; }
 .donate-drive p:last-child { margin-bottom: 0; }
 .donate-drive a, .donate-note a { color: var(--accent); }
+.donate-drive-meter {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.donate-drive-meter .donate-meter { margin: 0 auto 18px; }
 .donate-meter {
   margin: 8px 0 10px;
   padding: 10px 12px 8px;
@@ -1353,9 +1374,27 @@ nav.explore-tabbar {
   color: var(--accent);
   letter-spacing: 0.03em;
 }
-.donate-meter-top span:last-child {
+.donate-meter-top span:last-child,
+.donate-meter-percent {
   margin-left: auto;
   font-variant-numeric: tabular-nums;
+}
+.donate-meter-button {
+  margin-left: 10px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: var(--tp-primary-container);
+  color: var(--tp-on-primary-container);
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+.donate-meter-button:hover {
+  background: var(--tp-primary);
+  color: var(--tp-on-primary);
 }
 .donate-meter-track {
   height: 10px;
@@ -1579,7 +1618,7 @@ nav.explore-tabbar {
   .timeline-header { padding: 8px; }
   .search-panel { border-radius: 0; }
   .preferences-panel { max-width: none; margin: 0; }
-  .landing-page { min-height: calc(100vh - 100px); padding: 70px 20px 48px; }
+  .landing-page { padding: 8px 20px 48px; }
   .landing-search { margin-top: 30px; }
   .landing-search form { grid-template-columns: auto minmax(0, 1fr); padding: 8px 14px; }
   .landing-search button { grid-column: 1 / -1; width: 100%; }
