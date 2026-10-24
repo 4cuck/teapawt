@@ -259,7 +259,7 @@ impl<'a> PageLayout<'a> {
                   script src="/js/threadContext.js" defer="" {}
                   script src="/js/imageLightbox.js" defer="" {}
                   @if infinite_scroll {
-                      script src="/js/infiniteScroll.js?teapawt=6" defer="" {}
+                      script src="/js/infiniteScroll.js?teapawt=7" defer="" {}
                   }
                   @if hls_playback {
                       script src="/js/hls.min.js" defer="" {}

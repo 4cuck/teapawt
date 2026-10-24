@@ -39,6 +39,9 @@ const GAP = 10;
 // pages (roughly 40 raw tweets), then require a manual click so an all-text
 // query cannot burn through account quota in the background.
 const EMPTY_PAGE_LIMIT = 2;
+// A gallery that fits on one screen never scrolls, so nothing would ask for
+// the next page. Keep filling until it overflows, but only a few pages.
+const FILL_PAGE_LIMIT = 4;
 
 class Masonry {
     constructor(container) {
@@ -176,10 +179,54 @@ window.onload = function () {
     const masonry = masonryEl ? new Masonry(masonryEl) : null;
     let loading = false;
     let emptyPagePaused = false;
+    let autoFilled = 0;
+
+    function fitsWithoutScrolling() {
+        return html.scrollHeight <= html.clientHeight + 2;
+    }
+
+    // Wait until gallery images have a size, then measure. Checking too early
+    // sees a short page and would keep requesting the whole timeline.
+    function whenSettled(done) {
+        const root = masonry ? masonry.container : (container || document);
+        const pending = [...root.querySelectorAll("img")].filter(img => !img.complete);
+        let finished = false;
+        const finish = () => {
+            if (finished) return;
+            finished = true;
+            if (masonry) masonry.syncHeights();
+            done();
+        };
+        if (!pending.length) {
+            finish();
+            return;
+        }
+        let left = pending.length;
+        const one = () => {
+            left -= 1;
+            if (left <= 0) finish();
+        };
+        for (const img of pending) {
+            img.addEventListener("load", one, { once: true });
+            img.addEventListener("error", one, { once: true });
+        }
+        setTimeout(finish, 1200);
+    }
+
+    function continueIfShort(added) {
+        if (added <= 0) return;
+        whenSettled(() => {
+            if (!fitsWithoutScrolling() || autoFilled >= FILL_PAGE_LIMIT) return;
+            autoFilled += 1;
+            handleScroll(0, 0);
+        });
+    }
 
     function handleScroll(failed, skipped) {
         if (loading || emptyPagePaused) return;
-        if (html.scrollTop + html.clientHeight < html.scrollHeight - 3000) return;
+        const short = fitsWithoutScrolling();
+        if (short && autoFilled >= FILL_PAGE_LIMIT) return;
+        if (!short && html.scrollTop + html.clientHeight < html.scrollHeight - 3000) return;
 
         const loadMore = getLoadMore(document);
         if (!loadMore) return;
@@ -229,6 +276,7 @@ window.onload = function () {
                     newLoadMore.classList.add("masonry-visible");
                 }
                 loading = false;
+                continueIfShort(newItems.length);
                 if (newItems.length === 0 && newLoadMore != null) {
                     const emptyPages = (skipped || 0) + 1;
                     if (emptyPages < EMPTY_PAGE_LIMIT) {
@@ -273,6 +321,7 @@ window.onload = function () {
                 loadMore.replaceWith(newLoadMore);
             }
             loading = false;
+            continueIfShort(items.length);
             if (items.length === 0 && newLoadMore != null) {
                 const emptyPages = (skipped || 0) + 1;
                 if (emptyPages < EMPTY_PAGE_LIMIT) {
@@ -299,5 +348,7 @@ window.onload = function () {
     }
 
     window.addEventListener("scroll", () => handleScroll(0, 0));
+    window.addEventListener("resize", () => handleScroll(0, 0));
+    whenSettled(() => handleScroll(0, 0));
 };
 // @license-end
