@@ -356,7 +356,11 @@ impl SessionPool {
          }
 
          // Spend the local window under the write lock, then take a permit.
-         // A session that is only busy is remembered so we can wait on it.
+         // An account already at its concurrency cap is skipped. The call
+         // goes to the next account that still has a free slot, so a crawl
+         // keeps moving instead of queueing behind the account that filled up.
+         // Waiting is only for the case where every usable account is already
+         // at the cap.
          let mut wait_on = None;
          for index in eligible {
             let api = api_for(self.sessions[index].credentials.kind);
@@ -1054,6 +1058,52 @@ mod tests {
          normalized_parameter_string(&params),
          "a2=r%20b&a3=2%20q&a3=a&b5=%3D&c%40=&c2="
       );
+   }
+
+   #[tokio::test]
+   async fn a_full_account_hands_the_next_call_over_immediately() {
+      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
+      let path = env::temp_dir().join(format!(
+         "teapot-session-pool-spread-{}.jsonl",
+         process::id()
+      ));
+      fs::write(
+         &path,
+         concat!(
+            r#"{"id":1,"username":"one","kind":"cookie","auth_token":"a","ct0":"c"}"#,
+            "\n",
+            r#"{"id":2,"username":"two","kind":"cookie","auth_token":"b","ct0":"d"}"#,
+            "\n"
+         ),
+      )
+      .await
+      .unwrap();
+      let pool = SessionPool::load(path.to_str().unwrap(), 2).await.unwrap();
+
+      let first = pool
+         .acquire("TweetDetail", Some(SessionKind::Cookie))
+         .await
+         .unwrap();
+      let other = if first.id == 1 { 2 } else { 1 };
+      let second = pool
+         .acquire_excluding("TweetDetail", Some(SessionKind::Cookie), Some(other))
+         .await
+         .unwrap();
+      assert_eq!(first.id, second.id);
+
+      let next = timeout(
+         Duration::from_millis(50),
+         pool.acquire("TweetDetail", Some(SessionKind::Cookie)),
+      )
+      .await
+      .expect("a full account should be skipped, not waited on")
+      .unwrap();
+      assert_eq!(next.id, other);
+
+      drop(first);
+      drop(second);
+      drop(next);
+      fs::remove_file(path).await.unwrap();
    }
 
    #[tokio::test]
