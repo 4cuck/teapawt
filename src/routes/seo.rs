@@ -365,7 +365,7 @@ const SEED_PROFILES: &[&str] = &[
 ];
 
 /// Profile paths worth listing for each handle.
-const PROFILE_PATHS: &[&str] = &["", "/with_replies", "/reposts", "/media", "/search"];
+const PROFILE_PATHS: &[&str] = &["", "/with_replies", "/reposts", "/articles", "/media", "/search"];
 const XML_CONTENT_TYPE: &str = "text/xml; charset=utf-8";
 
 pub fn router() -> Router<AppState> {

@@ -11,6 +11,7 @@ pub enum TimelineKind {
    Tweets,
    Replies,
    Reposts,
+   Articles,
    Media,
    Search,
 }

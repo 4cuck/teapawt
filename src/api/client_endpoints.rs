@@ -450,6 +450,19 @@ impl ApiClient {
       parser::parse_timeline(&data)
    }
 
+   /// Profile Articles tab (`UserArticlesTweets`).
+   pub async fn get_user_articles(&self, user_id: &str, cursor: Option<&str>) -> Result<Timeline> {
+      let data = self
+         .graphql_request::<UserTimelineData>(
+            endpoints::GRAPH_USER_ARTICLES,
+            &endpoints::user_articles_vars(user_id, cursor),
+            endpoints::USER_REPOSTS_FEATURES,
+            Some(endpoints::USER_ARTICLES_FIELD_TOGGLES),
+         )
+         .await?;
+      parser::parse_timeline(&data)
+   }
+
    /// Profile Reposts tab (`UserRepostsTimeline`).
    pub async fn get_user_reposts(&self, user_id: &str, cursor: Option<&str>) -> Result<Timeline> {
       let data = self

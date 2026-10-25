@@ -291,6 +291,9 @@ pub fn render_timeline_tabs(active_tab: TimelineKind, username: &str) -> Markup 
            li class=(if active_tab == TimelineKind::Reposts { "tab-item active" } else { "tab-item" }) {
                a href=(format!("/{username}/reposts")) { "Reposts" }
            }
+           li class=(if active_tab == TimelineKind::Articles { "tab-item active" } else { "tab-item" }) {
+               a href=(format!("/{username}/articles")) { "Articles" }
+           }
            li class=(if active_tab == TimelineKind::Media { "tab-item active" } else { "tab-item" }) {
                a href=(format!("/{username}/media")) { "Media" }
            }
@@ -325,6 +328,7 @@ pub fn tab_to_kind(tab: &str) -> TimelineKind {
    match tab {
       "replies" | "with_replies" => TimelineKind::Replies,
       "reposts" => TimelineKind::Reposts,
+      "articles" => TimelineKind::Articles,
       "media" => TimelineKind::Media,
       "search" => TimelineKind::Search,
       _ => TimelineKind::Tweets,
