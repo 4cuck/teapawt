@@ -15,6 +15,19 @@ pub fn account_context(username: &str) -> String {
    format!("ac:{}", username.to_lowercase())
 }
 
+pub fn articles_flag(user_id: &str) -> String {
+   format!("af:{user_id}")
+}
+
+/// A filtered posts page: All, original posts, or highlights, recent or popular.
+pub fn filtered_posts(username: &str, filter: &str, sort: &str, cursor: Option<&str>) -> String {
+   let name = username.to_lowercase();
+   match cursor {
+      Some(cursor) => format!("fp:{name}:{filter}:{sort}:{cursor}"),
+      None => format!("fp:{name}:{filter}:{sort}"),
+   }
+}
+
 pub fn timeline(username: &str, kind: &str) -> String {
    format!("tl:{}:{kind}", username.to_lowercase())
 }

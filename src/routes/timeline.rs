@@ -181,6 +181,25 @@ pub struct TimelineQuery {
    pub view: Option<String>,
    /// For AJAX infinite scroll requests - returns only tweet HTML.
    pub scroll: Option<String>,
+   /// Posts menu: `all`, `posts`, or `highlights`.
+   pub filter: Option<String>,
+   /// Posts menu sort: `recent` or `popular`.
+   pub sort: Option<String>,
+}
+
+fn posts_filter(raw: Option<&str>) -> &'static str {
+   match raw.unwrap_or("").trim() {
+      "posts" | "originals" => "posts",
+      "highlights" | "highlight" => "highlights",
+      _ => "all",
+   }
+}
+
+fn posts_sort(raw: Option<&str>) -> &'static str {
+   match raw.unwrap_or("").trim() {
+      "popular" | "likes" => "popular",
+      _ => "recent",
+   }
 }
 
 pub fn router() -> Router<AppState> {
@@ -192,6 +211,100 @@ pub fn router() -> Router<AppState> {
       .route("/{username}/articles", get(user_articles))
       .route("/{username}/media", get(user_media))
       .route("/{username}/search", get(user_search))
+}
+
+async fn filtered_posts(
+   state: &AppState,
+   prefs: &Prefs,
+   username: &str,
+   cursor: Option<&str>,
+   filter: &'static str,
+   sort: &'static str,
+   is_scroll: bool,
+) -> Result<Response> {
+   let user = get_cached_user(state, username).await?;
+   let popular = sort == "popular";
+   let cache_key = cache_keys::filtered_posts(username, filter, sort, cursor);
+   let timeline_result = if let Some(Hit::Fresh(hit) | Hit::Stale(hit)) =
+      state.cache.lookup::<Timeline>(&cache_key)
+   {
+      Ok(hit)
+   } else {
+      let result = state
+         .api
+         .get_filtered_posts(&user.id, cursor, filter, popular)
+         .await;
+      if let Ok(ref data) = result {
+         state
+            .cache
+            .set_swr(&cache_key, data, ttl::DEFAULT, ttl::DEFAULT_STALE);
+      }
+      result
+   };
+
+   match timeline_result {
+      Ok(data) => {
+         let (mut tweets, next_cursor) = extract_timeline(data);
+         helpers::enrich_tweet_groups(state, &mut tweets).await;
+         for group in &tweets {
+            helpers::remember_tweets(state, group);
+         }
+         let base_url = timeline::posts_href(&user.username, filter, sort);
+         if is_scroll {
+            let content = timeline::render_timeline_with_prefs(
+               &tweets,
+               &state.config,
+               next_cursor.as_deref(),
+               Some(&base_url),
+               prefs,
+               None,
+            );
+            return Ok(Html(content.into_string()).into_response());
+         }
+         let (photo_rail, show_articles) = tokio::join!(
+            helpers::photo_rail(state, username, &user.id),
+            helpers::user_has_articles(state, &user.id),
+         );
+         let newer = cursor.is_some().then_some(base_url.as_str());
+         let timeline_content = html! {
+             (timeline::render_timeline_with_prefs(
+                &tweets,
+                &state.config,
+                next_cursor.as_deref(),
+                Some(&base_url),
+                prefs,
+                newer,
+             ))
+         };
+         let menu = timeline::PostsMenu {
+            filter,
+            sort,
+            show_highlights: user.has_highlights || filter == "highlights",
+            show_articles,
+         };
+         let content = profile::render_profile_page(
+            &user,
+            &photo_rail,
+            &state.config,
+            prefs,
+            TimelineKind::Tweets,
+            &timeline_content,
+            "",
+            &menu,
+         );
+         let title = match filter {
+            "highlights" => format!("Highlights from @{}", user.username),
+            "posts" => format!("Posts from @{}", user.username),
+            _ => format!("{} (@{})", user.fullname, user.username),
+         };
+         let markup = layout::PageLayout::new(&state.config, &title, content)
+            .prefs(prefs)
+            .referer(&base_url)
+            .render();
+         Ok(Html(markup.into_string()).into_response())
+      },
+      Err(err) => Ok(helpers::api_error(&state.config, &err)),
+   }
 }
 
 async fn user_timeline(
@@ -224,9 +337,23 @@ async fn user_timeline(
 
    // Check if this is an AJAX scroll request
    let is_scroll = query.scroll.as_ref().is_some_and(|val| val == "true");
+   let filter = posts_filter(query.filter.as_deref());
+   let sort = posts_sort(query.sort.as_deref());
 
    // Extract prefs from cookies
    let prefs = Prefs::from_cookies(&jar, &state.config);
+   if filter != "all" || sort != "recent" {
+      return filtered_posts(
+         &state,
+         &prefs,
+         &username,
+         query.cursor.as_deref(),
+         filter,
+         sort,
+         is_scroll,
+      )
+      .await;
+   }
 
    let profile_result = if let Some(cursor) = query.cursor.as_deref() {
       load_profile_cursor(&state, &username, cursor).await
@@ -283,12 +410,20 @@ async fn user_timeline(
             helpers::prefetch_profiles(&state, first);
          }
 
+         let show_articles = helpers::user_has_articles(&state, &profile_data.user.id).await;
+         let menu = timeline::PostsMenu {
+            filter: "all",
+            sort: "recent",
+            show_highlights: profile_data.user.has_highlights,
+            show_articles,
+         };
          let content = profile::render_profile_with_prefs(
             &profile_data,
             &state.config,
             tab,
             Some(&prefs),
             newer.as_deref(),
+            &menu,
          );
          let markup = layout::PageLayout::new(&state.config, &title, content)
             .description(&desc)
@@ -425,6 +560,24 @@ async fn user_tab_handler(
                  if tab == TimelineKind::Media { view } else { "" },
              ))
          };
+         let show_articles = if tab == TimelineKind::Articles {
+            let has = tweets.iter().flatten().next().is_some();
+            state.cache.set_swr(
+               &cache_keys::articles_flag(&user.id),
+               &has,
+               ttl::ARTICLES_FLAG,
+               ttl::ARTICLES_FLAG_STALE,
+            );
+            has
+         } else {
+            helpers::user_has_articles(state, &user.id).await
+         };
+         let menu = timeline::PostsMenu {
+            filter: "all",
+            sort: "recent",
+            show_highlights: user.has_highlights,
+            show_articles,
+         };
          let content = profile::render_profile_page(
             &user,
             &photo_rail,
@@ -433,6 +586,7 @@ async fn user_tab_handler(
             tab,
             &timeline_content,
             view,
+            &menu,
          );
 
          let title = format!("{title_prefix} @{}", user.username);
@@ -584,6 +738,13 @@ async fn user_search(
              }
              (timeline::render_timeline_with_prefs(&tweets, &state.config, cursor.as_deref(), Some(&base_url), &prefs, newer))
          };
+         let show_articles = helpers::user_has_articles(&state, &user.id).await;
+         let menu = timeline::PostsMenu {
+            filter: "all",
+            sort: "recent",
+            show_highlights: user.has_highlights,
+            show_articles,
+         };
          let content = profile::render_profile_page(
             &user,
             &photo_rail,
@@ -592,6 +753,7 @@ async fn user_search(
             TimelineKind::Search,
             &timeline_content,
             "",
+            &menu,
          );
 
          let title = if search_query.is_empty() {

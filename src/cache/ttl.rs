@@ -37,6 +37,11 @@ pub const EXPLORE_CURSOR: u64 = 3 * 60;
 
 pub const EXPLORE_CURSOR_STALE: u64 = 15 * 60;
 
+/// Whether a profile has any articles. Publishing one shows the tab within an hour.
+pub const ARTICLES_FLAG: u64 = 60 * 60;
+/// Keep a known answer through a rate-limit blip.
+pub const ARTICLES_FLAG_STALE: u64 = 6 * 60 * 60;
+
 /// Long TTL for immutable mappings like user ID -> username.
 pub const USER_ID_MAPPING: u64 = 24 * 60 * 60; // 1 day
 

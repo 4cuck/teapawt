@@ -278,12 +278,47 @@ fn render_timeline_items(
    }
 }
 
+/// Which posts slice and sort the profile menu is showing.
+#[derive(Clone, Copy)]
+pub struct PostsMenu<'a> {
+   pub filter: &'a str,
+   pub sort: &'a str,
+   pub show_highlights: bool,
+   pub show_articles: bool,
+}
+
+/// Profile path for a posts filter. Defaults stay on `/{username}`.
+pub fn posts_href(username: &str, filter: &str, sort: &str) -> String {
+   let mut query = Vec::new();
+   if filter != "all" {
+      query.push(format!("filter={filter}"));
+   }
+   if sort != "recent" {
+      query.push(format!("sort={sort}"));
+   }
+   if query.is_empty() {
+      format!("/{username}")
+   } else {
+      format!("/{username}?{}", query.join("&"))
+   }
+}
+
 /// Render timeline with tabs (tweets, replies, media).
-pub fn render_timeline_tabs(active_tab: TimelineKind, username: &str) -> Markup {
+pub fn render_timeline_tabs(active_tab: TimelineKind, username: &str, menu: &PostsMenu<'_>) -> Markup {
+   let on_posts = active_tab == TimelineKind::Tweets;
+   let posts_label = match menu.filter {
+      "posts" if on_posts => "Posts",
+      "highlights" if on_posts => "Highlights",
+      _ => "Tweets",
+   };
    html! {
        ul class="tab" {
-           li class=(if active_tab == TimelineKind::Tweets { "tab-item active" } else { "tab-item" }) {
-               a href=(format!("/{username}")) { "Tweets" }
+           li class=(if on_posts { "tab-item active" } else { "tab-item" }) {
+               @if on_posts {
+                   (render_posts_menu(username, posts_label, menu))
+               } @else {
+                   a href=(format!("/{username}")) { "Tweets" }
+               }
            }
            li class=(if active_tab == TimelineKind::Replies { "tab-item active wide" } else { "tab-item wide" }) {
                a href=(format!("/{username}/with_replies")) { "Tweets & Replies" }
@@ -291,14 +326,39 @@ pub fn render_timeline_tabs(active_tab: TimelineKind, username: &str) -> Markup 
            li class=(if active_tab == TimelineKind::Reposts { "tab-item active" } else { "tab-item" }) {
                a href=(format!("/{username}/reposts")) { "Reposts" }
            }
-           li class=(if active_tab == TimelineKind::Articles { "tab-item active" } else { "tab-item" }) {
-               a href=(format!("/{username}/articles")) { "Articles" }
+           @if menu.show_articles || active_tab == TimelineKind::Articles {
+               li class=(if active_tab == TimelineKind::Articles { "tab-item active" } else { "tab-item" }) {
+                   a href=(format!("/{username}/articles")) { "Articles" }
+               }
            }
            li class=(if active_tab == TimelineKind::Media { "tab-item active" } else { "tab-item" }) {
                a href=(format!("/{username}/media")) { "Media" }
            }
            li class=(if active_tab == TimelineKind::Search { "tab-item active" } else { "tab-item" }) {
                a href=(format!("/{username}/search")) { "Search" }
+           }
+       }
+   }
+}
+
+fn render_posts_menu(username: &str, label: &str, menu: &PostsMenu<'_>) -> Markup {
+   let recent = posts_href(username, menu.filter, "recent");
+   let popular = posts_href(username, menu.filter, "popular");
+   html! {
+       details class="posts-filter" {
+           summary {
+               span { (label) }
+               span class="posts-filter-chevron" aria-hidden="true" {}
+           }
+           div class="posts-filter-menu" {
+               a class=(if menu.filter == "all" { "on" } else { "" }) href=(posts_href(username, "all", menu.sort)) { "All" }
+               a class=(if menu.filter == "posts" { "on" } else { "" }) href=(posts_href(username, "posts", menu.sort)) { "Posts" }
+               @if menu.show_highlights || menu.filter == "highlights" {
+                   a class=(if menu.filter == "highlights" { "on" } else { "" }) href=(posts_href(username, "highlights", menu.sort)) { "Highlights" }
+               }
+               div class="posts-filter-label" { "Sort by" }
+               a class=(if menu.sort == "recent" { "on" } else { "" }) href=(recent) { "Most recent" }
+               a class=(if menu.sort == "popular" { "on" } else { "" }) href=(popular) { "Popular" }
            }
        }
    }

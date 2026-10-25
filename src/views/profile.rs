@@ -1,6 +1,8 @@
 use maud::{Markup, PreEscaped, html};
 
-use super::timeline::{render_timeline_tabs, render_timeline_with_pinned_and_prefs, tab_to_kind};
+use super::timeline::{
+   render_timeline_tabs, render_timeline_with_pinned_and_prefs, tab_to_kind, PostsMenu,
+};
 use crate::{
    config::Config,
    types::{GalleryPhoto, Prefs, Profile, TimelineKind, User},
@@ -21,6 +23,7 @@ pub fn render_profile_with_prefs(
    tab: &str,
    prefs: Option<&Prefs>,
    newer_url: Option<&str>,
+   menu: &PostsMenu<'_>,
 ) -> Markup {
    let groups = &profile.tweets.content;
    let cursor = profile.tweets.bottom.as_deref();
@@ -79,7 +82,7 @@ pub fn render_profile_with_prefs(
            } @else {
                // Timeline container - main content area
                div class="timeline-container" {
-                   (render_timeline_tabs(timeline_kind, &profile.user.username))
+                   (render_timeline_tabs(timeline_kind, &profile.user.username, menu))
                    (render_timeline_with_pinned_and_prefs(groups, config, cursor, Some(&base_url), pinned, prefs, newer_url))
                }
            }
@@ -99,6 +102,7 @@ pub fn render_profile_page(
    tab: TimelineKind,
    timeline_content: &Markup,
    view: &str,
+   menu: &PostsMenu<'_>,
 ) -> Markup {
    let hide_banner = prefs.hide_banner;
    let sticky = prefs.sticky_profile;
@@ -140,7 +144,7 @@ pub fn render_profile_page(
 
            div class=(container_class) {
                @if !is_gallery {
-                   (render_timeline_tabs(tab, &user.username))
+                   (render_timeline_tabs(tab, &user.username, menu))
                }
                (timeline_content)
            }

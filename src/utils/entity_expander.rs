@@ -16,7 +16,20 @@ use crate::types::{Entity, EntityKind};
 static MENTION_RE: LazyLock<Regex> =
    LazyLock::new(|| Regex::new("(^|[^A-Za-z0-9_])@([A-Za-z0-9_]{1,15})").unwrap());
 static HASHTAG_RE: LazyLock<Regex> =
-   LazyLock::new(|| Regex::new(r"(^|[^\w&;])([#$])(\w+)").unwrap());
+   LazyLock::new(|| Regex::new(r"(^|[^\w&;])(#)(\w+)").unwrap());
+/// A cashtag is `$` plus a ticker (`$TSLA`, `$BRK.B`), never a dollar amount.
+/// The regex crate has no lookahead, so a following digit or letter is rejected
+/// in `link_cashtags` (`$AAPL123` and `$ABCDEFG` stay plain text).
+static CASHTAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+   Regex::new(r"(?i)(^|[^\w&;])(\$)([a-z]{1,6}(?:[._][a-z]{1,2})?)").unwrap()
+});
+static CASHTAG_BODY_RE: LazyLock<Regex> =
+   LazyLock::new(|| Regex::new(r"(?i)^[a-z]{1,6}(?:[._][a-z]{1,2})?$").unwrap());
+
+/// True when `name` is a stock ticker, not digits from a price like `$250`.
+pub fn is_cashtag(name: &str) -> bool {
+   CASHTAG_BODY_RE.is_match(name.trim_start_matches('$'))
+}
 
 /// Convert character index to byte index.
 /// Twitter entities use character (code point) indices, not byte indices.
@@ -119,13 +132,19 @@ fn expand_entities_with_target(text: &str, entities: &[Entity], link_to_x: bool)
          },
          EntityKind::Symbol => {
             let symbol_name = entity_text.trim_start_matches('$');
-            let root = if link_to_x { "https://x.com" } else { "" };
-            let _ = write!(
-               result,
-               r#"<a href="{root}/search?q=%24{}">{}</a>"#,
-               url_encode(symbol_name),
-               entity_text,
-            );
+            // X sometimes hands back `$250` inside `$250,000`. That is a price,
+            // not a ticker, so leave it as text.
+            if !is_cashtag(symbol_name) {
+               result.push_str(&entity_text);
+            } else {
+               let root = if link_to_x { "https://x.com" } else { "" };
+               let _ = write!(
+                  result,
+                  r#"<a href="{root}/search?q=%24{}">{}</a>"#,
+                  url_encode(symbol_name),
+                  entity_text,
+               );
+            }
          },
          EntityKind::Url => {
             let display = if link_to_x {
@@ -165,7 +184,30 @@ pub fn expand_with_regex(text: &str) -> String {
    let escaped = escape_tags(text);
    let result = MENTION_RE.replace_all(&escaped, r#"$1<a href="/$2">@$2</a>"#);
    let result = HASHTAG_RE.replace_all(&result, r#"$1<a href="/search?q=%23$3">$2$3</a>"#);
-   result.into_owned()
+   link_cashtags(&result).into_owned()
+}
+
+/// Link `$TSLA`-style tickers. A match followed by another letter, digit, or
+/// underscore is a longer token (or a price) and is left alone.
+fn link_cashtags(text: &str) -> Cow<'_, str> {
+   CASHTAG_RE.replace_all(text, |caps: &regex::Captures| {
+      let end = caps.get(0).map(|m| m.end()).unwrap_or(0);
+      let ticker = caps.get(3).map(|m| m.as_str()).unwrap_or("");
+      let continues = text[end..]
+         .chars()
+         .next()
+         .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+      if continues || !is_cashtag(ticker) {
+         caps.get(0).map(|m| m.as_str()).unwrap_or("").to_owned()
+      } else {
+         let before = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+         let dollar = caps.get(2).map(|m| m.as_str()).unwrap_or("$");
+         format!(
+            r#"{before}<a href="/search?q=%24{}">{dollar}{ticker}</a>"#,
+            url_encode(ticker),
+         )
+      }
+   })
 }
 
 /// HTML escape special characters.
@@ -371,5 +413,42 @@ mod tests {
       assert!(fallback.contains("&lt;b&gt;"));
       assert!(fallback.contains(r#"<a href="/user">@user</a>"#));
       assert!(fallback.contains("&lt;/b&gt;"));
+   }
+
+   #[test]
+   fn dollar_amounts_are_not_cashtags() {
+      let text = "give me $25,000 for fun (the $250,000 my X video made) and $5";
+      let result = expand_with_regex(text);
+      assert_eq!(result, text);
+      assert_eq!(
+         expand_with_regex("$250000 and $AAPL123 and $ABCDEFG"),
+         "$250000 and $AAPL123 and $ABCDEFG"
+      );
+      assert!(!is_cashtag("250"));
+      assert!(!is_cashtag("$25,000"));
+   }
+
+   #[test]
+   fn ticker_cashtag_still_links() {
+      let result = expand_with_regex("buying $TSLA and $BRK.B today");
+      assert!(result.contains(r#"href="/search?q=%24TSLA""#));
+      assert!(result.contains(">$TSLA</a>"));
+      assert!(result.contains(r#"href="/search?q=%24BRK%2EB""#));
+      assert!(result.contains(">$BRK.B</a>"));
+      assert!(is_cashtag("TSLA"));
+      assert!(is_cashtag("BRK.B"));
+   }
+
+   #[test]
+   fn numeric_symbol_entity_stays_text() {
+      let text = "the $250,000 my X video made";
+      let entities = vec![Entity {
+         indices: (4, 8),
+         kind: EntityKind::Symbol,
+         ..Default::default()
+      }];
+      let result = expand_entities(text, &entities);
+      assert_eq!(result, text);
+      assert!(!result.contains("<a"));
    }
 }

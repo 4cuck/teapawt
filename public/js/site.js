@@ -3,12 +3,12 @@
 document.addEventListener("click", async (event) => {
   const target = event.target;
   const accountDetails = target instanceof Element
-    ? target.closest(".tweet-account-trigger, .account-context-trigger")
+    ? target.closest(".tweet-account-trigger, .account-context-trigger, .posts-filter")
     : null;
 
   if (!accountDetails) {
     document
-      .querySelectorAll(".tweet-account-trigger[open], .account-context-trigger[open]")
+      .querySelectorAll(".tweet-account-trigger[open], .account-context-trigger[open], .posts-filter[open]")
       .forEach((details) => {
         details.removeAttribute("open");
       });

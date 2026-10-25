@@ -50,6 +50,10 @@ pub const GRAPH_USER_REPOSTS: &str = "xqXxsWU5PFYzr90dfab6rg/UserRepostsTimeline
 /// Web query for a profile's Articles tab, from a logged-in Chrome capture of
 /// `/prestonjbyrne/articles`.
 pub const GRAPH_USER_ARTICLES: &str = "px0ZuoJAreztxT8_nJr9Xg/UserArticlesTweets";
+/// Original posts only. The Posts item in the profile posts menu.
+pub const GRAPH_USER_ORIGINALS: &str = "GMxl7_rXoC4G0o-kiH0oLA/UserOriginalsTimeline";
+/// Highlighted posts. Shown in that menu only when the account has some.
+pub const GRAPH_USER_HIGHLIGHTS: &str = "2vCerAWrlID9W2wM0pmuaA/UserHighlightsTweets";
 pub const GRAPH_USER_TWEETS_AND_REPLIES_V2: &str =
    "BDX77Xzqypdt11-mDfgdpQ/UserWithProfileTweetsAndRepliesQueryV2";
 pub const GRAPH_TWEET_EDIT_HISTORY: &str = "upS9teTSG45aljmP9oTuXA/TweetEditHistory";
@@ -131,11 +135,45 @@ pub fn tweet_detail_vars(focal_tweet_id: &str, cursor: Option<&str>, ranking_mod
 }
 
 pub fn user_tweets_vars(user_id: &str, cursor: Option<&str>) -> String {
-   vars(json!({
+   user_tweets_sorted_vars(user_id, cursor, false)
+}
+
+/// `UserTweets`, with Popular sort when requested.
+pub fn user_tweets_sorted_vars(user_id: &str, cursor: Option<&str>, popular: bool) -> String {
+   let mut value = json!({
       "userId": user_id, "cursor": cursor, "count": 20,
       "includePromotedContent": false,
       "withQuickPromoteEligibilityTweetFields": true, "withVoice": true,
-   }))
+   });
+   if popular {
+      value["sortByMostLiked"] = json!(true);
+   }
+   vars(value)
+}
+
+/// Original posts (`UserOriginalsTimeline`), as the profile Posts filter sends them.
+pub fn user_originals_vars(user_id: &str, cursor: Option<&str>, popular: bool) -> String {
+   let mut value = json!({
+      "userId": user_id, "cursor": cursor, "count": 20,
+      "includePromotedContent": true,
+      "withQuickPromoteEligibilityTweetFields": true, "withVoice": true,
+   });
+   if popular {
+      value["sortByMostLiked"] = json!(true);
+   }
+   vars(value)
+}
+
+/// Highlighted posts. `sortByMostLiked` is the Popular item in the same menu.
+pub fn user_highlights_vars(user_id: &str, cursor: Option<&str>, popular: bool) -> String {
+   let mut value = json!({
+      "userId": user_id, "cursor": cursor, "count": 20,
+      "includePromotedContent": true, "withVoice": true,
+   });
+   if popular {
+      value["sortByMostLiked"] = json!(true);
+   }
+   vars(value)
 }
 
 pub fn user_reposts_vars(user_id: &str, cursor: Option<&str>) -> String {

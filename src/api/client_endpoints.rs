@@ -450,6 +450,41 @@ impl ApiClient {
       parser::parse_timeline(&data)
    }
 
+   /// Posts menu: All (optionally Popular), original Posts, or Highlights.
+   pub async fn get_filtered_posts(
+      &self,
+      user_id: &str,
+      cursor: Option<&str>,
+      filter: &str,
+      popular: bool,
+   ) -> Result<Timeline> {
+      let (endpoint, variables, features, toggles) = match filter {
+         "posts" => (
+            endpoints::GRAPH_USER_ORIGINALS,
+            endpoints::user_originals_vars(user_id, cursor, popular),
+            endpoints::USER_REPOSTS_FEATURES,
+            endpoints::USER_REPOSTS_FIELD_TOGGLES,
+         ),
+         "highlights" => (
+            endpoints::GRAPH_USER_HIGHLIGHTS,
+            endpoints::user_highlights_vars(user_id, cursor, popular),
+            endpoints::USER_REPOSTS_FEATURES,
+            endpoints::USER_REPOSTS_FIELD_TOGGLES,
+         ),
+         _ if popular => (
+            endpoints::GRAPH_USER_TWEETS,
+            endpoints::user_tweets_sorted_vars(user_id, cursor, true),
+            endpoints::GQL_FEATURES,
+            endpoints::USER_TWEETS_FIELD_TOGGLES,
+         ),
+         _ => return self.get_user_tweets(user_id, cursor).await,
+      };
+      let data = self
+         .graphql_request::<UserTimelineData>(endpoint, &variables, features, Some(toggles))
+         .await?;
+      parser::parse_timeline(&data)
+   }
+
    /// Profile Articles tab (`UserArticlesTweets`).
    pub async fn get_user_articles(&self, user_id: &str, cursor: Option<&str>) -> Result<Timeline> {
       let data = self

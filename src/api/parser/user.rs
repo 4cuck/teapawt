@@ -114,6 +114,16 @@ impl TryFrom<&UserData> for User {
          .or(legacy.protected)
          .unwrap_or(false);
       let suspended = raw.unavailable_message;
+      let has_highlights = raw.highlights_info.as_ref().is_some_and(|info| {
+         info.can_highlight_tweets.unwrap_or(false)
+            && info
+               .highlighted_tweets
+               .as_deref()
+               .unwrap_or("0")
+               .parse::<i64>()
+               .unwrap_or(0)
+               > 0
+      });
 
       let is_blue = raw.is_blue_verified.unwrap_or(false);
       // Check verified_type first -- Business/Government accounts also have
@@ -237,6 +247,7 @@ impl TryFrom<&UserData> for User {
          verified_type,
          protected,
          suspended,
+         has_highlights,
          join_date,
       })
    }
@@ -285,5 +296,31 @@ mod tests {
       assert_eq!(user.location, "Pale Blue Dot");
       assert_eq!(user.verified_type, VerifiedType::Government);
       assert!(user.join_date.is_some());
+      assert!(!user.has_highlights);
+   }
+
+   #[test]
+   fn highlights_require_a_count() {
+      let raw: UserData = serde_json::from_str(
+         r#"{
+            "__typename": "User",
+            "rest_id": "1",
+            "core": {"name": "NFL", "screen_name": "NFL"},
+            "highlights_info": {"can_highlight_tweets": true, "highlighted_tweets": "187"}
+         }"#,
+      )
+      .unwrap();
+      assert!(User::try_from(&raw).unwrap().has_highlights);
+
+      let empty: UserData = serde_json::from_str(
+         r#"{
+            "__typename": "User",
+            "rest_id": "2",
+            "core": {"name": "Quiet", "screen_name": "quiet"},
+            "highlights_info": {"can_highlight_tweets": true, "highlighted_tweets": "0"}
+         }"#,
+      )
+      .unwrap();
+      assert!(!User::try_from(&empty).unwrap().has_highlights);
    }
 }

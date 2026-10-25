@@ -84,6 +84,31 @@ pub fn remember_user_id(state: &AppState, user: &User) {
    );
 }
 
+/// Whether this account has published an article.
+///
+/// X does not put that on the profile record, so the articles timeline is
+/// checked once and remembered. A failed check keeps the tab, so a rate limit
+/// cannot hide articles that are there.
+pub async fn user_has_articles(state: &AppState, user_id: &str) -> bool {
+   if user_id.is_empty() {
+      return false;
+   }
+   let key = cache_keys::articles_flag(user_id);
+   if let Some(Hit::Fresh(has) | Hit::Stale(has)) = state.cache.lookup(&key) {
+      return has;
+   }
+   match state.api.get_user_articles(user_id, None).await {
+      Ok(timeline) => {
+         let has = timeline.content.iter().flatten().next().is_some();
+         state
+            .cache
+            .set_swr(&key, &has, ttl::ARTICLES_FLAG, ttl::ARTICLES_FLAG_STALE);
+         has
+      },
+      Err(_) => true,
+   }
+}
+
 /// Store a full user record plus id mappings.
 pub fn store_user(state: &AppState, user: &User) {
    remember_user_id(state, user);

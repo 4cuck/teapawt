@@ -33,6 +33,8 @@ const WEB_OPERATIONS: &[&str] = &[
    "UserTweetsAndReplies",
    "UserRepostsTimeline",
    "UserArticlesTweets",
+   "UserOriginalsTimeline",
+   "UserHighlightsTweets",
    "UserMedia",
    "TweetDetail",
    "TweetEditHistory",

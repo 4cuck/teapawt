@@ -37,6 +37,8 @@ pub struct User {
    pub verified_type: VerifiedType,
    pub protected: bool,
    pub suspended: bool,
+   /// X reported at least one highlighted post, so the posts menu can offer it.
+   pub has_highlights: bool,
    #[serde(with = "time::serde::timestamp::option")]
    pub join_date: Option<time::OffsetDateTime>,
 }

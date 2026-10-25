@@ -603,6 +603,14 @@ pub struct UserData {
    pub tweet_counts: Option<TweetCounts>,
    pub action_counts: Option<ActionCounts>,
    pub pinned_items: Option<PinnedItems>,
+   pub highlights_info: Option<HighlightsInfo>,
+}
+
+/// Whether this account has a Highlights filter on its posts.
+#[derive(Deserialize, Default)]
+pub struct HighlightsInfo {
+   pub can_highlight_tweets: Option<bool>,
+   pub highlighted_tweets: Option<String>,
 }
 
 #[derive(Deserialize, Default)]

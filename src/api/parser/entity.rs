@@ -45,6 +45,13 @@ pub fn parse_entities_from(raw: &Entities) -> Vec<Entity> {
    }
 
    for symbol in &raw.symbols {
+      // Prices (`$250`, `$25,000`) are not tickers. Skip them so the digits
+      // stay in the surrounding text instead of becoming a search link.
+      if let Some(text) = symbol.text.as_deref()
+         && !crate::utils::entity_expander::is_cashtag(text)
+      {
+         continue;
+      }
       let (start, end) = indices(&symbol.indices);
       entities.push(Entity {
          indices: (start, end),
