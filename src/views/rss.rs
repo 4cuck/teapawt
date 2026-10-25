@@ -3,7 +3,7 @@ use std::{collections::HashSet, fmt::Write as _};
 use crate::{
    config::Config,
    types::{List, Tweet, Tweets, User},
-   utils::{formatters, html_escape},
+   utils::{escape_tags, formatters, html_escape},
    views::{
       layout::strip_html,
       renderutils::{community_note_to_html, tweet_link},
@@ -285,7 +285,7 @@ fn render_rss_tweet(tweet: &Tweet, config: &Config, proxy: bool) -> String {
    let url_prefix = config.url_prefix();
 
    // Use replaceUrls with absolute URLs
-   let text = formatters::replace_urls_abs(&tweet.text, config, url_prefix);
+   let text = formatters::replace_urls_abs(&escape_tags(&tweet.text), config, url_prefix);
    let mut body = format!("<p>{}</p>", text.replace('\n', "<br>\n"));
 
    // Photos

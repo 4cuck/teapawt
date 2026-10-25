@@ -5,8 +5,8 @@ use regex::Regex;
 
 use crate::{config::Config, types::Prefs};
 
-pub const STYLE_CSS: &str = "/css/style.css?teapawt9";
-pub const CLEAN_CSS: &str = "/css/clean.css?teapawt35";
+pub const STYLE_CSS: &str = "/css/style.css?teapawt10";
+pub const CLEAN_CSS: &str = "/css/clean.css?teapawt36";
 pub const FONTELLO_CSS: &str = "/css/fontello.css";
 
 /// Builder for rendering a full page layout.
@@ -255,7 +255,7 @@ impl<'a> PageLayout<'a> {
                   // Scripts in <head> with defer
                   script src="/js/htmx.min.js" defer="" {}
                   script src="/js/webmcp.js" defer="" {}
-                  script src="/js/site.js" defer="" {}
+                  script src="/js/site.js?teapawt=1" defer="" {}
                   script src="/js/threadContext.js" defer="" {}
                   script src="/js/imageLightbox.js" defer="" {}
                   @if infinite_scroll {

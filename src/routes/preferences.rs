@@ -4,6 +4,7 @@ use axum::{
    Form, Router,
    extract::{Query, State},
    http::{HeaderMap, header::REFERER},
+   middleware,
    response::{Html, IntoResponse as _, Redirect, Response},
    routing::{get, post},
 };
@@ -16,6 +17,7 @@ use crate::{
    AppState,
    config::Config,
    error::Result,
+   routes::middleware::same_origin_guard,
    types::Prefs,
    views::{layout, preferences as pref_view},
 };
@@ -134,12 +136,13 @@ fn make_cookie(
 
 pub fn router() -> Router<AppState> {
    Router::new()
-      .route("/settings", get(settings))
       .route("/saveprefs", post(save_prefs))
       .route("/resetprefs", post(reset_prefs))
       .route("/enablemp4", post(enable_mp4))
       .route("/enablehls", post(enable_hls))
       .route("/ignorefirefoxwarning", post(ignore_firefox_warning))
+      .route_layer(middleware::from_fn(same_origin_guard))
+      .route("/settings", get(settings))
 }
 
 #[derive(Debug, Deserialize)]

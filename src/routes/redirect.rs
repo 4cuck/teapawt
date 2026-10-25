@@ -1,6 +1,7 @@
 use axum::{
    Router,
    extract::{Path, Query, State},
+   http::Uri,
    response::{IntoResponse as _, Redirect, Response},
    routing::get,
 };
@@ -40,6 +41,9 @@ async fn redirect_handler(
 
    // Decode URL if needed
    let decoded_url = percent_decode(url);
+   if !is_redirectable(&decoded_url) {
+      return Err(Error::InvalidUrl("Redirect target is not allowed".into()));
+   }
 
    // Get user preferences for URL replacements
    let prefs = Prefs::from_cookies(&jar, &state.config);
@@ -48,6 +52,33 @@ async fn redirect_handler(
    let transformed = apply_url_replacements(&decoded_url, &prefs, &state.config);
 
    Ok(Redirect::to(&transformed).into_response())
+}
+
+fn is_redirectable(url: &str) -> bool {
+   const HOSTS: [&str; 5] = [
+      "twitter.com",
+      "x.com",
+      "youtube.com",
+      "youtu.be",
+      "reddit.com",
+   ];
+
+   let Ok(uri) = url.parse::<Uri>() else {
+      return false;
+   };
+   if !matches!(uri.scheme_str(), Some("https" | "http")) {
+      return false;
+   }
+   let Some(host) = uri.host().map(str::to_ascii_lowercase) else {
+      return false;
+   };
+
+   HOSTS.iter().any(|allowed| {
+      host == *allowed
+         || host
+            .strip_suffix(allowed)
+            .is_some_and(|sub| sub.ends_with('.'))
+   })
 }
 
 /// Resolve `t.co` short URLs.
@@ -159,4 +190,27 @@ fn percent_decode(url: &str) -> String {
       .decode_utf8()
       .unwrap_or_else(|_| url.into())
       .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+   use super::is_redirectable;
+
+   #[test]
+   fn redirect_allows_twitter_youtube_and_reddit() {
+      assert!(is_redirectable("https://x.com/SpaceX/status/1"));
+      assert!(is_redirectable("https://mobile.twitter.com/home"));
+      assert!(is_redirectable("http://www.youtube.com/watch?v=abc"));
+      assert!(is_redirectable("https://youtu.be/abc"));
+      assert!(is_redirectable("https://old.reddit.com/r/spacex"));
+   }
+
+   #[test]
+   fn redirect_rejects_other_targets() {
+      assert!(!is_redirectable("https://evil.com"));
+      assert!(!is_redirectable("https://twitter.com.evil.com"));
+      assert!(!is_redirectable("javascript:alert(1)"));
+      assert!(!is_redirectable("https://evil.com#@x.com"));
+      assert!(!is_redirectable("/local"));
+   }
 }

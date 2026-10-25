@@ -3,9 +3,9 @@
 //! Converts @mentions, #hashtags, and URLs into clickable HTML links.
 //!
 //! Twitter's API returns `full_text` with HTML entities already escaped
-//! (`&amp;`, `&lt;`, `&gt;`, etc.). Text between entities is passed through
-//! as-is since it's already HTML-safe. Only entity *attributes* (URLs,
-//! display names) need escaping because they come from our own processing.
+//! (`&amp;`, `&lt;`, `&gt;`, etc.), so existing entities are kept. Raw `<` and
+//! `>` are escaped anyway because `note_tweet` text and bios are not
+//! guaranteed to arrive escaped.
 
 use std::{borrow::Cow, fmt::Write as _, sync::LazyLock};
 
@@ -47,7 +47,7 @@ pub fn expand_entities_for_x(text: &str, entities: &[Entity]) -> String {
 
 fn expand_entities_with_target(text: &str, entities: &[Entity], link_to_x: bool) -> String {
    if entities.is_empty() {
-      return text.to_owned();
+      return escape_tags(text).into_owned();
    }
 
    // Sort entities by start position
@@ -81,13 +81,13 @@ fn expand_entities_with_target(text: &str, entities: &[Entity], link_to_x: bool)
          continue;
       };
 
-      // Add text before this entity (already HTML-escaped by Twitter)
+      // Add text before this entity. Existing entities stay; raw tags do not.
       if start_char > last_end_char {
-         result.push_str(&text[last_end_byte..start_byte]);
+         result.push_str(&escape_tags(&text[last_end_byte..start_byte]));
       }
 
       // Add the entity as an HTML link
-      let entity_text = &text[start_byte..end_byte];
+      let entity_text = escape_tags(&text[start_byte..end_byte]);
       match entity.kind {
          EntityKind::Mention => {
             if link_to_x {
@@ -147,11 +147,11 @@ fn expand_entities_with_target(text: &str, entities: &[Entity], link_to_x: bool)
       last_end_char = end_char;
    }
 
-   // Add remaining text (already HTML-escaped by Twitter)
+   // Add remaining text, escaping any raw tags in it.
    if last_end_char < char_count
       && let Some(last_end_byte) = char_to_byte_index(text, last_end_char)
    {
-      result.push_str(&text[last_end_byte..]);
+      result.push_str(&escape_tags(&text[last_end_byte..]));
    }
 
    result
@@ -162,7 +162,8 @@ fn expand_entities_with_target(text: &str, entities: &[Entity], link_to_x: bool)
 /// Operates directly on Twitter's pre-escaped text. The `HASHTAG_RE` pattern
 /// uses `[^\w&;]` to avoid matching HTML entities like `&#x27;`.
 pub fn expand_with_regex(text: &str) -> String {
-   let result = MENTION_RE.replace_all(text, r#"$1<a href="/$2">@$2</a>"#);
+   let escaped = escape_tags(text);
+   let result = MENTION_RE.replace_all(&escaped, r#"$1<a href="/$2">@$2</a>"#);
    let result = HASHTAG_RE.replace_all(&result, r#"$1<a href="/search?q=%23$3">$2$3</a>"#);
    result.into_owned()
 }
@@ -189,6 +190,14 @@ pub fn html_escape(text: &str) -> Cow<'_, str> {
       }
    }
    Cow::Owned(result)
+}
+
+/// Escape only `<` and `>`, leaving X's existing `&amp;`-style entities intact.
+pub fn escape_tags(text: &str) -> Cow<'_, str> {
+   if !text.contains(['<', '>']) {
+      return Cow::Borrowed(text);
+   }
+   Cow::Owned(text.replace('<', "&lt;").replace('>', "&gt;"))
 }
 
 /// URL encode a string (delegates to formatters).
@@ -350,5 +359,17 @@ mod tests {
       // Twitter pre-escapes: &amp; &lt; &gt; &quot;
       let result = expand_entities("A &amp; B &lt; C &gt; D", &[]);
       assert_eq!(result, "A &amp; B &lt; C &gt; D");
+   }
+
+   #[test]
+   fn raw_angle_brackets_are_escaped() {
+      let result = expand_entities("hi <script>alert(1)</script>", &[]);
+      assert!(!result.contains("<script>"));
+      assert!(result.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+
+      let fallback = expand_with_regex("see <b>@user</b>");
+      assert!(fallback.contains("&lt;b&gt;"));
+      assert!(fallback.contains(r#"<a href="/user">@user</a>"#));
+      assert!(fallback.contains("&lt;/b&gt;"));
    }
 }

@@ -6,7 +6,7 @@ use crate::{
       Card, CardKind, Chain, Entity, Photo, Poll, Prefs, Tweet, TweetStats, User,
       VIDEO_CACHE_LIMIT_MESSAGE, Video,
    },
-   utils::{entity_expander::expand_with_regex, expand_entities, formatters},
+   utils::{country, entity_expander::expand_with_regex, expand_entities, formatters},
    views::renderutils::{
       button_referer, gen_img, get_avatar_class, get_medium_pic, get_small_pic, icon, link_user,
       parse_location, proxy_media, render_community_note, verified_icon,
@@ -815,18 +815,24 @@ fn render_tweet_account_signal(user: &User) -> Markup {
       return Markup::default();
    }
 
+   let country = country::display_name(&user.account_based_in);
+
    html! {
        details class="tweet-account-trigger" {
-           summary class="tweet-account-location" title="Show X-reported account information" {
-               span class="account-signal-dot" {}
-               (user.account_based_in)
+           summary class="tweet-account-location"
+                   title=(format!("Show X-reported account information: {country}")) {
+               @if let Some(flag) = country::flag(country) {
+                   span class="account-signal-flag" role="img" aria-label=(country) { (flag) }
+               } @else {
+                   span class="icon-location" role="img" aria-label=(country) {}
+               }
                @if user.location_accurate == Some(false) {
                    span class="tweet-account-warning"
                         title="X says this location may be affected by a proxy or VPN" { "!" }
                }
            }
            div class="tweet-account-popover" {
-               strong { (user.account_based_in) }
+               strong { (country) }
                @if !user.connection_source.is_empty() {
                    span { "Connected via " (user.connection_source) }
                }

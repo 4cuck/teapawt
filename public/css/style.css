@@ -1,4 +1,4 @@
-@import "tweet/base.css?teapawt3";
+@import "tweet/base.css?teapawt4";
 @import "profile/base.css?teapawt1";
 @import "general.css";
 @import "navbar.css";
@@ -23,7 +23,7 @@ body {
   outline: unset;
   margin: 0;
   text-decoration: none;
-	font-weight: 300;
+	font-weight: 400;
 }
 
 h1 {
