@@ -215,6 +215,46 @@ main .container {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+.note .author {
+  gap: 10px;
+  margin-bottom: 22px;
+}
+.note .author img.avatar {
+  width: 36px;
+  height: 36px;
+  margin: 0;
+  object-fit: cover;
+  flex: 0 0 36px;
+}
+.note .author-id {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.note .author-name {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.note .author-name .fullname {
+  font-size: 15px;
+  font-weight: 700;
+}
+.note .author-meta {
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.25;
+}
+.note .author-meta .username { color: var(--muted); }
+.note .author-date::before {
+  content: "·";
+  margin: 0 0.4em;
+  color: var(--muted);
+}
 .tweet-header { margin-bottom: 2px; }
 .tweet-name-row { display: block; gap: 0; align-items: stretch; justify-content: flex-start; }
 .fullname-and-username {

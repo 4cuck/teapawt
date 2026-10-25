@@ -29,10 +29,9 @@ pub fn render_note(
       formatters::get_pic_url(&article.cover_image, config.config.base64_media, proxy)
    };
 
-   let time_str = article
-      .time
-      .map(formatters::format_relative_time)
-      .unwrap_or_default();
+   let time_str = article.time.map(formatters::format_relative_time);
+   let time_title = article.time.map(formatters::format_tweet_time);
+   let avatar_class = renderutils::get_avatar_class(prefs);
 
    html! {
        div class="note" {
@@ -44,17 +43,28 @@ pub fn render_note(
                h1 { (article.title) }
 
                div class="author" {
-                   (renderutils::gen_img(&formatters::get_user_pic(&article.user.user_pic, "_mini"), "avatar round mini", config, proxy))
-                   " "
-                   a href=(format!("/{}", article.user.username)) class="fullname" {
-                       (article.user.fullname)
+                   (renderutils::gen_img(
+                      &formatters::get_user_pic(&article.user.user_pic, "_normal"),
+                      avatar_class,
+                      config,
+                      proxy,
+                   ))
+                   div class="author-id" {
+                       div class="author-name" {
+                           a href=(format!("/{}", article.user.username)) class="fullname" {
+                               (article.user.fullname)
+                           }
+                           (renderutils::verified_icon(&article.user))
+                       }
+                       div class="author-meta" {
+                           a href=(format!("/{}", article.user.username)) class="username" {
+                               "@" (article.user.username)
+                           }
+                           @if let (Some(time_str), Some(time_title)) = (time_str, time_title) {
+                               span class="author-date" title=(time_title) { (time_str) }
+                           }
+                       }
                    }
-                   " "
-                   a href=(format!("/{}", article.user.username)) class="username" {
-                       "@" (article.user.username)
-                   }
-                   " · "
-                   (time_str)
                }
 
                (render_paragraphs(article, tweets, config, prefs))
