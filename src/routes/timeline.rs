@@ -62,28 +62,27 @@ async fn load_first_profile(state: &AppState, username: &str) -> Result<Profile>
 async fn refresh_profile(state: &AppState, username: &str) {
    let hint = helpers::user_hint(state, username);
    let rail = helpers::cached_photo_rail(state, username);
-   if let Ok(profile) = state
+   if let Ok(open) = state
       .api
       .get_profile_hinted(username, None, hint.as_ref(), rail)
       .await
    {
-      helpers::store_profile(state, &profile);
+      helpers::publish_profile(state, open);
    }
 }
 
 async fn fetch_profile(state: &AppState, username: &str) -> Result<Profile> {
    let hint = helpers::user_hint(state, username);
    let rail = helpers::cached_photo_rail(state, username);
-   let mut profile = state
+   let mut open = state
       .api
       .get_profile_hinted(username, None, hint.as_ref(), rail)
       .await?;
    // About Account is a separate X call and is the one that sits on a dead
    // connection. The timeline does not need it; a cached copy is applied and
    // a miss is filled in the background.
-   helpers::apply_cached_account_context(state, &mut profile.user);
-   helpers::store_profile(state, &profile);
-   Ok(profile)
+   helpers::apply_cached_account_context(state, &mut open.profile.user);
+   Ok(helpers::publish_profile(state, open))
 }
 
 /// A cursor page is reused for a few minutes, and the last copy is served
@@ -100,7 +99,8 @@ async fn load_profile_cursor(state: &AppState, username: &str, cursor: &str) -> 
       .get_profile_hinted(username, Some(cursor), hint.as_ref(), None)
       .await
    {
-      Ok(profile) => {
+      Ok(open) => {
+         let profile = open.into_profile();
          state.cache.set_swr(
             &cache_key,
             &profile,

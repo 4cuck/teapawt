@@ -35,9 +35,10 @@ impl Drop for RefreshGuard {
 /// In-process cache with TTL-based expiry and a hard entry-count cap.
 ///
 /// When an insert exceeds `max_entries`, expired entries are purged first. If
-/// the map remains over capacity, the entries with the soonest expiry are
-/// dropped until the map is back to 75% of `max_entries`. This approximates
-/// LRU for workloads with uniform TTLs without mutating on `get`.
+/// the map remains over capacity, username/id mappings are dropped before
+/// pages: those mappings expire last, so soonest-expiry eviction used to
+/// throw away every profile and leave the map full of ids. Anything still
+/// over the cap then loses the soonest-expiring entries, down to 75%.
 #[derive(Clone)]
 pub struct Cache {
    inner: Arc<RwLock<HashMap<String, Entry>>>,
@@ -149,14 +150,37 @@ impl Cache {
 
             if map.len() > self.max_entries {
                let target = self.max_entries * 3 / 4;
-               let drop_n = map.len() - target;
-               let mut by_expiry: Vec<(Instant, String)> = map
-                  .iter()
-                  .map(|(stored_key, stored_entry)| (stored_entry.stale_until, stored_key.clone()))
+               // Id mappings live 24 hours, so soonest-expiry eviction deleted
+               // every profile and timeline first and left the map full of
+               // ids. A repeat view then missed and paid for X again. Drop
+               // the ids first; a cached page does not need them.
+               let id_keys: Vec<String> = map
+                  .keys()
+                  .filter(|key| {
+                     *key != &cache_key && (key.starts_with("uid:") || key.starts_with("unid:"))
+                  })
+                  .cloned()
                   .collect();
-               by_expiry.select_nth_unstable_by_key(drop_n, |&(expiry, _)| expiry);
-               for (_, eviction_key) in by_expiry.into_iter().take(drop_n) {
+               let id_drop = id_keys.len().min(map.len().saturating_sub(target));
+               for eviction_key in id_keys.into_iter().take(id_drop) {
                   map.remove(&eviction_key);
+               }
+
+               if map.len() > self.max_entries {
+                  let drop_n = map.len() - target;
+                  let mut by_expiry: Vec<(Instant, String)> = map
+                     .iter()
+                     .filter(|(stored_key, _)| stored_key.as_str() != cache_key)
+                     .map(|(stored_key, stored_entry)| {
+                        (stored_entry.stale_until, stored_key.clone())
+                     })
+                     .collect();
+                  if drop_n < by_expiry.len() {
+                     by_expiry.select_nth_unstable_by_key(drop_n, |&(expiry, _)| expiry);
+                  }
+                  for (_, eviction_key) in by_expiry.into_iter().take(drop_n) {
+                     map.remove(&eviction_key);
+                  }
                }
             }
          }
@@ -192,5 +216,17 @@ mod tests {
       cache.set("profile", &7_u32, 0);
       assert!(cache.lookup::<u32>("profile").is_none());
       assert_eq!(cache.recall::<u32>("profile"), Some(7));
+   }
+
+   #[test]
+   fn a_full_cache_drops_id_mappings_before_a_page() {
+      let cache = Cache::new(16);
+      for i in 0..16 {
+         cache.set(&format!("uid:{i}"), &format!("id{i}"), 24 * 60 * 60);
+      }
+      cache.set("p:nasa", &"profile".to_string(), 5 * 60);
+      assert_eq!(cache.get::<String>("p:nasa").as_deref(), Some("profile"));
+      let ids = cache.keys_with_prefix("uid:").len();
+      assert!(ids < 16, "id mappings were kept and the page was the victim");
    }
 }

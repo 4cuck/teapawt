@@ -38,6 +38,7 @@ impl Engine {
    fn candidates(self) -> &'static [Impersonate] {
       match self {
          Self::Chrome => &[
+            Impersonate::ChromeV153,
             Impersonate::ChromeV152,
             Impersonate::ChromeV151,
             Impersonate::ChromeV150,
@@ -47,6 +48,8 @@ impl Engine {
             Impersonate::ChromeV146,
          ],
          Self::Edge => &[
+            Impersonate::EdgeV153,
+            Impersonate::EdgeV152,
             Impersonate::EdgeV151,
             Impersonate::EdgeV150,
             Impersonate::EdgeV149,
@@ -319,7 +322,7 @@ mod tests {
 
    #[test]
    fn fallback_is_second_newest() {
-      assert_eq!(fallback_profile(Engine::Chrome), Impersonate::ChromeV151);
+      assert_eq!(fallback_profile(Engine::Chrome), Impersonate::ChromeV152);
       assert_eq!(fallback_profile(Engine::Safari), Impersonate::SafariV26_3);
    }
 }

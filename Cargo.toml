@@ -85,7 +85,9 @@ opt-level = 2
 [profile.release]
 codegen-units = 1
 lto           = true
-opt-level     = "s"
+# Full speed. `s` shrinks the binary and is the wrong setting for a server
+# whose hot path is JSON and HTML.
+opt-level     = 3
 panic         = "abort"
 strip         = true
 

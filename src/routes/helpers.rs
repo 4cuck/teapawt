@@ -9,6 +9,7 @@ use tokio::sync::Semaphore;
 
 use crate::{
    AppState,
+   api::OpenProfile,
    cache::{Hit, keys as cache_keys, ttl},
    config::Config,
    error::{Error, Result},
@@ -87,9 +88,9 @@ pub fn remember_user_id(state: &AppState, user: &User) {
 /// Whether this account has published an article.
 ///
 /// X does not put that on the profile record. A stored answer is used as-is.
-/// Anything else shows the tab and checks in the background. Waiting here was
-/// a second GraphQL round trip after the timeline was already in hand, and a
-/// failed check was paid again on the next view because nothing was stored.
+/// Anything else hides the tab and checks in the background. Showing the tab
+/// before that check treated every account as a writer, including ones whose
+/// tab on X is Subs.
 pub async fn user_has_articles(state: &AppState, user_id: &str) -> bool {
    if user_id.is_empty() {
       return false;
@@ -112,12 +113,12 @@ pub async fn user_has_articles(state: &AppState, user_id: &str) -> bool {
                   .set_swr(&key, &has, ttl::ARTICLES_FLAG, ttl::ARTICLES_FLAG_STALE);
             },
             Err(_) => {
-               state.cache.set(&key, &true, ttl::ARTICLES_FLAG_RETRY);
+               state.cache.set(&key, &false, ttl::ARTICLES_FLAG_RETRY);
             },
          }
       });
    }
-   true
+   false
 }
 
 /// Store a full user record plus id mappings.
@@ -159,6 +160,44 @@ pub fn store_profile(state: &AppState, profile: &Profile) {
       ttl::DEFAULT,
       ttl::DEFAULT_STALE,
    );
+}
+
+/// Store the profile now, and file a photo rail that is still downloading
+/// when it arrives. The page does not wait on that call.
+pub fn publish_profile(state: &AppState, open: OpenProfile) -> Profile {
+   let (profile, media) = open.into_parts();
+   store_profile(state, &profile);
+   if let Some(handle) = media {
+      let state = state.clone();
+      let username = profile.user.username.clone();
+      tokio::spawn(async move {
+         let Ok(Ok(media)) = handle.await else {
+            return;
+         };
+         store_late_media(&state, &username, media);
+      });
+   }
+   profile
+}
+
+fn store_late_media(state: &AppState, username: &str, media: Timeline) {
+   let rail = media.photo_rail();
+   state.cache.set_swr(
+      &cache_keys::timeline(username, "media"),
+      &media,
+      ttl::DEFAULT,
+      ttl::DEFAULT_STALE,
+   );
+   let key = cache_keys::profile(username);
+   let Some(mut profile) = state.cache.recall::<Profile>(&key) else {
+      return;
+   };
+   if profile.photo_rail.is_empty() && !rail.is_empty() {
+      profile.photo_rail = rail;
+      state
+         .cache
+         .set_swr(&key, &profile, ttl::DEFAULT, ttl::DEFAULT_STALE);
+   }
 }
 
 /// The photo rail cut from a cached media page, so a profile view does not
@@ -235,12 +274,12 @@ pub fn prefetch_profiles(state: &AppState, tweets: &[Tweet]) {
          };
          let hint = user_hint(&state, &name);
          let rail = cached_photo_rail(&state, &name);
-         if let Ok(profile) = state
+         if let Ok(open) = state
             .api
             .get_profile_hinted(&name, None, hint.as_ref(), rail)
             .await
          {
-            store_profile(&state, &profile);
+            publish_profile(&state, open);
          }
          drop(permit);
       }

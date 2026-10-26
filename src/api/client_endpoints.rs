@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+   collections::BTreeMap,
+   pin::Pin,
+   task::{Context, Poll, Waker},
+   time::Duration,
+};
 
 use super::super::search_denylist::bypass_denylist;
 use super::{
@@ -97,33 +102,107 @@ enum Rail {
    None,
 }
 
-/// How long `UserMedia` may keep going after the tweets beside it are back.
-/// That call is the one that stalls and 503s. The timeline is already
-/// renderable, so a rail that has not landed is dropped instead of holding
-/// the page through another header deadline.
-const RAIL_GRACE: Duration = Duration::from_millis(200);
+/// A profile whose photo rail may still be in flight.
+///
+/// `UserMedia` is started beside the tweets. If it has already landed, it is
+/// on [`Self::profile`]. If not, [`Self::into_parts`] hands back the task so
+/// the page can be sent without it and the rail can be stored when it arrives.
+/// Dropping this aborts a rail nobody asked to keep.
+pub struct OpenProfile {
+   pub profile: Profile,
+   media: Option<tokio::task::JoinHandle<Result<Timeline>>>,
+}
 
-struct RailTask(tokio::task::JoinHandle<Rail>);
-
-impl Drop for RailTask {
+impl Drop for OpenProfile {
    fn drop(&mut self) {
-      self.0.abort();
+      if let Some(handle) = self.media.take() {
+         handle.abort();
+      }
    }
 }
 
-impl RailTask {
-   fn spawn(api: &ApiClient, user_id: &str, given: Option<PhotoRail>) -> Self {
-      let api = api.clone();
-      let user_id = user_id.to_owned();
-      Self(tokio::spawn(async move { api.rail_for(&user_id, given).await }))
-   }
-
-   async fn finish(mut self) -> Rail {
-      match timeout(RAIL_GRACE, &mut self.0).await {
-         Ok(Ok(rail)) => rail,
-         _ => Rail::None,
+impl OpenProfile {
+   fn ready(profile: Profile) -> Self {
+      Self {
+         profile,
+         media: None,
       }
    }
+
+   /// Profile only. An unfinished rail is cancelled.
+   pub fn into_profile(mut self) -> Profile {
+      std::mem::take(&mut self.profile)
+   }
+
+   /// Profile, plus a rail task when `UserMedia` had not finished yet.
+   pub fn into_parts(
+      mut self,
+   ) -> (
+      Profile,
+      Option<tokio::task::JoinHandle<Result<Timeline>>>,
+   ) {
+      (
+         std::mem::take(&mut self.profile),
+         self.media.take(),
+      )
+   }
+}
+
+/// `UserMedia` running beside the tweets, or a rail the caller already had.
+struct MediaFetch {
+   inner: Option<MediaInner>,
+}
+
+enum MediaInner {
+   Given(PhotoRail),
+   Flying(tokio::task::JoinHandle<Result<Timeline>>),
+}
+
+impl Drop for MediaFetch {
+   fn drop(&mut self) {
+      if let Some(MediaInner::Flying(handle)) = self.inner.take() {
+         handle.abort();
+      }
+   }
+}
+
+impl MediaFetch {
+   fn start(api: &ApiClient, user_id: &str, given: Option<PhotoRail>) -> Self {
+      let inner = match given {
+         Some(rail) => Some(MediaInner::Given(rail)),
+         None if user_id.is_empty() => None,
+         None => {
+            let api = api.clone();
+            let user_id = user_id.to_owned();
+            Some(MediaInner::Flying(tokio::spawn(async move {
+               api.get_user_media(&user_id, None).await
+            })))
+         },
+      };
+      Self { inner }
+   }
+
+   /// A finished rail is kept. One that is still running is returned so the
+   /// caller can store it later instead of holding the page for it.
+   fn take_ready(mut self) -> (Rail, Option<tokio::task::JoinHandle<Result<Timeline>>>) {
+      match self.inner.take() {
+         Some(MediaInner::Given(rail)) => (Rail::Given(rail), None),
+         None => (Rail::None, None),
+         Some(MediaInner::Flying(mut handle)) => match poll_join(&mut handle) {
+            Poll::Ready(Ok(media)) => (Rail::Fetched(media), None),
+            Poll::Ready(Err(_)) => (Rail::None, None),
+            Poll::Pending => (Rail::None, Some(handle)),
+         },
+      }
+   }
+}
+
+fn poll_join<T>(
+   handle: &mut tokio::task::JoinHandle<T>,
+) -> Poll<std::result::Result<T, tokio::task::JoinError>> {
+   let waker = Waker::noop();
+   let mut cx = Context::from_waker(waker);
+   Pin::new(handle).poll(&mut cx)
 }
 
 fn profile_from_parts(user: User, tweets: Timeline, rail: Rail) -> Profile {
@@ -585,10 +664,20 @@ impl ApiClient {
    }
 
    /// Get user's profile with tweets.
+   ///
+   /// Waits for the photo rail, unlike the page path, which sends the
+   /// timeline as soon as the tweets are in hand.
    pub async fn get_profile(&self, screen_name: &str, cursor: Option<&str>) -> Result<Profile> {
-      self
+      let mut open = self
          .get_profile_hinted(screen_name, cursor, None, None)
-         .await
+         .await?;
+      if let Some(handle) = open.media.take()
+         && let Ok(Ok(media)) = handle.await
+      {
+         open.profile.photo_rail = media.photo_rail();
+         open.profile.media = Some(media);
+      }
+      Ok(open.into_profile())
    }
 
    /// Same as [`get_profile`], but a known user (or id stub) lets tweets and
@@ -596,22 +685,23 @@ impl ApiClient {
    ///
    /// A `rail` the caller already has (cut from a cached media page) saves the
    /// `UserMedia` call a first page otherwise spends on ten thumbnails. When
-   /// the call is made, the media page comes back in [`Profile::media`] so the
-   /// caller can serve the media tab from it.
+   /// that call finishes before the tweets, the page comes back in
+   /// [`Profile::media`]. When it does not, it is left running on
+   /// [`OpenProfile`] so the timeline is not held for a slow or stalled rail.
    pub async fn get_profile_hinted(
       &self,
       screen_name: &str,
       cursor: Option<&str>,
       known: Option<&User>,
       rail: Option<PhotoRail>,
-   ) -> Result<Profile> {
+   ) -> Result<OpenProfile> {
       let known_id = known
          .map(|user| user.id.as_str())
          .filter(|id| !id.is_empty());
 
       if let Some(id) = known_id {
          if cursor.is_none() {
-            let rail_task = RailTask::spawn(self, id, rail);
+            let media = MediaFetch::start(self, id, rail);
             let (user_res, tweets_res) = tokio::join!(
                self.get_user(screen_name),
                self.get_user_tweets(id, None),
@@ -624,13 +714,17 @@ impl ApiClient {
                   .ok_or(err)?,
             };
             if user.protected || user.suspended {
-               return Ok(Profile {
+               return Ok(OpenProfile::ready(Profile {
                   user,
                   ..Profile::default()
-               });
+               }));
             }
-            let rail = rail_task.finish().await;
-            return Ok(profile_from_parts(user, tweets_res?, rail));
+            let tweets = tweets_res?;
+            let (rail, media) = media.take_ready();
+            return Ok(OpenProfile {
+               profile: profile_from_parts(user, tweets, rail),
+               media,
+            });
          }
 
          let user = if let Some(user) = known.filter(|user| !user.fullname.is_empty()) {
@@ -639,42 +733,43 @@ impl ApiClient {
             self.get_user(screen_name).await?
          };
          if user.protected || user.suspended {
-            return Ok(Profile {
+            return Ok(OpenProfile::ready(Profile {
                user,
                ..Profile::default()
-            });
+            }));
          }
-         return Ok(profile_from_parts(
+         return Ok(OpenProfile::ready(profile_from_parts(
             user,
             self.get_user_tweets(id, cursor).await?,
             Rail::None,
-         ));
+         )));
       }
 
       let user = self.get_user(screen_name).await?;
       if user.protected || user.suspended {
-         return Ok(Profile {
+         return Ok(OpenProfile::ready(Profile {
             user,
             ..Profile::default()
-         });
+         }));
       }
 
-      let (tweets, rail) = if cursor.is_none() {
-         let rail_task = RailTask::spawn(self, &user.id, rail);
+      let (tweets, rail, media) = if cursor.is_none() {
+         let media = MediaFetch::start(self, &user.id, rail);
          let tweets = self.get_user_tweets(&user.id, None).await?;
-         (tweets, rail_task.finish().await)
+         let (rail, media) = media.take_ready();
+         (tweets, rail, media)
       } else {
-         (self.get_user_tweets(&user.id, cursor).await?, Rail::None)
+         (
+            self.get_user_tweets(&user.id, cursor).await?,
+            Rail::None,
+            None,
+         )
       };
 
-      Ok(profile_from_parts(user, tweets, rail))
-   }
-
-   async fn rail_for(&self, user_id: &str, given: Option<PhotoRail>) -> Rail {
-      match given {
-         Some(rail) => Rail::Given(rail),
-         None => Rail::Fetched(self.get_user_media(user_id, None).await),
-      }
+      Ok(OpenProfile {
+         profile: profile_from_parts(user, tweets, rail),
+         media,
+      })
    }
 
    /// Search tweets.

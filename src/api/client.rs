@@ -1138,6 +1138,7 @@ impl ApiClient {
 
 #[path = "client_endpoints.rs"]
 mod endpoint_methods;
+pub use endpoint_methods::OpenProfile;
 #[cfg(test)]
 mod tests {
    use super::*;

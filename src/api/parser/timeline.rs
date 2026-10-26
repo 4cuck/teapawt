@@ -68,7 +68,10 @@ pub(crate) fn parse_timeline_instructions(raw_instructions: &[Instruction]) -> R
                         tweets.push(vec![tweet]);
                      }
                   }
-               } else if entry_id.starts_with("tweet-") || entry_id.contains("-conversation-") {
+               } else if entry_id.starts_with("tweet-")
+                  || entry_id.contains("-conversation-")
+                  || entry.tweet_result().is_some()
+               {
                   let entry_tweets = parse_timeline_entry(entry);
                   if !entry_tweets.is_empty() {
                      tweets.push(entry_tweets);
