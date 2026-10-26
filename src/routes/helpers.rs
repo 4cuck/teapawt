@@ -86,9 +86,10 @@ pub fn remember_user_id(state: &AppState, user: &User) {
 
 /// Whether this account has published an article.
 ///
-/// X does not put that on the profile record, so the articles timeline is
-/// checked once and remembered. A failed check keeps the tab, so a rate limit
-/// cannot hide articles that are there.
+/// X does not put that on the profile record. A stored answer is used as-is.
+/// Anything else shows the tab and checks in the background. Waiting here was
+/// a second GraphQL round trip after the timeline was already in hand, and a
+/// failed check was paid again on the next view because nothing was stored.
 pub async fn user_has_articles(state: &AppState, user_id: &str) -> bool {
    if user_id.is_empty() {
       return false;
@@ -97,16 +98,26 @@ pub async fn user_has_articles(state: &AppState, user_id: &str) -> bool {
    if let Some(Hit::Fresh(has) | Hit::Stale(has)) = state.cache.lookup(&key) {
       return has;
    }
-   match state.api.get_user_articles(user_id, None).await {
-      Ok(timeline) => {
-         let has = timeline.content.iter().flatten().next().is_some();
-         state
-            .cache
-            .set_swr(&key, &has, ttl::ARTICLES_FLAG, ttl::ARTICLES_FLAG_STALE);
-         has
-      },
-      Err(_) => true,
+   if let Some(guard) = state.cache.start_refresh(&key) {
+      let state = state.clone();
+      let user_id = user_id.to_owned();
+      tokio::spawn(async move {
+         let _guard = guard;
+         let key = cache_keys::articles_flag(&user_id);
+         match state.api.get_user_articles(&user_id, None).await {
+            Ok(timeline) => {
+               let has = timeline.content.iter().flatten().next().is_some();
+               state
+                  .cache
+                  .set_swr(&key, &has, ttl::ARTICLES_FLAG, ttl::ARTICLES_FLAG_STALE);
+            },
+            Err(_) => {
+               state.cache.set(&key, &true, ttl::ARTICLES_FLAG_RETRY);
+            },
+         }
+      });
    }
+   true
 }
 
 /// Store a full user record plus id mappings.

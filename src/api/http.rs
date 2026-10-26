@@ -51,9 +51,12 @@ const MEDIA_HEADER_DEADLINE: Duration = Duration::from_secs(2);
 /// connection the proxy has already dropped sits until the gateway gives up
 /// (about five seconds) and then returns 503 "remote refused stream reset".
 /// Abandon headers by now and open another connection.
-const API_HEADER_DEADLINE: Duration = Duration::from_secs(3);
-const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(45);
-const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
+const API_HEADER_DEADLINE: Duration = Duration::from_millis(1500);
+/// `scrape-socks.py` reaps a tunnel after a quiet minute. Pings have to land
+/// well inside that window. A 45s ping left every idle session's socket
+/// already closed, and the next visitor waited out the header deadline on it.
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// After an HTML 429, skip the direct address this long and send every
 /// request through the fallback exits.
 const DIRECT_BLOCK_FOR: Duration = Duration::from_secs(5 * 60);

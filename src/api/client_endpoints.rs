@@ -97,6 +97,35 @@ enum Rail {
    None,
 }
 
+/// How long `UserMedia` may keep going after the tweets beside it are back.
+/// That call is the one that stalls and 503s. The timeline is already
+/// renderable, so a rail that has not landed is dropped instead of holding
+/// the page through another header deadline.
+const RAIL_GRACE: Duration = Duration::from_millis(200);
+
+struct RailTask(tokio::task::JoinHandle<Rail>);
+
+impl Drop for RailTask {
+   fn drop(&mut self) {
+      self.0.abort();
+   }
+}
+
+impl RailTask {
+   fn spawn(api: &ApiClient, user_id: &str, given: Option<PhotoRail>) -> Self {
+      let api = api.clone();
+      let user_id = user_id.to_owned();
+      Self(tokio::spawn(async move { api.rail_for(&user_id, given).await }))
+   }
+
+   async fn finish(mut self) -> Rail {
+      match timeout(RAIL_GRACE, &mut self.0).await {
+         Ok(Ok(rail)) => rail,
+         _ => Rail::None,
+      }
+   }
+}
+
 fn profile_from_parts(user: User, tweets: Timeline, rail: Rail) -> Profile {
    let pinned = tweets
       .content
@@ -582,10 +611,10 @@ impl ApiClient {
 
       if let Some(id) = known_id {
          if cursor.is_none() {
-            let (user_res, tweets_res, rail) = tokio::join!(
+            let rail_task = RailTask::spawn(self, id, rail);
+            let (user_res, tweets_res) = tokio::join!(
                self.get_user(screen_name),
                self.get_user_tweets(id, None),
-               self.rail_for(id, rail)
             );
             let user = match user_res {
                Ok(user) => user,
@@ -600,6 +629,7 @@ impl ApiClient {
                   ..Profile::default()
                });
             }
+            let rail = rail_task.finish().await;
             return Ok(profile_from_parts(user, tweets_res?, rail));
          }
 
@@ -630,11 +660,9 @@ impl ApiClient {
       }
 
       let (tweets, rail) = if cursor.is_none() {
-         let (tweets_result, rail) = tokio::join!(
-            self.get_user_tweets(&user.id, None),
-            self.rail_for(&user.id, rail)
-         );
-         (tweets_result?, rail)
+         let rail_task = RailTask::spawn(self, &user.id, rail);
+         let tweets = self.get_user_tweets(&user.id, None).await?;
+         (tweets, rail_task.finish().await)
       } else {
          (self.get_user_tweets(&user.id, cursor).await?, Rail::None)
       };

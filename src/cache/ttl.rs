@@ -41,6 +41,9 @@ pub const EXPLORE_CURSOR_STALE: u64 = 15 * 60;
 pub const ARTICLES_FLAG: u64 = 60 * 60;
 /// Keep a known answer through a rate-limit blip.
 pub const ARTICLES_FLAG_STALE: u64 = 6 * 60 * 60;
+/// A failed articles check. Long enough that the next view does not call X
+/// again, short enough that a blip does not pin the tab for the hour.
+pub const ARTICLES_FLAG_RETRY: u64 = 10 * 60;
 
 /// Long TTL for immutable mappings like user ID -> username.
 pub const USER_ID_MAPPING: u64 = 24 * 60 * 60; // 1 day
