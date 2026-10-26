@@ -75,6 +75,9 @@ pub struct SessionPool {
    state: Option<Arc<LimitState>>,
    /// `sessions.jsonl` this pool was loaded from.
    source_path: String,
+   /// Signaled after a lease returns its permit, so a caller blocked on a full
+   /// pool can take whichever account freed rather than one chosen up front.
+   freed: Arc<Notify>,
 }
 
 /// Writes the rate-limit map to disk so a restart does not forget which
@@ -96,9 +99,19 @@ struct SessionSlot {
 /// A session and the concurrency permit held for its request lifetime.
 pub struct SessionLease {
    credentials: Arc<SessionCredentials>,
-   _permit: OwnedSemaphorePermit,
+   permit: Option<OwnedSemaphorePermit>,
    /// This lease decremented the endpoint's local remaining count.
    metered: AtomicBool,
+   freed: Arc<Notify>,
+}
+
+impl Drop for SessionLease {
+   fn drop(&mut self) {
+      // Return the slot before waking anyone. A scan that runs while the
+      // permit is still held goes back to sleep and misses this signal.
+      drop(self.permit.take());
+      self.freed.notify_one();
+   }
 }
 
 impl Deref for SessionLease {
@@ -176,6 +189,7 @@ impl SessionPool {
          cursor: Arc::new(AtomicUsize::new(0)),
          state,
          source_path: path.to_owned(),
+         freed: Arc::new(Notify::new()),
       };
       pool.spawn_flusher();
 
@@ -359,9 +373,11 @@ impl SessionPool {
          // An account already at its concurrency cap is skipped. The call
          // goes to the next account that still has a free slot, so a crawl
          // keeps moving instead of queueing behind the account that filled up.
-         // Waiting is only for the case where every usable account is already
-         // at the cap.
-         let mut wait_on = None;
+         // When every usable account is already at the cap, wait for whichever
+         // one finishes. Waiting on the first full account instead leaves the
+         // caller stuck for that call's whole round trip, about half a second,
+         // while other accounts free in the meantime.
+         let mut busy = false;
          for index in eligible {
             let api = api_for(self.sessions[index].credentials.kind);
             let spent = match limits.get_mut(&self.sessions[index].credentials.id) {
@@ -374,59 +390,40 @@ impl SessionPool {
             let metered = spent == Spend::Metered;
             if let Ok(permit) = Arc::clone(&self.sessions[index].permits).try_acquire_owned() {
                let credentials = Arc::clone(&self.sessions[index].credentials);
-               return Ok(Self::lease(credentials, permit, metered));
+               return Ok(self.lease(credentials, permit, metered));
             }
             if metered
                && let Some(session_limits) = limits.get_mut(&self.sessions[index].credentials.id)
             {
                session_limits.refund_spend(api);
             }
-            wait_on.get_or_insert(index);
+            busy = true;
          }
 
-         let Some(index) = wait_on else {
+         if !busy {
             return Err(Error::RateLimited);
-         };
-         let api = api_for(self.sessions[index].credentials.kind).to_owned();
-         let credentials = Arc::clone(&self.sessions[index].credentials);
-         let permits = Arc::clone(&self.sessions[index].permits);
+         }
+         let waiter = self.freed.notified();
+         tokio::pin!(waiter);
+         // Register before leaving the lock so a release during the handoff
+         // is still observed.
+         waiter.as_mut().enable();
          drop(limits);
-
-         let permit = permits
-            .acquire_owned()
-            .await
-            .map_err(|_| Error::Internal("session request limiter closed".into()))?;
-
-         // The account may have been exhausted while this permit was queued.
-         let mut limits = self.limits.write().await;
-         if limits
-            .get(&credentials.id)
-            .is_some_and(|session_limits| session_limits.rejected)
-         {
-            drop(permit);
-            continue;
-         }
-         let spent = match limits.get_mut(&credentials.id) {
-            Some(session_limits) => session_limits.try_spend(&api),
-            None => Spend::Unmetered,
-         };
-         if spent == Spend::Denied {
-            drop(permit);
-            continue;
-         }
-         return Ok(Self::lease(credentials, permit, spent == Spend::Metered));
+         waiter.await;
       }
    }
 
    fn lease(
+      &self,
       credentials: Arc<SessionCredentials>,
       permit: OwnedSemaphorePermit,
       metered: bool,
    ) -> SessionLease {
       SessionLease {
          credentials,
-         _permit: permit,
+         permit: Some(permit),
          metered: AtomicBool::new(metered),
+         freed: Arc::clone(&self.freed),
       }
    }
 
@@ -681,7 +678,7 @@ impl SessionPool {
          .acquire_owned()
          .await
          .map_err(|_| Error::Internal("session request limiter closed".into()))?;
-      Ok(Self::lease(credentials, permit, false))
+      Ok(self.lease(credentials, permit, false))
    }
 
    /// Remember that this session already had sensitive-content filters turned
@@ -1103,6 +1100,56 @@ mod tests {
       drop(first);
       drop(second);
       drop(next);
+      fs::remove_file(path).await.unwrap();
+   }
+
+   #[tokio::test]
+   async fn a_full_pool_takes_whichever_account_frees() {
+      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
+      let path = env::temp_dir().join(format!(
+         "teapot-session-pool-frees-{}.jsonl",
+         process::id()
+      ));
+      fs::write(
+         &path,
+         concat!(
+            r#"{"id":1,"username":"one","kind":"cookie","auth_token":"a","ct0":"c"}"#,
+            "\n",
+            r#"{"id":2,"username":"two","kind":"cookie","auth_token":"b","ct0":"d"}"#,
+            "\n"
+         ),
+      )
+      .await
+      .unwrap();
+      let pool = SessionPool::load(path.to_str().unwrap(), 1).await.unwrap();
+      let first = pool
+         .acquire("TweetDetail", Some(SessionKind::Cookie))
+         .await
+         .unwrap();
+      let second = pool
+         .acquire("TweetDetail", Some(SessionKind::Cookie))
+         .await
+         .unwrap();
+      assert_ne!(first.id, second.id);
+
+      let waiting_pool = pool.clone();
+      let waiting = tokio::spawn(async move {
+         waiting_pool
+            .acquire("TweetDetail", Some(SessionKind::Cookie))
+            .await
+      });
+      tokio::time::sleep(Duration::from_millis(30)).await;
+      let freed = second.id;
+      drop(second);
+      let woke = timeout(Duration::from_millis(200), waiting)
+         .await
+         .expect("a free account should be taken without waiting out another call")
+         .unwrap()
+         .unwrap();
+      assert_eq!(woke.id, freed);
+
+      drop(first);
+      drop(woke);
       fs::remove_file(path).await.unwrap();
    }
 
