@@ -236,9 +236,12 @@ impl SessionPool {
 
    async fn store(state: &LimitState, limits: &RwLock<HashMap<i64, SessionLimits>>) -> Result<()> {
       let _writing = state.writing.lock().await;
-      let snapshot = serde_json::to_string(&*limits.read().await)?;
+      // Copy under the lock, then encode after releasing it. Encoding the
+      // whole pool is the slow part, and every call to X needs this same lock.
+      let snapshot = limits.read().await.clone();
+      let body = serde_json::to_string(&snapshot)?;
       let temporary = format!("{}.tmp", state.path);
-      fs::write(&temporary, snapshot).await?;
+      fs::write(&temporary, body).await?;
       fs::rename(&temporary, &state.path).await?;
       Ok(())
    }
@@ -338,68 +341,57 @@ impl SessionPool {
       loop {
          let start = self.cursor.fetch_add(1, Ordering::Relaxed);
          let mut limits = self.limits.write().await;
-         // Accounts seen getting results for this call go first, still in
-         // rotation. Unchecked ones are reached only when those are spent or
-         // busy, so a fresh batch X refuses is not handed to visitors.
-         let mut eligible = Vec::with_capacity(self.sessions.len());
-         let mut unchecked = Vec::new();
-         for offset in 0..self.sessions.len() {
-            let index = start.wrapping_add(offset) % self.sessions.len();
-            let slot = &self.sessions[index];
-            if excluded_id == Some(slot.credentials.id)
-               || required_kind.is_some_and(|kind| slot.credentials.kind != kind)
-            {
-               continue;
-            }
-            let session_limits = limits.get(&slot.credentials.id);
-            if session_limits.is_some_and(|session_limits| session_limits.rejected) {
-               continue;
-            }
-            if session_limits.is_some_and(|session_limits| {
-               session_limits.verified(api_for(slot.credentials.kind))
-            }) {
-               eligible.push(index);
-            } else {
-               unchecked.push(index);
+         let count = self.sessions.len();
+         // Verified accounts go first, still in rotation. Stop at the first
+         // one with a free slot instead of listing every account first: this
+         // lock is taken on every call to X, and walking the whole pool made
+         // later requests wait out the scan.
+         let mut busy = false;
+         let mut any = false;
+         for verified_only in [true, false] {
+            for offset in 0..count {
+               let index = start.wrapping_add(offset) % count;
+               let slot = &self.sessions[index];
+               if excluded_id == Some(slot.credentials.id)
+                  || required_kind.is_some_and(|kind| slot.credentials.kind != kind)
+               {
+                  continue;
+               }
+               let api = api_for(slot.credentials.kind);
+               let (rejected, verified) = match limits.get(&slot.credentials.id) {
+                  Some(session_limits) => {
+                     (session_limits.rejected, session_limits.verified(api))
+                  },
+                  None => (false, false),
+               };
+               if rejected || verified != verified_only {
+                  continue;
+               }
+               any = true;
+               let spent = match limits.get_mut(&slot.credentials.id) {
+                  Some(session_limits) => session_limits.try_spend(api),
+                  None => Spend::Unmetered,
+               };
+               if spent == Spend::Denied {
+                  continue;
+               }
+               let metered = spent == Spend::Metered;
+               if let Ok(permit) = Arc::clone(&slot.permits).try_acquire_owned() {
+                  let credentials = Arc::clone(&slot.credentials);
+                  return Ok(self.lease(credentials, permit, metered));
+               }
+               if metered
+                  && let Some(session_limits) = limits.get_mut(&slot.credentials.id)
+               {
+                  session_limits.refund_spend(api);
+               }
+               busy = true;
             }
          }
-         eligible.append(&mut unchecked);
 
-         if eligible.is_empty() {
+         if !any {
             return Err(Error::NoSessions);
          }
-
-         // Spend the local window under the write lock, then take a permit.
-         // An account already at its concurrency cap is skipped. The call
-         // goes to the next account that still has a free slot, so a crawl
-         // keeps moving instead of queueing behind the account that filled up.
-         // When every usable account is already at the cap, wait for whichever
-         // one finishes. Waiting on the first full account instead leaves the
-         // caller stuck for that call's whole round trip, about half a second,
-         // while other accounts free in the meantime.
-         let mut busy = false;
-         for index in eligible {
-            let api = api_for(self.sessions[index].credentials.kind);
-            let spent = match limits.get_mut(&self.sessions[index].credentials.id) {
-               Some(session_limits) => session_limits.try_spend(api),
-               None => Spend::Unmetered,
-            };
-            if spent == Spend::Denied {
-               continue;
-            }
-            let metered = spent == Spend::Metered;
-            if let Ok(permit) = Arc::clone(&self.sessions[index].permits).try_acquire_owned() {
-               let credentials = Arc::clone(&self.sessions[index].credentials);
-               return Ok(self.lease(credentials, permit, metered));
-            }
-            if metered
-               && let Some(session_limits) = limits.get_mut(&self.sessions[index].credentials.id)
-            {
-               session_limits.refund_spend(api);
-            }
-            busy = true;
-         }
-
          if !busy {
             return Err(Error::RateLimited);
          }
