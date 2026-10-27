@@ -4,6 +4,7 @@ use std::{
    fmt::Write as _,
    ops::Deref,
    path::Path,
+   result::Result as StdResult,
    sync::{
       Arc,
       atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -92,6 +93,16 @@ struct LimitState {
 }
 
 const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Why one pass over the pool found no account.
+enum Miss {
+   /// None can serve this call: rejected, refused, or not acceptable.
+   Nobody,
+   /// Every candidate is out of quota.
+   Spent,
+   /// A candidate has quota but is at its concurrency cap.
+   Busy,
+}
 
 struct SessionSlot {
    credentials: Arc<SessionCredentials>,
@@ -404,61 +415,14 @@ impl SessionPool {
       }
 
       loop {
-         let start = self.cursor.fetch_add(1, Ordering::Relaxed);
          let mut limits = self.limits.write().await;
-         let count = self.sessions.len();
-         // Verified accounts go first, still in rotation. Stop at the first
-         // one with a free slot instead of listing every account first: this
-         // lock is taken on every call to X, and walking the whole pool made
-         // later requests wait out the scan.
-         let mut busy = false;
-         let mut any = false;
-         for verified_only in [true, false] {
-            for offset in 0..count {
-               let index = start.wrapping_add(offset) % count;
-               let slot = &self.sessions[index];
-               if excluded_id == Some(slot.credentials.id)
-                  || required_kind.is_some_and(|kind| slot.credentials.kind != kind)
-               {
-                  continue;
-               }
-               let api = api_for(slot.credentials.kind);
-               let (rejected, verified) = match limits.get(&slot.credentials.id) {
-                  Some(session_limits) => {
-                     (session_limits.rejected, session_limits.verified(api))
-                  },
-                  None => (false, false),
-               };
-               if rejected || verified != verified_only {
-                  continue;
-               }
-               any = true;
-               let spent = match limits.get_mut(&slot.credentials.id) {
-                  Some(session_limits) => session_limits.try_spend(api),
-                  None => Spend::Unmetered,
-               };
-               if spent == Spend::Denied {
-                  continue;
-               }
-               let metered = spent == Spend::Metered;
-               if let Ok(permit) = Arc::clone(&slot.permits).try_acquire_owned() {
-                  let credentials = Arc::clone(&slot.credentials);
-                  return Ok(self.lease(credentials, permit, metered));
-               }
-               if metered
-                  && let Some(session_limits) = limits.get_mut(&slot.credentials.id)
-               {
-                  session_limits.refund_spend(api);
-               }
-               busy = true;
-            }
-         }
-
-         if !any {
-            return Err(Error::NoSessions);
-         }
-         if !busy {
-            return Err(Error::RateLimited);
+         match self.scan(&mut limits, &api_for, required_kind, &|id| {
+            excluded_id != Some(id)
+         }) {
+            Ok(lease) => return Ok(lease),
+            Err(Miss::Nobody) => return Err(Error::NoSessions),
+            Err(Miss::Spent) => return Err(Error::RateLimited),
+            Err(Miss::Busy) => {},
          }
          let waiter = self.freed.notified();
          tokio::pin!(waiter);
@@ -468,6 +432,89 @@ impl SessionPool {
          drop(limits);
          waiter.await;
       }
+   }
+
+   /// One pass for a spare account that `accept` allows, taken only if it
+   /// has a free slot now. Used for the second copy of a slow call, which is
+   /// not worth waiting for.
+   ///
+   /// Never waits for the limits lock. The caller holds the first copy
+   /// unpolled meanwhile, and that copy may be queued for this lock to
+   /// record its account's quota: the queue hands it the lock, it never runs
+   /// to release it, and every call to X waits behind both.
+   pub(crate) fn try_acquire_where(
+      &self,
+      api: &str,
+      required_kind: Option<SessionKind>,
+      accept: impl Fn(i64) -> bool,
+   ) -> Option<SessionLease> {
+      if self.sessions.is_empty() {
+         return None;
+      }
+      let mut limits = self.limits.try_write().ok()?;
+      self
+         .scan(&mut limits, &|_| api, required_kind, &accept)
+         .ok()
+   }
+
+   /// Verified accounts go first, still in rotation. Stop at the first one
+   /// with a free slot instead of listing every account first: this lock is
+   /// taken on every call to X, and walking the whole pool made later
+   /// requests wait out the scan.
+   fn scan<'a>(
+      &self,
+      limits: &mut HashMap<i64, SessionLimits>,
+      api_for: &impl Fn(SessionKind) -> &'a str,
+      required_kind: Option<SessionKind>,
+      accept: &impl Fn(i64) -> bool,
+   ) -> StdResult<SessionLease, Miss> {
+      let start = self.cursor.fetch_add(1, Ordering::Relaxed);
+      let count = self.sessions.len();
+      let mut busy = false;
+      let mut any = false;
+      for verified_only in [true, false] {
+         for offset in 0..count {
+            let index = start.wrapping_add(offset) % count;
+            let slot = &self.sessions[index];
+            if !accept(slot.credentials.id)
+               || required_kind.is_some_and(|kind| slot.credentials.kind != kind)
+            {
+               continue;
+            }
+            let api = api_for(slot.credentials.kind);
+            let (rejected, verified) = match limits.get(&slot.credentials.id) {
+               Some(session_limits) => (session_limits.rejected, session_limits.verified(api)),
+               None => (false, false),
+            };
+            if rejected || verified != verified_only {
+               continue;
+            }
+            any = true;
+            let spent = match limits.get_mut(&slot.credentials.id) {
+               Some(session_limits) => session_limits.try_spend(api),
+               None => Spend::Unmetered,
+            };
+            if spent == Spend::Denied {
+               continue;
+            }
+            let metered = spent == Spend::Metered;
+            if let Ok(permit) = Arc::clone(&slot.permits).try_acquire_owned() {
+               let credentials = Arc::clone(&slot.credentials);
+               return Ok(self.lease(credentials, permit, metered));
+            }
+            if metered && let Some(session_limits) = limits.get_mut(&slot.credentials.id) {
+               session_limits.refund_spend(api);
+            }
+            busy = true;
+         }
+      }
+      Err(if !any {
+         Miss::Nobody
+      } else if busy {
+         Miss::Busy
+      } else {
+         Miss::Spent
+      })
    }
 
    fn lease(
@@ -1425,5 +1472,54 @@ mod tests {
 
       fs::remove_file(&path).await.unwrap();
       fs::remove_file(&blocked).await.unwrap();
+   }
+
+   #[tokio::test]
+   async fn a_spare_account_is_not_waited_for_behind_a_queued_first_copy() {
+      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
+      let path = env::temp_dir().join(format!(
+         "teapot-session-pool-spare-{}.jsonl",
+         process::id()
+      ));
+      fs::write(
+         &path,
+         concat!(
+            r#"{"id":1,"username":"one","kind":"cookie","auth_token":"a","ct0":"c"}"#,
+            "\n",
+            r#"{"id":2,"username":"two","kind":"cookie","auth_token":"b","ct0":"d"}"#,
+            "\n"
+         ),
+      )
+      .await
+      .unwrap();
+      let pool = SessionPool::load(path.to_str().unwrap(), 4).await.unwrap();
+
+      // X has answered the first copy while another call holds the lock, so
+      // it queues to record its account's quota.
+      let busy = pool.limits.write().await;
+      let mut first = Box::pin(pool.update_session_limit(1, "TweetDetail", 150, 100, 0));
+      assert!(
+         timeout(Duration::from_millis(20), &mut first)
+            .await
+            .is_err()
+      );
+      drop(busy);
+
+      // The hedge timer fires with that copy queued and unpolled.
+      assert!(
+         pool
+            .try_acquire_where("TweetDetail", Some(SessionKind::Cookie), |id| id != 1)
+            .is_none()
+      );
+      timeout(Duration::from_secs(1), &mut first)
+         .await
+         .expect("the first copy finishes once it is polled again");
+      let spare = pool
+         .try_acquire_where("TweetDetail", Some(SessionKind::Cookie), |id| id != 1)
+         .expect("a free spare once the lock is free");
+      assert_eq!(spare.id, 2);
+
+      drop(spare);
+      fs::remove_file(path).await.unwrap();
    }
 }

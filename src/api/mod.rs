@@ -5,6 +5,7 @@ mod client;
 mod endpoints;
 mod filters;
 pub mod http;
+mod latency;
 mod limits_db;
 mod operations;
 mod parser;
