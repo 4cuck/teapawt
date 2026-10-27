@@ -22,12 +22,17 @@ use axum::http::header;
 use axum::{
    Router, ServiceExt,
    extract::Request,
-   http::{StatusCode, header::HeaderValue},
+   http::{Extensions, HeaderMap, StatusCode, Version, header::HeaderValue},
    middleware,
 };
 use tokio::net::TcpListener;
 use tower::{Layer as _, limit::ConcurrencyLimitLayer};
 use tower_http::{
+   CompressionLevel,
+   compression::{
+      CompressionLayer,
+      predicate::{Predicate as _, SizeAbove},
+   },
    normalize_path::NormalizePathLayer,
    services::{ServeDir, ServeFile},
    set_header::SetResponseHeaderLayer,
@@ -59,6 +64,23 @@ pub struct AppState {
 
 /// Log lines held for stdout before new ones are dropped.
 const LOG_BUFFER_LINES: usize = 10_000;
+
+/// Pages, feeds, JSON, scripts and playlists. Images, video and audio come
+/// compressed already, and a video relay must stream byte ranges as they are.
+fn compressible(_: StatusCode, _: Version, headers: &HeaderMap, _: &Extensions) -> bool {
+   let Some(kind) = headers
+      .get(header::CONTENT_TYPE)
+      .and_then(|value| value.to_str().ok())
+   else {
+      return false;
+   };
+   let kind = kind.to_ascii_lowercase();
+   kind.starts_with("text/")
+      || kind.contains("json")
+      || kind.contains("xml")
+      || kind.contains("javascript")
+      || kind.contains("mpegurl")
+}
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -233,6 +255,19 @@ async fn main() -> eyre::Result<()> {
             HeaderValue::from_static("max-age=31536000; includeSubDomains"),
         ))
         .layer(middleware::from_fn(routes::negotiate))
+        // Cloudflare compresses for visitors, but it reaches this process
+        // through a tunnel, and a page sent as-is crosses that at full size.
+        // Only gzip is built in. primp turns on tower-http's brotli and zstd
+        // decoders, and with those the layer picks `br` from Cloudflare's
+        // `gzip, br` and then sends the page uncompressed.
+        .layer(
+            CompressionLayer::new()
+                .no_br()
+                .no_zstd()
+                .no_deflate()
+                .quality(CompressionLevel::Fastest)
+                .compress_when(SizeAbove::new(1024).and(compressible)),
+        )
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(45),
