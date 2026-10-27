@@ -46,6 +46,10 @@ web-bot-auth.pkcs8
 !src/
 !src/**
 
+# Patched crates, see [patch.crates-io] in Cargo.toml
+!vendor/
+!vendor/**
+
 # Static assets
 !public/
 !public/**

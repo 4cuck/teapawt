@@ -78,6 +78,14 @@ xitter-txid = "0.2.0"
 [dev-dependencies]
 tokio-test = "0.4.5"
 
+# primp-h2 0.4.19 counts the empty END_STREAM DATA frame that ends most of
+# X's responses against a lifetime limit of 100 and never gives it back, so
+# every connection is closed with ENHANCE_YOUR_CALM ("too_many_data_frames")
+# after about 100 answers. The copy here counts only frames that do not end
+# their stream, as h2 and primp-h2 0.4.18 do. Drop it once a release fixes it.
+[patch.crates-io]
+primp-h2 = { path = "vendor/primp-h2" }
+
 [profile.dev]
 opt-level = 1
 

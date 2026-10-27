@@ -23,6 +23,7 @@ rustPlatform.buildRustPackage {
       ../Cargo.lock
       ../LICENSE
       ../src
+      ../vendor
       ../public
       ../config/teapot.example.toml
     ];
