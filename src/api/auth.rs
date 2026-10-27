@@ -4,6 +4,7 @@ use std::{
    fmt::Write as _,
    ops::Deref,
    path::Path,
+   result::Result as StdResult,
    sync::{
       Arc,
       atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -92,6 +93,16 @@ struct LimitState {
 }
 
 const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Why one pass over the pool found no account.
+enum Miss {
+   /// None can serve this call: rejected, refused, or not acceptable.
+   Nobody,
+   /// Every candidate is out of quota.
+   Spent,
+   /// A candidate has quota but is at its concurrency cap.
+   Busy,
+}
 
 struct SessionSlot {
    credentials: Arc<SessionCredentials>,
@@ -404,61 +415,14 @@ impl SessionPool {
       }
 
       loop {
-         let start = self.cursor.fetch_add(1, Ordering::Relaxed);
          let mut limits = self.limits.write().await;
-         let count = self.sessions.len();
-         // Verified accounts go first, still in rotation. Stop at the first
-         // one with a free slot instead of listing every account first: this
-         // lock is taken on every call to X, and walking the whole pool made
-         // later requests wait out the scan.
-         let mut busy = false;
-         let mut any = false;
-         for verified_only in [true, false] {
-            for offset in 0..count {
-               let index = start.wrapping_add(offset) % count;
-               let slot = &self.sessions[index];
-               if excluded_id == Some(slot.credentials.id)
-                  || required_kind.is_some_and(|kind| slot.credentials.kind != kind)
-               {
-                  continue;
-               }
-               let api = api_for(slot.credentials.kind);
-               let (rejected, verified) = match limits.get(&slot.credentials.id) {
-                  Some(session_limits) => {
-                     (session_limits.rejected, session_limits.verified(api))
-                  },
-                  None => (false, false),
-               };
-               if rejected || verified != verified_only {
-                  continue;
-               }
-               any = true;
-               let spent = match limits.get_mut(&slot.credentials.id) {
-                  Some(session_limits) => session_limits.try_spend(api),
-                  None => Spend::Unmetered,
-               };
-               if spent == Spend::Denied {
-                  continue;
-               }
-               let metered = spent == Spend::Metered;
-               if let Ok(permit) = Arc::clone(&slot.permits).try_acquire_owned() {
-                  let credentials = Arc::clone(&slot.credentials);
-                  return Ok(self.lease(credentials, permit, metered));
-               }
-               if metered
-                  && let Some(session_limits) = limits.get_mut(&slot.credentials.id)
-               {
-                  session_limits.refund_spend(api);
-               }
-               busy = true;
-            }
-         }
-
-         if !any {
-            return Err(Error::NoSessions);
-         }
-         if !busy {
-            return Err(Error::RateLimited);
+         match self.scan(&mut limits, &api_for, required_kind, &|id| {
+            excluded_id != Some(id)
+         }) {
+            Ok(lease) => return Ok(lease),
+            Err(Miss::Nobody) => return Err(Error::NoSessions),
+            Err(Miss::Spent) => return Err(Error::RateLimited),
+            Err(Miss::Busy) => {},
          }
          let waiter = self.freed.notified();
          tokio::pin!(waiter);
@@ -468,6 +432,84 @@ impl SessionPool {
          drop(limits);
          waiter.await;
       }
+   }
+
+   /// One pass for a spare account that `accept` allows, taken only if it
+   /// has a free slot now. Used for the second copy of a slow call, which is
+   /// not worth waiting for.
+   pub(crate) async fn try_acquire_where(
+      &self,
+      api: &str,
+      required_kind: Option<SessionKind>,
+      accept: impl Fn(i64) -> bool + Send,
+   ) -> Option<SessionLease> {
+      if self.sessions.is_empty() {
+         return None;
+      }
+      let mut limits = self.limits.write().await;
+      self
+         .scan(&mut limits, &|_| api, required_kind, &accept)
+         .ok()
+   }
+
+   /// Verified accounts go first, still in rotation. Stop at the first one
+   /// with a free slot instead of listing every account first: this lock is
+   /// taken on every call to X, and walking the whole pool made later
+   /// requests wait out the scan.
+   fn scan<'a>(
+      &self,
+      limits: &mut HashMap<i64, SessionLimits>,
+      api_for: &impl Fn(SessionKind) -> &'a str,
+      required_kind: Option<SessionKind>,
+      accept: &impl Fn(i64) -> bool,
+   ) -> StdResult<SessionLease, Miss> {
+      let start = self.cursor.fetch_add(1, Ordering::Relaxed);
+      let count = self.sessions.len();
+      let mut busy = false;
+      let mut any = false;
+      for verified_only in [true, false] {
+         for offset in 0..count {
+            let index = start.wrapping_add(offset) % count;
+            let slot = &self.sessions[index];
+            if !accept(slot.credentials.id)
+               || required_kind.is_some_and(|kind| slot.credentials.kind != kind)
+            {
+               continue;
+            }
+            let api = api_for(slot.credentials.kind);
+            let (rejected, verified) = match limits.get(&slot.credentials.id) {
+               Some(session_limits) => (session_limits.rejected, session_limits.verified(api)),
+               None => (false, false),
+            };
+            if rejected || verified != verified_only {
+               continue;
+            }
+            any = true;
+            let spent = match limits.get_mut(&slot.credentials.id) {
+               Some(session_limits) => session_limits.try_spend(api),
+               None => Spend::Unmetered,
+            };
+            if spent == Spend::Denied {
+               continue;
+            }
+            let metered = spent == Spend::Metered;
+            if let Ok(permit) = Arc::clone(&slot.permits).try_acquire_owned() {
+               let credentials = Arc::clone(&slot.credentials);
+               return Ok(self.lease(credentials, permit, metered));
+            }
+            if metered && let Some(session_limits) = limits.get_mut(&slot.credentials.id) {
+               session_limits.refund_spend(api);
+            }
+            busy = true;
+         }
+      }
+      Err(if !any {
+         Miss::Nobody
+      } else if busy {
+         Miss::Busy
+      } else {
+         Miss::Spent
+      })
    }
 
    fn lease(
