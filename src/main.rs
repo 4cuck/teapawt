@@ -12,7 +12,7 @@ mod views;
 mod web_bot_auth;
 
 use std::{
-   env, io,
+   env,
    net::{IpAddr, SocketAddr},
    sync::Arc,
    time::Duration,
@@ -22,23 +22,17 @@ use axum::http::header;
 use axum::{
    Router, ServiceExt,
    extract::Request,
-   http::{Extensions, HeaderMap, StatusCode, Version, header::HeaderValue},
+   http::{StatusCode, header::HeaderValue},
    middleware,
 };
 use tokio::net::TcpListener;
 use tower::{Layer as _, limit::ConcurrencyLimitLayer};
 use tower_http::{
-   CompressionLevel,
-   compression::{
-      CompressionLayer,
-      predicate::{Predicate as _, SizeAbove},
-   },
    normalize_path::NormalizePathLayer,
    services::{ServeDir, ServeFile},
    set_header::SetResponseHeaderLayer,
    timeout::TimeoutLayer,
 };
-use tracing_appender::non_blocking::NonBlockingBuilder;
 use tracing_subscriber::{fmt, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 use crate::{
@@ -62,41 +56,15 @@ pub struct AppState {
    pub donations: Arc<donations::DonationLedger>,
 }
 
-/// Log lines held for stdout before new ones are dropped.
-const LOG_BUFFER_LINES: usize = 10_000;
-
-/// Pages, feeds, JSON, scripts and playlists. Images, video and audio come
-/// compressed already, and a video relay must stream byte ranges as they are.
-fn compressible(_: StatusCode, _: Version, headers: &HeaderMap, _: &Extensions) -> bool {
-   let Some(kind) = headers
-      .get(header::CONTENT_TYPE)
-      .and_then(|value| value.to_str().ok())
-   else {
-      return false;
-   };
-   let kind = kind.to_ascii_lowercase();
-   kind.starts_with("text/")
-      || kind.contains("json")
-      || kind.contains("xml")
-      || kind.contains("javascript")
-      || kind.contains("mpegurl")
-}
-
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-   // pm2 reads stdout. While it lags, a direct write blocks the thread that
-   // is logging and every request scheduled on it; once this buffer is full,
-   // lines are dropped instead.
-   let (log_writer, _log_flush) = NonBlockingBuilder::default()
-      .buffered_lines_limit(LOG_BUFFER_LINES)
-      .lossy(true)
-      .finish(io::stdout());
+   // Initialize logging
    tracing_subscriber::registry()
       .with(
          tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "teapot=debug,tower_http=debug".into()),
       )
-      .with(fmt::layer().with_writer(log_writer))
+      .with(fmt::layer())
       .init();
 
    // Load configuration
@@ -145,7 +113,6 @@ async fn main() -> eyre::Result<()> {
    let api = ApiClient::new(&config, sessions, proxies, fallback_proxies);
    api.spawn_filter_sync();
    api.spawn_search_check();
-   api.spawn_latency_report();
 
    // Initialize GIF transcoder if local mode
    let http_client = HttpClient::new(
@@ -256,19 +223,6 @@ async fn main() -> eyre::Result<()> {
             HeaderValue::from_static("max-age=31536000; includeSubDomains"),
         ))
         .layer(middleware::from_fn(routes::negotiate))
-        // Cloudflare compresses for visitors, but it reaches this process
-        // through a tunnel, and a page sent as-is crosses that at full size.
-        // Only gzip is built in. primp turns on tower-http's brotli and zstd
-        // decoders, and with those the layer picks `br` from Cloudflare's
-        // `gzip, br` and then sends the page uncompressed.
-        .layer(
-            CompressionLayer::new()
-                .no_br()
-                .no_zstd()
-                .no_deflate()
-                .quality(CompressionLevel::Fastest)
-                .compress_when(SizeAbove::new(1024).and(compressible)),
-        )
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(45),

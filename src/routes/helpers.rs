@@ -1,18 +1,11 @@
-use std::{
-   any::Any,
-   collections::BTreeMap,
-   future::Future,
-   iter, slice,
-   sync::LazyLock,
-   time::Duration,
-};
+use std::{any::Any, collections::BTreeMap, future::Future, iter, slice, sync::LazyLock};
 
 use axum::{
    http::{StatusCode, header},
    response::{Html, IntoResponse as _, Response},
 };
 
-use tokio::{sync::Semaphore, time::timeout};
+use tokio::sync::Semaphore;
 
 use crate::{
    AppState,
@@ -29,8 +22,6 @@ use crate::{
 /// Caps background profile prefetches so they cannot crowd out live pages.
 static PROFILE_PREFETCH: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(3));
 const PREFETCH_PROFILES: usize = 4;
-/// How long a page waits for its photo rail once everything else is in.
-const RAIL_GRACE: Duration = Duration::from_millis(60);
 
 #[derive(Clone)]
 struct CachedRss {
@@ -246,33 +237,6 @@ pub async fn photo_rail(state: &AppState, username: &str, user_id: &str) -> Phot
    }
 }
 
-/// A page's main fetch, and the photo rail if it lands by then or within
-/// [`RAIL_GRACE`] after. The page is not held for a slow or stalled rail.
-pub fn beside_rail<T, M, R>(main: M, rail: R) -> impl Future<Output = (T, PhotoRail)>
-where
-   M: Future<Output = T>,
-   R: Future<Output = PhotoRail>,
-{
-   // Boxed before the async block: two request futures held inline would
-   // make every page handler future that awaits this one twice as large.
-   let mut main = Box::pin(main);
-   let mut rail = Box::pin(rail);
-   async move {
-      let mut landed = None;
-      let value = loop {
-         tokio::select! {
-            value = &mut main => break value,
-            strip = &mut rail, if landed.is_none() => landed = Some(strip),
-         }
-      };
-      let strip = match landed {
-         Some(strip) => strip,
-         None => timeout(RAIL_GRACE, rail).await.unwrap_or_default(),
-      };
-      (value, strip)
-   }
-}
-
 /// Seed id mappings from tweets already on the page so a later profile click
 /// can fetch tweets in the same wave as `UserByScreenName`.
 pub fn remember_tweets(state: &AppState, tweets: &[Tweet]) {
@@ -348,31 +312,6 @@ pub async fn get_cached_user(state: &AppState, username: &str) -> Result<User> {
    let fetched = state.api.get_user(username).await?;
    store_user(state, &fetched);
    Ok(fetched)
-}
-
-/// The user and something that needs their numeric id, asked for in the same
-/// wave when the id is already known. Without one, or when the name now
-/// belongs to another account, `fetch` waits for `UserByScreenName`.
-pub async fn with_user<T, F, Fut>(state: &AppState, username: &str, fetch: F) -> Result<(User, T)>
-where
-   F: Fn(String) -> Fut,
-   Fut: Future<Output = T>,
-{
-   let known = user_hint(state, username)
-      .map(|user| user.id)
-      .filter(|id| !id.is_empty());
-   let Some(id) = known else {
-      let user = get_cached_user(state, username).await?;
-      let fetched = fetch(user.id.clone()).await;
-      return Ok((user, fetched));
-   };
-   let (user, fetched) = tokio::join!(get_cached_user(state, username), fetch(id.clone()));
-   let user = user?;
-   if user.id == id {
-      return Ok((user, fetched));
-   }
-   let refetched = fetch(user.id.clone()).await;
-   Ok((user, refetched))
 }
 
 pub fn apply_context_to_user(user: &mut User, context: &AccountContext) {
@@ -710,46 +649,5 @@ fn classify_error<'a>(err: &'a Error, generic: &'a str) -> (StatusCode, &'a str,
       (status, generic, message)
    } else {
       (status, title, message)
-   }
-}
-
-#[cfg(test)]
-mod tests {
-   use std::time::Duration;
-
-   use tokio::time::sleep;
-
-   use super::beside_rail;
-   use crate::types::{GalleryPhoto, PhotoRail};
-
-   async fn rail_after(millis: u64) -> PhotoRail {
-      sleep(Duration::from_millis(millis)).await;
-      vec![GalleryPhoto {
-         url: "pic".into(),
-         tweet_id: "1".into(),
-         color: String::new(),
-      }]
-   }
-
-   async fn page_after(millis: u64) -> &'static str {
-      sleep(Duration::from_millis(millis)).await;
-      "page"
-   }
-
-   #[tokio::test]
-   async fn a_rail_that_lands_first_or_just_after_is_kept() {
-      let (page, rail) = beside_rail(page_after(40), rail_after(5)).await;
-      assert_eq!((page, rail.len()), ("page", 1));
-      let (_, rail) = beside_rail(page_after(20), rail_after(30)).await;
-      assert_eq!(rail.len(), 1);
-   }
-
-   #[tokio::test]
-   async fn the_page_does_not_wait_for_a_stalled_rail() {
-      let started = std::time::Instant::now();
-      let (page, rail) = beside_rail(page_after(10), rail_after(5_000)).await;
-      assert_eq!(page, "page");
-      assert!(rail.is_empty());
-      assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
    }
 }

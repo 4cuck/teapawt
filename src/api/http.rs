@@ -18,7 +18,7 @@ use std::{
       atomic::{AtomicU64, AtomicUsize, Ordering},
    },
    task::{Context, Poll},
-   time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+   time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
@@ -63,27 +63,6 @@ const DIRECT_BLOCK_FOR: Duration = Duration::from_secs(5 * 60);
 /// An X/Cloudflare HTML 429 is tied to the public IP, not the account. Park
 /// that SOCKS exit long enough for the edge window to clear.
 const EXIT_BLOCK_FOR: Duration = Duration::from_secs(5 * 60);
-/// Headers later than this count against the exit that carried the call.
-const SLOW_HEADERS: Duration = Duration::from_secs(1);
-/// A call dropped unanswered this late, because another copy answered
-/// first, counts against its exit too.
-const ABANDONED_SLOW: Duration = Duration::from_millis(700);
-/// An exit's answers are counted in two buckets of this length.
-const HEALTH_BUCKET_MS: u64 = 30_000;
-/// Slow answers an exit needs in its window before it can be parked.
-const SLOW_EXIT_MIN: u32 = 8;
-/// Share of the exit's answers that have to be slow. A healthy exit runs a
-/// few percent; one X slow-walks ran about half for a whole day.
-const SLOW_EXIT_SHARE: f64 = 0.25;
-/// And that share against the fleet's median. When X is slow for every exit,
-/// none of them is the problem.
-const SLOW_EXIT_VS_FLEET: f64 = 3.0;
-/// First parking for slowness. It doubles while the exit keeps relapsing.
-const SLOW_PARK_FIRST: Duration = Duration::from_mins(2);
-const SLOW_PARK_MAX: Duration = Duration::from_mins(30);
-/// An exit that stays healthy this long after its parking ends starts over
-/// at [`SLOW_PARK_FIRST`].
-const SLOW_PARK_MEMORY_MS: u64 = 10 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProxyKind {
@@ -175,158 +154,16 @@ impl FallbackPool {
    }
 }
 
-/// One exit's recent answers, in two half-minute buckets so the count always
-/// covers the last thirty to sixty seconds.
-#[derive(Clone, Copy, Default)]
-struct ExitSamples {
-   bucket: u64,
-   fast: [u32; 2],
-   slow: [u32; 2],
-}
-
-impl ExitSamples {
-   const fn roll(&mut self, now: u64) {
-      let bucket = now / HEALTH_BUCKET_MS;
-      match bucket.saturating_sub(self.bucket) {
-         0 => {},
-         1 => {
-            self.fast = [0, self.fast[0]];
-            self.slow = [0, self.slow[0]];
-         },
-         _ => {
-            self.fast = [0, 0];
-            self.slow = [0, 0];
-         },
-      }
-      self.bucket = bucket;
-   }
-
-   /// Fast and slow answers in the window.
-   const fn totals(&self) -> (u32, u32) {
-      (
-         self.fast[0].saturating_add(self.fast[1]),
-         self.slow[0].saturating_add(self.slow[1]),
-      )
-   }
-}
-
 /// The stable SOCKS exits used by cookie sessions. A session normally stays
 /// pinned, but temporarily moves to another healthy exit when X rate-limits
-/// its public IP or answers it far slower than the other exits.
+/// its public IP.
 struct PrimaryPool {
    proxies: Vec<ProxyConfig>,
    tags: HashSet<u64>,
    blocked_until: Mutex<HashMap<u64, u64>>,
-   samples: Mutex<HashMap<u64, ExitSamples>>,
-   /// Slow parkings in a row per exit, and when the last one ends.
-   relapses: Mutex<HashMap<u64, (u32, u64)>>,
 }
 
 impl PrimaryPool {
-   fn new(proxies: Vec<ProxyConfig>, tags: HashSet<u64>) -> Self {
-      Self {
-         proxies,
-         tags,
-         blocked_until: Mutex::new(HashMap::new()),
-         samples: Mutex::new(HashMap::new()),
-         relapses: Mutex::new(HashMap::new()),
-      }
-   }
-
-   /// Count one call against `proxy`: answered, or slow (late headers, no
-   /// headers, no connection). Returns the parking time when this call made
-   /// the exit one to avoid.
-   fn record(&self, proxy: &ProxyConfig, slow: bool) -> Option<Duration> {
-      let tag = proxy_tag(Some(proxy));
-      if !self.tags.contains(&tag) {
-         return None;
-      }
-      let now = unix_millis();
-      let mut samples = self.samples.lock().ok()?;
-      let mine = samples.entry(tag).or_default();
-      mine.roll(now);
-      if slow {
-         mine.slow[0] = mine.slow[0].saturating_add(1);
-      } else {
-         mine.fast[0] = mine.fast[0].saturating_add(1);
-         return None;
-      }
-      let (fast, slow_count) = mine.totals();
-      let share = f64::from(slow_count) / f64::from(fast.saturating_add(slow_count));
-      if slow_count < SLOW_EXIT_MIN || share < SLOW_EXIT_SHARE {
-         return None;
-      }
-      let mut shares = samples
-         .values_mut()
-         .filter_map(|other| {
-            other.roll(now);
-            let (quick, late) = other.totals();
-            let total = quick.saturating_add(late);
-            (total >= SLOW_EXIT_MIN).then(|| f64::from(late) / f64::from(total))
-         })
-         .collect::<Vec<_>>();
-      shares.sort_by(f64::total_cmp);
-      let median = shares.get(shares.len() / 2).copied().unwrap_or(0.0);
-      if share < SLOW_EXIT_VS_FLEET * median {
-         return None;
-      }
-      samples.insert(tag, ExitSamples::default());
-      drop(samples);
-      self.park_slow(tag, now)
-   }
-
-   fn park_slow(&self, tag: u64, now: u64) -> Option<Duration> {
-      let mut blocked = self.blocked_until.lock().ok()?;
-      blocked.retain(|_, until| *until > now);
-      // Parked already, or so many are parked that the rest would carry the
-      // whole pool.
-      if blocked.contains_key(&tag) || blocked.len() >= (self.proxies.len() / 3).max(1) {
-         return None;
-      }
-      let (park, until) = self.next_parking(tag, now)?;
-      blocked.insert(tag, until);
-      drop(blocked);
-      Some(park)
-   }
-
-   /// How long to park this exit, doubled when it relapsed soon after its
-   /// last parking ended, and the moment that ends.
-   fn next_parking(&self, tag: u64, now: u64) -> Option<(Duration, u64)> {
-      let mut relapses = self.relapses.lock().ok()?;
-      let (count, last_until) = relapses.get(&tag).copied().unwrap_or((0, 0));
-      let count = if last_until.saturating_add(SLOW_PARK_MEMORY_MS) > now {
-         count.saturating_add(1)
-      } else {
-         0
-      };
-      let park = SLOW_PARK_FIRST
-         .saturating_mul(1_u32 << count.min(8))
-         .min(SLOW_PARK_MAX);
-      let until = now.saturating_add(u64::try_from(park.as_millis()).unwrap_or(u64::MAX));
-      relapses.insert(tag, (count, until));
-      drop(relapses);
-      Some((park, until))
-   }
-
-   /// Parked exits by port, with the seconds each has left.
-   fn parked(&self) -> Vec<(u16, u64)> {
-      let now = unix_millis();
-      let Ok(blocked) = self.blocked_until.lock() else {
-         return Vec::new();
-      };
-      let mut parked = self
-         .proxies
-         .iter()
-         .filter_map(|proxy| {
-            let until = *blocked.get(&proxy_tag(Some(proxy)))?;
-            (until > now).then(|| (proxy.port, (until - now) / 1000))
-         })
-         .collect::<Vec<_>>();
-      drop(blocked);
-      parked.sort_unstable();
-      parked
-   }
-
    fn contains(&self, proxy: &ProxyConfig) -> bool {
       self.tags.contains(&proxy_tag(Some(proxy)))
    }
@@ -497,33 +334,13 @@ impl HttpClient {
             cooldown_secs = EXIT_BLOCK_FOR.as_secs(),
             "proxy exit circuit breaker ready"
          );
-         self.primary_pool = Some(Arc::new(PrimaryPool::new(proxies, tags)));
+         self.primary_pool = Some(Arc::new(PrimaryPool {
+            proxies,
+            tags,
+            blocked_until: Mutex::new(HashMap::new()),
+         }));
       }
       self
-   }
-
-   /// Primary exits parked right now, by port, with the seconds each has left.
-   pub fn parked_exits(&self) -> Vec<(u16, u64)> {
-      self
-         .primary_pool
-         .as_ref()
-         .map_or_else(Vec::new, |pool| pool.parked())
-   }
-
-   fn note_exit(&self, via: Option<&Egress>, slow: bool) {
-      let Some(pool) = self.primary_pool.as_ref() else {
-         return;
-      };
-      let Some(proxy) = via.and_then(|egress| egress.proxy.as_ref()) else {
-         return;
-      };
-      if let Some(park) = pool.record(proxy, slow) {
-         tracing::warn!(
-            port = proxy.port,
-            park_secs = park.as_secs(),
-            "X answers this proxy exit far slower than the rest; parking it"
-         );
-      }
    }
 
    fn has_fallback(&self) -> bool {
@@ -902,18 +719,11 @@ impl HttpClient {
          let inner = match tokio::time::timeout(MEDIA_HEADER_DEADLINE, send()).await {
             Ok(Ok(inner)) => inner,
             Ok(Err(err)) if is_transport_blip(&err) || err.is_connect() => {
-               tracing::warn!(
-                  uri = loggable(uri),
-                  error = %describe(err.without_url()),
-                  "media fetch failed, retrying"
-               );
+               tracing::warn!(uri, error = %err, "media fetch failed, retrying");
                send().await.map_err(describe)?
             },
             Err(_elapsed) => {
-               tracing::warn!(
-                  uri = loggable(uri),
-                  "media headers stalled, opening a new connection"
-               );
+               tracing::warn!(uri, "media headers stalled, opening a new connection");
                send().await.map_err(describe)?
             },
             Ok(Err(err)) => return Err(describe(err)),
@@ -922,27 +732,14 @@ impl HttpClient {
       }
 
       if self.purpose == Purpose::Api && is_idempotent(method) {
-         let probe = ExitProbe::start(self, via);
          let inner = match tokio::time::timeout(API_HEADER_DEADLINE, send()).await {
-            Ok(Ok(inner)) => {
-               probe.answered();
-               inner
-            },
+            Ok(Ok(inner)) => inner,
             Ok(Err(err)) if is_transport_blip(&err) || err.is_connect() => {
-               probe.failed();
-               tracing::warn!(
-                  uri = loggable(uri),
-                  error = %describe(err.without_url()),
-                  "API connection failed, opening another"
-               );
+               tracing::warn!(uri, error = %err, "API connection failed, opening another");
                self.fresh_headers(method, uri, extra_headers, body, via).await?
             },
             Err(_elapsed) => {
-               probe.failed();
-               tracing::warn!(
-                  uri = loggable(uri),
-                  "API headers stalled, opening another connection"
-               );
+               tracing::warn!(uri, "API headers stalled, opening another connection");
                match tokio::time::timeout(
                   API_HEADER_DEADLINE,
                   self.fresh_headers(method, uri, extra_headers, body, via),
@@ -953,15 +750,12 @@ impl HttpClient {
                   Ok(Err(err)) => return Err(err),
                   Err(_elapsed) => {
                      self.retire(via);
-                     tracing::warn!(uri = loggable(uri), "API headers stalled again");
+                     tracing::warn!(uri, "API headers stalled again");
                      return Err(Error::Internal("API headers stalled".into()));
                   },
                }
             },
-            Ok(Err(err)) => {
-               probe.failed();
-               return Err(describe(err));
-            },
+            Ok(Err(err)) => return Err(describe(err)),
          };
          return Ok(Response { inner });
       }
@@ -998,60 +792,7 @@ impl HttpClient {
       if !body.is_empty() {
          request = request.body(body.clone());
       }
-      let probe = ExitProbe::start(self, via);
-      match request.send().await {
-         Ok(inner) => {
-            probe.answered();
-            Ok(inner)
-         },
-         Err(err) => {
-            probe.failed();
-            Err(describe(err))
-         },
-      }
-   }
-}
-
-/// Counts one API call against the exit that carried it: when headers
-/// arrive, when it fails, or when it is dropped unanswered because another
-/// copy of the call answered first.
-struct ExitProbe<'a> {
-   client: &'a HttpClient,
-   via: Option<&'a Egress>,
-   started: Instant,
-   settled: bool,
-}
-
-impl<'a> ExitProbe<'a> {
-   fn start(client: &'a HttpClient, via: Option<&'a Egress>) -> Self {
-      Self {
-         client,
-         via,
-         started: Instant::now(),
-         settled: false,
-      }
-   }
-
-   fn answered(mut self) {
-      let slow = self.started.elapsed() >= SLOW_HEADERS;
-      self.settle(slow);
-   }
-
-   fn failed(mut self) {
-      self.settle(true);
-   }
-
-   fn settle(&mut self, slow: bool) {
-      self.settled = true;
-      self.client.note_exit(self.via, slow);
-   }
-}
-
-impl Drop for ExitProbe<'_> {
-   fn drop(&mut self) {
-      if !self.settled && self.started.elapsed() >= ABANDONED_SLOW {
-         self.settle(true);
-      }
+      request.send().await.map_err(describe)
    }
 }
 
@@ -1313,13 +1054,6 @@ fn unix_millis() -> u64 {
       .unwrap_or(0)
 }
 
-/// A GraphQL URI as logged: the operation and its variables. The feature and
-/// field-toggle blobs after them are the same on every call and most of the
-/// length, and every line of them is another write pm2 has to keep up with.
-fn loggable(uri: &str) -> &str {
-   uri.find("&features=").map_or(uri, |at| &uri[..at])
-}
-
 /// A failure to send at all, as opposed to a timeout, a connect failure or a
 /// bad response: the far end dropped a connection we thought was open.
 fn is_transport_blip(err: &primp::Error) -> bool {
@@ -1508,80 +1242,6 @@ mod tests {
          next.proxy.as_ref().unwrap().port,
          alternate.proxy.as_ref().unwrap().port
       );
-   }
-
-   #[test]
-   fn a_logged_uri_keeps_its_variables_and_drops_the_feature_blob() {
-      let uri = "https://x.com/i/api/graphql/abc/TweetDetail?variables=%7B%22focalTweetId%22%3A%221%22%7D&features=%7B%22a%22%3Atrue%7D&fieldToggles=%7B%7D";
-      assert_eq!(
-         loggable(uri),
-         "https://x.com/i/api/graphql/abc/TweetDetail?variables=%7B%22focalTweetId%22%3A%221%22%7D"
-      );
-      let media = "https://pbs.twimg.com/media/abc.jpg?name=small";
-      assert_eq!(loggable(media), media);
-   }
-
-   #[test]
-   fn an_exit_x_answers_slowly_is_parked_and_the_rest_are_not() {
-      let proxies = (10001..=10006).map(proxy_on).collect::<Vec<_>>();
-      let client = HttpClient::new("", "", Purpose::Api).with_primary_proxies(proxies.clone());
-      let pool = client.primary_pool.as_ref().unwrap();
-      for proxy in &proxies {
-         for _ in 0..40 {
-            assert!(pool.record(proxy, false).is_none());
-         }
-         for _ in 0..2 {
-            assert!(pool.record(proxy, true).is_none());
-         }
-      }
-      let slow = &proxies[1];
-      let parked = (0..30).find_map(|_| pool.record(slow, true));
-      assert_eq!(parked, Some(SLOW_PARK_FIRST));
-      assert_eq!(client.parked_exits().len(), 1);
-
-      let pinned = Egress {
-         session: 7,
-         proxy: Some(slow.clone()),
-      };
-      assert!(client.primary_is_blocked(&pinned));
-      let moved = client.alternate_primary(&pinned).unwrap();
-      assert_ne!(moved.proxy.unwrap().port, slow.port);
-      let healthy = Egress {
-         session: 7,
-         proxy: Some(proxies[0].clone()),
-      };
-      assert!(!client.primary_is_blocked(&healthy));
-   }
-
-   #[test]
-   fn every_exit_slow_at_once_parks_none() {
-      let proxies = (10001..=10006).map(proxy_on).collect::<Vec<_>>();
-      let client = HttpClient::new("", "", Purpose::Api).with_primary_proxies(proxies.clone());
-      let pool = client.primary_pool.as_ref().unwrap();
-      for _ in 0..20 {
-         for proxy in &proxies {
-            assert!(pool.record(proxy, false).is_none());
-            assert!(pool.record(proxy, true).is_none());
-         }
-      }
-      assert!(client.parked_exits().is_empty());
-   }
-
-   #[test]
-   fn an_exit_that_relapses_is_parked_longer() {
-      let proxies = (10001..=10003).map(proxy_on).collect::<Vec<_>>();
-      let pool = PrimaryPool::new(
-         proxies.clone(),
-         proxies.iter().map(|proxy| proxy_tag(Some(proxy))).collect(),
-      );
-      let tag = proxy_tag(Some(&proxies[0]));
-      let now = unix_millis();
-      assert_eq!(pool.park_slow(tag, now), Some(SLOW_PARK_FIRST));
-      assert_eq!(pool.park_slow(tag, now), None, "already parked");
-      let after = now + SLOW_PARK_FIRST.as_millis() as u64 + 1;
-      assert_eq!(pool.park_slow(tag, after), Some(SLOW_PARK_FIRST * 2));
-      let healed = after + (SLOW_PARK_FIRST * 2).as_millis() as u64 + SLOW_PARK_MEMORY_MS + 1;
-      assert_eq!(pool.park_slow(tag, healed), Some(SLOW_PARK_FIRST));
    }
 
    #[test]

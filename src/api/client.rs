@@ -1,21 +1,14 @@
-use std::{
-   sync::Arc,
-   time::{Duration, Instant},
-};
+use std::sync::Arc;
 
 use axum::http::header;
 use serde::{Deserialize, de::DeserializeOwned};
-use tokio::{
-   sync::Semaphore,
-   time::{interval, sleep, timeout},
-};
+use tokio::time::timeout;
 
 use super::{
    ProxyPool, SessionLease, SessionPool, TidClient,
    budget::{self, ClientBudget},
    endpoints,
    http::{Egress, HttpClient, ProxyConfig, Purpose},
-   latency::Latency,
    operations::Operations,
    parser,
 };
@@ -63,28 +56,6 @@ const GRAPHQL_REPLACEMENTS: usize = 2;
 /// Per-account 429 (JSON / `x-rate-limit-*`). HTML 429s are the WAF and must
 /// not walk the pool — that used to zero every cookie for 15 minutes.
 const RATE_LIMIT_REPLACEMENTS: usize = 5;
-/// Second copies of slow calls in flight at once. In a steady state about
-/// one call in ten is hedged; this cap keeps a sudden slowdown at X from
-/// doubling every call while the latency window catches up.
-const MAX_HEDGES: usize = 48;
-/// How often the upstream latency summary is logged.
-const LATENCY_REPORT_EVERY: Duration = Duration::from_secs(60);
-
-/// An answer about the thing asked for, which a second account would give
-/// too. Anything else is the account or the path, and the other copy of a
-/// hedged call is still worth waiting for.
-const fn settles_the_call(err: &Error) -> bool {
-   matches!(
-      err,
-      Error::NotFound(_)
-         | Error::UserNotFound(_)
-         | Error::UserSuspended(_)
-         | Error::ProtectedUser(_)
-         | Error::TweetNotFound(_)
-         | Error::InvalidUrl(_)
-         | Error::SearchDenylisted
-   )
-}
 
 /// Edge 502/503/504, including an empty body and a stream the proxy reset.
 fn is_gateway_blip(message: &str) -> bool {
@@ -319,8 +290,6 @@ pub struct ApiClient {
    budget: ClientBudget,
    tid_enabled: bool,
    denylist: super::search_denylist::SearchDenylist,
-   latency: Arc<Latency>,
-   hedges: Arc<Semaphore>,
 }
 
 impl ApiClient {
@@ -369,37 +338,7 @@ impl ApiClient {
          budget: ClientBudget::new(config.config.client_budget),
          tid_enabled: !config.config.disable_tid,
          denylist: super::search_denylist::SearchDenylist::load(denylist_path),
-         latency: Arc::new(Latency::default()),
-         hedges: Arc::new(Semaphore::new(MAX_HEDGES)),
       }
-   }
-
-   /// Log how long X takes per operation, how often a second copy went out
-   /// and won, and which exits are parked.
-   pub fn spawn_latency_report(&self) {
-      let api = self.clone();
-      tokio::spawn(async move {
-         let mut every = interval(LATENCY_REPORT_EVERY);
-         every.tick().await;
-         loop {
-            every.tick().await;
-            for line in api.latency.report() {
-               tracing::info!("upstream {line}");
-            }
-            let parked = api.client.parked_exits();
-            if !parked.is_empty() {
-               tracing::info!(?parked, "proxy exits parked (port, seconds left)");
-            }
-         }
-      });
-   }
-
-   /// The proxy port this account is pinned to, when there is a SOCKS pool.
-   fn pinned_port(&self, session_id: i64) -> Option<u16> {
-      self
-         .proxies
-         .as_ref()
-         .map(|pool| pool.port_for(session_id))
    }
 
    /// The browser and proxy a request for this session goes out as.
@@ -540,10 +479,9 @@ impl ApiClient {
    where
       T: DeserializeOwned,
    {
-      let (answered_on, mut last) = self
-         .hedged_attempt(session, endpoint, variables, features, field_toggles, retry_kind)
+      let mut last = self
+         .graphql_request_inner(&session, endpoint, variables, features, field_toggles)
          .await;
-      session = answered_on;
 
       // Quota failures may walk RATE_LIMIT_REPLACEMENTS accounts. The other
       // cases stay capped at GRAPHQL_REPLACEMENTS inside the match.
@@ -637,99 +575,6 @@ impl ApiClient {
          self.sessions.mark_verified(session.id, endpoint).await;
       }
       last
-   }
-
-   /// The first attempt of a call, plus a second copy on another account and
-   /// exit once it has run past most of its operation's recent answers.
-   /// The first good answer is kept and the other copy is dropped. The copy
-   /// is not billed to the caller: it buys latency, not another page.
-   async fn hedged_attempt<T>(
-      &self,
-      session: SessionLease,
-      endpoint: &str,
-      variables: &str,
-      features: &str,
-      field_toggles: Option<&str>,
-      retry_kind: Option<SessionKind>,
-   ) -> (SessionLease, Result<T>)
-   where
-      T: DeserializeOwned,
-   {
-      let first_id = session.id;
-      let delay = self.latency.hedge_delay(endpoint);
-      // Boxed: two request futures side by side would double the size of
-      // every handler future that awaits this one.
-      let mut first =
-         Box::pin(self.timed_attempt(session, endpoint, variables, features, field_toggles));
-      tokio::select! {
-         biased;
-         done = &mut first => return done,
-         () = sleep(delay) => {},
-      }
-
-      let Ok(permit) = Arc::clone(&self.hedges).try_acquire_owned() else {
-         return first.await;
-      };
-      let first_port = self.pinned_port(first_id);
-      let Some(spare) = self
-         .sessions
-         .try_acquire_where(endpoint, retry_kind, |id| {
-            id != first_id && (first_port.is_none() || self.pinned_port(id) != first_port)
-         })
-         .await
-      else {
-         return first.await;
-      };
-      self.latency.hedged(endpoint);
-      let mut second =
-         Box::pin(self.timed_attempt(spare, endpoint, variables, features, field_toggles));
-      let outcome = tokio::select! {
-         done = &mut first => {
-            if done.1.as_ref().is_err_and(|err| !settles_the_call(err)) {
-               let other = second.await;
-               if other.1.is_ok() {
-                  self.latency.rescued(endpoint);
-                  other
-               } else {
-                  done
-               }
-            } else {
-               done
-            }
-         },
-         done = &mut second => {
-            if done.1.is_ok() {
-               self.latency.rescued(endpoint);
-               done
-            } else {
-               first.await
-            }
-         },
-      };
-      drop(permit);
-      outcome
-   }
-
-   /// One attempt that hands its lease back, timing the ones X answers.
-   async fn timed_attempt<T>(
-      &self,
-      session: SessionLease,
-      endpoint: &str,
-      variables: &str,
-      features: &str,
-      field_toggles: Option<&str>,
-   ) -> (SessionLease, Result<T>)
-   where
-      T: DeserializeOwned,
-   {
-      let started = Instant::now();
-      let result = self
-         .graphql_request_inner(&session, endpoint, variables, features, field_toggles)
-         .await;
-      if result.is_ok() {
-         self.latency.record(endpoint, started.elapsed());
-      }
-      (session, result)
    }
 
    /// Take a session for one upstream call, billing the caller first.

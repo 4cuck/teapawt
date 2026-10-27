@@ -130,16 +130,11 @@ impl ProxyPool {
    /// SOCKS5 config for this session, always the same port once pinned.
    #[must_use]
    pub fn for_session(&self, session_id: i64) -> ProxyConfig {
-      self.at_port(self.port_for(session_id))
-   }
-
-   /// The port this session is pinned to.
-   #[must_use]
-   pub fn port_for(&self, session_id: i64) -> u16 {
-      self.pins.get(&session_id).copied().unwrap_or_else(|| {
+      let port = self.pins.get(&session_id).copied().unwrap_or_else(|| {
          let idx = (session_id.unsigned_abs() as usize) % self.endpoints.len();
          self.endpoints[idx].port
-      })
+      });
+      self.at_port(port)
    }
 
    /// First endpoint, used for TID bootstrap and other unscoped API fetches.
