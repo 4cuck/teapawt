@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use super::{
    helpers,
-   helpers::{extract_timeline, get_cached_user},
+   helpers::extract_timeline,
 };
 use crate::{
    AppState,
@@ -222,25 +222,16 @@ async fn filtered_posts(
    sort: &'static str,
    is_scroll: bool,
 ) -> Result<Response> {
-   let user = get_cached_user(state, username).await?;
-   let popular = sort == "popular";
-   let cache_key = cache_keys::filtered_posts(username, filter, sort, cursor);
-   let timeline_result = if let Some(Hit::Fresh(hit) | Hit::Stale(hit)) =
-      state.cache.lookup::<Timeline>(&cache_key)
-   {
-      Ok(hit)
-   } else {
-      let result = state
-         .api
-         .get_filtered_posts(&user.id, cursor, filter, popular)
-         .await;
-      if let Ok(ref data) = result {
-         state
-            .cache
-            .set_swr(&cache_key, data, ttl::DEFAULT, ttl::DEFAULT_STALE);
-      }
-      result
-   };
+   let (user, (timeline_result, photo_rail)) =
+      helpers::with_user(state, username, |user_id| async move {
+         let posts = filtered_timeline(state, username, &user_id, cursor, filter, sort);
+         if is_scroll {
+            (posts.await, Vec::new())
+         } else {
+            helpers::beside_rail(posts, helpers::photo_rail(state, username, &user_id)).await
+         }
+      })
+      .await?;
 
    match timeline_result {
       Ok(data) => {
@@ -261,10 +252,7 @@ async fn filtered_posts(
             );
             return Ok(Html(content.into_string()).into_response());
          }
-         let (photo_rail, show_articles) = tokio::join!(
-            helpers::photo_rail(state, username, &user.id),
-            helpers::user_has_articles(state, &user.id),
-         );
+         let show_articles = helpers::user_has_articles(state, &user.id).await;
          let newer = cursor.is_some().then_some(base_url.as_str());
          let timeline_content = html! {
              (timeline::render_timeline_with_prefs(
@@ -305,6 +293,31 @@ async fn filtered_posts(
       },
       Err(err) => Ok(helpers::api_error(&state.config, &err)),
    }
+}
+
+/// One page of the posts menu, from cache when it has one.
+async fn filtered_timeline(
+   state: &AppState,
+   username: &str,
+   user_id: &str,
+   cursor: Option<&str>,
+   filter: &'static str,
+   sort: &'static str,
+) -> Result<Timeline> {
+   let cache_key = cache_keys::filtered_posts(username, filter, sort, cursor);
+   if let Some(Hit::Fresh(hit) | Hit::Stale(hit)) = state.cache.lookup::<Timeline>(&cache_key) {
+      return Ok(hit);
+   }
+   let result = state
+      .api
+      .get_filtered_posts(user_id, cursor, filter, sort == "popular")
+      .await;
+   if let Ok(ref data) = result {
+      state
+         .cache
+         .set_swr(&cache_key, data, ttl::DEFAULT, ttl::DEFAULT_STALE);
+   }
+   result
 }
 
 async fn user_timeline(
@@ -451,8 +464,6 @@ async fn user_tab_handler(
    include_photo_rail: bool,
    view: &str,
 ) -> Result<Response> {
-   let user = get_cached_user(state, username).await?;
-
    let (cache_kind, tab_str, title_prefix) = match tab {
       TimelineKind::Replies => ("replies", "with_replies", "Tweets & replies from"),
       TimelineKind::Reposts => ("reposts", "reposts", "Reposts from"),
@@ -461,70 +472,16 @@ async fn user_tab_handler(
       _ => unreachable!(),
    };
 
-   // Fetch timeline (with cache for first page)
-   let fetch_timeline = async {
-      let cache_key = cache_keys::timeline(username, cache_kind);
-      if cursor.is_none() {
-         if let Some(cached) = helpers::swr_take::<Timeline, _, _>(state, &cache_key, {
-            let user_id = user.id.clone();
-            let cache_key = cache_key.clone();
-            move |state| async move {
-               let result = match tab {
-                  TimelineKind::Replies => {
-                     state.api.get_user_tweets_and_replies(&user_id, None).await
-                  },
-                  TimelineKind::Reposts => state.api.get_user_reposts(&user_id, None).await,
-                  TimelineKind::Articles => state.api.get_user_articles(&user_id, None).await,
-                  TimelineKind::Media => state.api.get_user_media(&user_id, None).await,
-                  _ => return,
-               };
-               if let Ok(data) = result {
-                  state
-                     .cache
-                     .set_swr(&cache_key, &data, ttl::DEFAULT, ttl::DEFAULT_STALE);
-               }
-            }
-         }) {
-            return Ok(cached);
+   let (user, (timeline_result, photo_rail)) =
+      helpers::with_user(state, username, |user_id| async move {
+         let timeline = tab_timeline(state, username, &user_id, cursor, tab, cache_kind);
+         if include_photo_rail {
+            helpers::beside_rail(timeline, helpers::photo_rail(state, username, &user_id)).await
+         } else {
+            (timeline.await, Vec::new())
          }
-         let result = match tab {
-            TimelineKind::Replies => state.api.get_user_tweets_and_replies(&user.id, None).await,
-            TimelineKind::Reposts => state.api.get_user_reposts(&user.id, None).await,
-            TimelineKind::Articles => state.api.get_user_articles(&user.id, None).await,
-            TimelineKind::Media => state.api.get_user_media(&user.id, None).await,
-            _ => unreachable!(),
-         };
-         if let Ok(ref data) = result {
-            state
-               .cache
-               .set_swr(&cache_key, data, ttl::DEFAULT, ttl::DEFAULT_STALE);
-         }
-         result
-      } else {
-         match tab {
-            TimelineKind::Replies => {
-               state
-                  .api
-                  .get_user_tweets_and_replies(&user.id, cursor)
-                  .await
-            },
-            TimelineKind::Reposts => state.api.get_user_reposts(&user.id, cursor).await,
-            TimelineKind::Articles => state.api.get_user_articles(&user.id, cursor).await,
-            TimelineKind::Media => state.api.get_user_media(&user.id, cursor).await,
-            _ => unreachable!(),
-         }
-      }
-   };
-
-   let (timeline_result, photo_rail) = if include_photo_rail {
-      let (tl, rail) = tokio::join!(
-         fetch_timeline,
-         helpers::photo_rail(state, username, &user.id)
-      );
-      (tl, rail)
-   } else {
-      (fetch_timeline.await, vec![])
-   };
+      })
+      .await?;
 
    let has_request_cursor = cursor.is_some();
 
@@ -602,6 +559,56 @@ async fn user_tab_handler(
          Ok(Html(markup.into_string()).into_response())
       },
       Err(err) => Ok(helpers::api_error(&state.config, &err)),
+   }
+}
+
+/// A profile tab's timeline, with the cache for its first page.
+async fn tab_timeline(
+   state: &AppState,
+   username: &str,
+   user_id: &str,
+   cursor: Option<&str>,
+   tab: TimelineKind,
+   cache_kind: &str,
+) -> Result<Timeline> {
+   if cursor.is_some() {
+      return fetch_tab(state, user_id, cursor, tab).await;
+   }
+   let cache_key = cache_keys::timeline(username, cache_kind);
+   if let Some(cached) = helpers::swr_take::<Timeline, _, _>(state, &cache_key, {
+      let user_id = user_id.to_owned();
+      let cache_key = cache_key.clone();
+      move |state| async move {
+         if let Ok(data) = fetch_tab(&state, &user_id, None, tab).await {
+            state
+               .cache
+               .set_swr(&cache_key, &data, ttl::DEFAULT, ttl::DEFAULT_STALE);
+         }
+      }
+   }) {
+      return Ok(cached);
+   }
+   let result = fetch_tab(state, user_id, None, tab).await;
+   if let Ok(ref data) = result {
+      state
+         .cache
+         .set_swr(&cache_key, data, ttl::DEFAULT, ttl::DEFAULT_STALE);
+   }
+   result
+}
+
+async fn fetch_tab(
+   state: &AppState,
+   user_id: &str,
+   cursor: Option<&str>,
+   tab: TimelineKind,
+) -> Result<Timeline> {
+   match tab {
+      TimelineKind::Replies => state.api.get_user_tweets_and_replies(user_id, cursor).await,
+      TimelineKind::Reposts => state.api.get_user_reposts(user_id, cursor).await,
+      TimelineKind::Articles => state.api.get_user_articles(user_id, cursor).await,
+      TimelineKind::Media => state.api.get_user_media(user_id, cursor).await,
+      _ => Err(Error::InvalidUrl("Invalid tab parameter".into())),
    }
 }
 
@@ -696,7 +703,6 @@ async fn user_search(
    Query(query): Query<UserSearchQuery>,
 ) -> Result<Response> {
    let prefs = Prefs::from_cookies(&jar, &state.config);
-   let user = get_cached_user(&state, &username).await?;
 
    let search_query = query.query.as_deref().unwrap_or("");
    let search_action = format!("/{username}/search");
@@ -707,12 +713,17 @@ async fn user_search(
    } else {
       format!("from:{username} {search_query}")
    };
-   let (photo_rail, search_result) = tokio::join!(
-      helpers::photo_rail(&state, &username, &user.id),
+   // The search names the account, not its id, so it never waits on the user.
+   let (state_ref, name) = (&state, username.as_str());
+   let (fetched, search_result) = tokio::join!(
+      helpers::with_user(state_ref, name, |user_id| async move {
+         helpers::photo_rail(state_ref, name, &user_id).await
+      }),
       state
          .api
          .search(&api_query, query.cursor.as_deref(), "Latest"),
    );
+   let (user, photo_rail) = fetched?;
 
    match search_result {
       Ok(results) => {
@@ -818,9 +829,13 @@ async fn multi_user_timeline(
          // A spawned task starts with an empty task-local scope, so the caller
          // has to be carried over or these fan-out calls go unbilled.
          tokio::spawn(budget::scoped(async move {
-            let user = get_cached_user(&state, &username).await.ok()?;
-            let timeline = state.api.get_user_tweets(&user.id, None).await.ok()?;
-            Some(timeline.content.into_iter().flatten().collect::<Vec<_>>())
+            let api = &state.api;
+            let (_, timeline) = helpers::with_user(&state, &username, |user_id| async move {
+               api.get_user_tweets(&user_id, None).await
+            })
+            .await
+            .ok()?;
+            Some(timeline.ok()?.content.into_iter().flatten().collect::<Vec<_>>())
          }))
       })
       .collect();

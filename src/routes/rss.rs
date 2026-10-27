@@ -8,7 +8,7 @@ use axum_extra::extract::CookieJar;
 use serde::Deserialize;
 
 use super::helpers::{
-   cache_rss, check_rss_cache, get_cached_user, rss_response, rss_response_with_min_id,
+   cache_rss, check_rss_cache, rss_response, rss_response_with_min_id, with_user,
 };
 use crate::{
    AppState,
@@ -66,6 +66,7 @@ fn check_rss_enabled(state: &AppState) -> Result<()> {
 }
 
 /// Which user timeline variant to fetch for RSS.
+#[derive(Clone, Copy)]
 enum UserRssKind {
    Tweets,
    Replies,
@@ -117,20 +118,21 @@ async fn user_rss_handler(
       return Ok(rss_response(rss, &tweets));
    }
 
-   let user = get_cached_user(state, username).await?;
-
-   let timeline = match kind {
-      UserRssKind::Tweets => state.api.get_user_tweets(&user.id, cursor).await?,
-      UserRssKind::Replies => {
-         state
-            .api
-            .get_user_tweets_and_replies(&user.id, cursor)
-            .await?
-      },
-      UserRssKind::Reposts => state.api.get_user_reposts(&user.id, cursor).await?,
-      UserRssKind::Media => state.api.get_user_media(&user.id, cursor).await?,
-   };
-   let tweets = timeline.content.into_iter().flatten().collect::<Vec<_>>();
+   let (user, timeline) = with_user(state, username, |user_id| async move {
+      match kind {
+         UserRssKind::Tweets => state.api.get_user_tweets(&user_id, cursor).await,
+         UserRssKind::Replies => {
+            state
+               .api
+               .get_user_tweets_and_replies(&user_id, cursor)
+               .await
+         },
+         UserRssKind::Reposts => state.api.get_user_reposts(&user_id, cursor).await,
+         UserRssKind::Media => state.api.get_user_media(&user_id, cursor).await,
+      }
+   })
+   .await?;
+   let tweets = timeline?.content.into_iter().flatten().collect::<Vec<_>>();
    let rss = rss_view::render_user_rss(&user, &tweets, &state.config, feed_kind, proxy);
 
    if let Some(ref key) = rss_cache_key {
