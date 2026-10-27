@@ -719,11 +719,18 @@ impl HttpClient {
          let inner = match tokio::time::timeout(MEDIA_HEADER_DEADLINE, send()).await {
             Ok(Ok(inner)) => inner,
             Ok(Err(err)) if is_transport_blip(&err) || err.is_connect() => {
-               tracing::warn!(uri, error = %err, "media fetch failed, retrying");
+               tracing::warn!(
+                  uri = loggable(uri),
+                  error = %describe(err.without_url()),
+                  "media fetch failed, retrying"
+               );
                send().await.map_err(describe)?
             },
             Err(_elapsed) => {
-               tracing::warn!(uri, "media headers stalled, opening a new connection");
+               tracing::warn!(
+                  uri = loggable(uri),
+                  "media headers stalled, opening a new connection"
+               );
                send().await.map_err(describe)?
             },
             Ok(Err(err)) => return Err(describe(err)),
@@ -735,11 +742,18 @@ impl HttpClient {
          let inner = match tokio::time::timeout(API_HEADER_DEADLINE, send()).await {
             Ok(Ok(inner)) => inner,
             Ok(Err(err)) if is_transport_blip(&err) || err.is_connect() => {
-               tracing::warn!(uri, error = %err, "API connection failed, opening another");
+               tracing::warn!(
+                  uri = loggable(uri),
+                  error = %describe(err.without_url()),
+                  "API connection failed, opening another"
+               );
                self.fresh_headers(method, uri, extra_headers, body, via).await?
             },
             Err(_elapsed) => {
-               tracing::warn!(uri, "API headers stalled, opening another connection");
+               tracing::warn!(
+                  uri = loggable(uri),
+                  "API headers stalled, opening another connection"
+               );
                match tokio::time::timeout(
                   API_HEADER_DEADLINE,
                   self.fresh_headers(method, uri, extra_headers, body, via),
@@ -750,7 +764,7 @@ impl HttpClient {
                   Ok(Err(err)) => return Err(err),
                   Err(_elapsed) => {
                      self.retire(via);
-                     tracing::warn!(uri, "API headers stalled again");
+                     tracing::warn!(uri = loggable(uri), "API headers stalled again");
                      return Err(Error::Internal("API headers stalled".into()));
                   },
                }
@@ -1054,6 +1068,13 @@ fn unix_millis() -> u64 {
       .unwrap_or(0)
 }
 
+/// A GraphQL URI as logged: the operation and its variables. The feature and
+/// field-toggle blobs after them are the same on every call and most of the
+/// length, and every line of them is another write pm2 has to keep up with.
+fn loggable(uri: &str) -> &str {
+   uri.find("&features=").map_or(uri, |at| &uri[..at])
+}
+
 /// A failure to send at all, as opposed to a timeout, a connect failure or a
 /// bad response: the far end dropped a connection we thought was open.
 fn is_transport_blip(err: &primp::Error) -> bool {
@@ -1198,6 +1219,17 @@ fn proxy_on(port: u16) -> ProxyConfig {
 #[cfg(test)]
 mod tests {
    use super::*;
+
+   #[test]
+   fn a_logged_uri_keeps_its_variables_and_drops_the_feature_blob() {
+      let uri = "https://x.com/i/api/graphql/abc/TweetDetail?variables=%7B%22focalTweetId%22%3A%221%22%7D&features=%7B%22a%22%3Atrue%7D&fieldToggles=%7B%7D";
+      assert_eq!(
+         loggable(uri),
+         "https://x.com/i/api/graphql/abc/TweetDetail?variables=%7B%22focalTweetId%22%3A%221%22%7D"
+      );
+      let media = "https://pbs.twimg.com/media/abc.jpg?name=small";
+      assert_eq!(loggable(media), media);
+   }
 
    #[test]
    fn fallback_pool_uses_a_different_exit_each_call() {

@@ -12,7 +12,7 @@ mod views;
 mod web_bot_auth;
 
 use std::{
-   env,
+   env, io,
    net::{IpAddr, SocketAddr},
    sync::Arc,
    time::Duration,
@@ -33,6 +33,7 @@ use tower_http::{
    set_header::SetResponseHeaderLayer,
    timeout::TimeoutLayer,
 };
+use tracing_appender::non_blocking::NonBlockingBuilder;
 use tracing_subscriber::{fmt, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 use crate::{
@@ -56,15 +57,24 @@ pub struct AppState {
    pub donations: Arc<donations::DonationLedger>,
 }
 
+/// Log lines held for stdout before new ones are dropped.
+const LOG_BUFFER_LINES: usize = 10_000;
+
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-   // Initialize logging
+   // pm2 reads stdout. While it lags, a direct write blocks the thread that
+   // is logging and every request scheduled on it; once this buffer is full,
+   // lines are dropped instead.
+   let (log_writer, _log_flush) = NonBlockingBuilder::default()
+      .buffered_lines_limit(LOG_BUFFER_LINES)
+      .lossy(true)
+      .finish(io::stdout());
    tracing_subscriber::registry()
       .with(
          tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "teapot=debug,tower_http=debug".into()),
       )
-      .with(fmt::layer())
+      .with(fmt::layer().with_writer(log_writer))
       .init();
 
    // Load configuration
