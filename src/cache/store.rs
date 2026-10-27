@@ -37,13 +37,18 @@ impl Drop for RefreshGuard {
 /// When an insert exceeds `max_entries`, expired entries are purged first. If
 /// the map remains over capacity, username/id mappings are dropped before
 /// pages: those mappings expire last, so soonest-expiry eviction used to
-/// throw away every profile and leave the map full of ids. Anything still
-/// over the cap then loses the soonest-expiring entries, down to 75%.
+/// throw away every profile and leave the map full of ids. Only a small batch
+/// is removed. Dropping a quarter of the map on every overflow threw away
+/// pages a few seconds old, and the TTL never applied while the site was busy.
 #[derive(Clone)]
 pub struct Cache {
    inner: Arc<RwLock<HashMap<String, Entry>>>,
    inflight: Arc<Mutex<HashSet<String>>>,
    max_entries: usize,
+   /// Off for the live process. Cloudflare caches the HTML; keeping another
+   /// copy here served posts after they were already old and, once the map
+   /// was full, every page waited on its lock.
+   enabled: bool,
 }
 
 impl Cache {
@@ -52,7 +57,22 @@ impl Cache {
          inner: Arc::new(RwLock::new(HashMap::new())),
          inflight: Arc::new(Mutex::new(HashSet::new())),
          max_entries: max_entries.max(16),
+         enabled: true,
       }
+   }
+
+   /// No stored pages and no background refresh. Lookups miss.
+   pub fn disabled() -> Self {
+      Self {
+         inner: Arc::new(RwLock::new(HashMap::new())),
+         inflight: Arc::new(Mutex::new(HashSet::new())),
+         max_entries: 0,
+         enabled: false,
+      }
+   }
+
+   pub const fn enabled(&self) -> bool {
+      self.enabled
    }
 
    /// Get a value from cache, returning [`None`] if missing, expired, or
@@ -74,6 +94,9 @@ impl Cache {
    where
       T: Any + Send + Sync + Clone,
    {
+      if !self.enabled {
+         return None;
+      }
       let map = self.inner.read().ok()?;
       let entry = map.get(key)?;
       let now = Instant::now();
@@ -96,6 +119,9 @@ impl Cache {
    where
       T: Any + Send + Sync + Clone,
    {
+      if !self.enabled {
+         return None;
+      }
       let map = self.inner.read().ok()?;
       map.get(key)?.value.downcast_ref::<T>().cloned()
    }
@@ -118,6 +144,9 @@ impl Cache {
 
    /// Mark `key` as refreshing. The guard clears the mark on drop.
    pub fn start_refresh(&self, key: &str) -> Option<RefreshGuard> {
+      if !self.enabled {
+         return None;
+      }
       let inserted = self.inflight.lock().ok()?.insert(key.to_owned());
       inserted.then(|| RefreshGuard {
          cache: self.clone(),
@@ -135,6 +164,9 @@ impl Cache {
    where
       T: Any + Send + Sync + Clone,
    {
+      if !self.enabled {
+         return;
+      }
       let now = Instant::now();
       let fresh_until = now + Duration::from_secs(fresh_seconds);
       let cache_entry = Entry {
@@ -149,7 +181,10 @@ impl Cache {
             map.retain(|_, cached| cached.stale_until > now);
 
             if map.len() > self.max_entries {
-               let target = self.max_entries * 3 / 4;
+               // A handful past the cap, so this scan does not run on every
+               // insert, and a page stored seconds ago is not in the batch.
+               let room = (self.max_entries / 8).clamp(1, 64);
+               let batch = (map.len() - self.max_entries).clamp(1, room);
                // Id mappings live 24 hours, so soonest-expiry eviction deleted
                // every profile and timeline first and left the map full of
                // ids. A repeat view then missed and paid for X again. Drop
@@ -161,13 +196,13 @@ impl Cache {
                   })
                   .cloned()
                   .collect();
-               let id_drop = id_keys.len().min(map.len().saturating_sub(target));
+               let id_drop = id_keys.len().min(batch);
                for eviction_key in id_keys.into_iter().take(id_drop) {
                   map.remove(&eviction_key);
                }
 
                if map.len() > self.max_entries {
-                  let drop_n = map.len() - target;
+                  let drop_n = (map.len() - self.max_entries).clamp(1, room);
                   let mut by_expiry: Vec<(Instant, String)> = map
                      .iter()
                      .filter(|(stored_key, _)| stored_key.as_str() != cache_key)
@@ -228,5 +263,20 @@ mod tests {
       assert_eq!(cache.get::<String>("p:nasa").as_deref(), Some("profile"));
       let ids = cache.keys_with_prefix("uid:").len();
       assert!(ids < 16, "id mappings were kept and the page was the victim");
+   }
+
+   #[test]
+   fn a_full_cache_does_not_wipe_a_quarter_of_its_pages() {
+      let cache = Cache::new(16);
+      for i in 0..16 {
+         cache.set(&format!("p:{i}"), &format!("old{i}"), 5 * 60);
+      }
+      cache.set("p:nasa", &"profile".to_string(), 5 * 60);
+      assert_eq!(cache.get::<String>("p:nasa").as_deref(), Some("profile"));
+      let pages = cache.keys_with_prefix("p:").len();
+      assert!(
+         pages >= 15,
+         "eviction cleared a quarter of the cache, left {pages}"
+      );
    }
 }

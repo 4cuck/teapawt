@@ -650,25 +650,13 @@ async fn translate(
 
 /// Lookup user by ID and redirect to their profile.
 async fn user_by_id(State(state): State<AppState>, Path(id): Path<String>) -> Result<Response> {
-   // Check cache first for ID -> username mapping
-   let cache_key = cache_keys::user_id(&id);
-   if let Some(username) = state.cache.get::<String>(&cache_key) {
-      tracing::debug!("Cache hit for user ID: {id} -> {username}");
+   if let Some(username) = crate::cache::ids::username_for(&id) {
       return Ok(Redirect::to(&format!("/{username}")).into_response());
    }
 
-   // Fetch user from API by ID
    match state.api.get_user_by_id(&id).await {
       Ok(user) => {
-         // Cache the ID -> username mapping (long TTL since IDs don't change)
-         state
-            .cache
-            .set(&cache_key, &user.username, ttl::USER_ID_MAPPING);
-         state.cache.set(
-            &cache_keys::username_id(&user.username),
-            &user.id,
-            ttl::USER_ID_MAPPING,
-         );
+         helpers::remember_user_id(&state, &user);
          Ok(Redirect::to(&format!("/{}", user.username)).into_response())
       },
       Err(Error::UserNotFound(msg)) => {

@@ -1,6 +1,7 @@
 //! Caching layer.
 
 pub mod gif_cache;
+pub mod ids;
 /// Cache key builders.
 pub mod keys;
 mod store;

@@ -86,8 +86,13 @@ async fn main() -> eyre::Result<()> {
       internal_error: config.config.internal_error_message.clone(),
    });
 
-   // Initialize cache
-   let cache = Cache::new(config.cache.max_entries);
+   // Cloudflare caches the HTML (`s-maxage`). This process does not keep a
+   // second copy: that map served timelines after new posts and, full, made
+   // every request wait on the cache lock. Numeric ids are not pages; they
+   // live in Postgres so the next view can ask for the header and the posts
+   // at the same time.
+   let cache = Cache::disabled();
+   cache::ids::load().await;
 
    // Initialize session pool
    let sessions_path =

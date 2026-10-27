@@ -727,11 +727,20 @@ impl ApiClient {
             });
          }
 
-         let user = if let Some(user) = known.filter(|user| !user.fullname.is_empty()) {
-            user.clone()
-         } else {
-            self.get_user(screen_name).await?
-         };
+         let known_user = known
+            .filter(|user| !user.fullname.is_empty())
+            .cloned();
+         let (user_res, tweets_res) = tokio::join!(
+            async {
+               if let Some(user) = known_user {
+                  Ok(user)
+               } else {
+                  self.get_user(screen_name).await
+               }
+            },
+            self.get_user_tweets(id, cursor),
+         );
+         let user = user_res?;
          if user.protected || user.suspended {
             return Ok(OpenProfile::ready(Profile {
                user,
@@ -740,7 +749,7 @@ impl ApiClient {
          }
          return Ok(OpenProfile::ready(profile_from_parts(
             user,
-            self.get_user_tweets(id, cursor).await?,
+            tweets_res?,
             Rail::None,
          )));
       }

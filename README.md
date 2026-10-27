@@ -12,8 +12,9 @@ Live status for those instances: [status.d420.net](https://status.d420.net). Scr
 - **RSS feeds**: Subscribe to any user's tweets
 - **SOCKS5 exits for GraphQL**: Pin each cookie session to one proxy port so
   its apparent IP stays stable
-- **In-process cache**: First-page search, profiles, and stale-while-revalidate
-  so repeats do not wait on X
+- **PostgreSQL**: one row per account for rate limits, and a screen name to
+  numeric id so the next profile can request the header and the posts together.
+  Pages themselves are not stored in the process
 - **FxEmbed-style Discord embeds**:
   - Multiple images displayed in carousel on mobile
   - Videos play directly in the embed
@@ -24,6 +25,8 @@ Live status for those instances: [status.d420.net](https://status.d420.net). Scr
 
 - Rust 1.96.1+
 - Twitter/X session tokens for API access
+- PostgreSQL, for account rate limits and user ids. Startup continues if it
+  cannot be reached
 - Optional: SOCKS5 endpoints if X blocks the server's own IP
 
 ## Building
@@ -101,22 +104,51 @@ second search does not pay a new SOCKS + TLS handshake.
   across the whole pool. Raising it into the millions lets one burst pile
   onto the few accounts already known to work, which is what produces a
   cliff of 429s.
-- `clientBudget` caps how fast one visitor IP can spend uncached X calls.
-  Cache hits, media, and static files are free. SearchTimeline costs 2 tokens.
-- First-page search is cached for 60 seconds, then served stale for 4 more
-  minutes while a refresh runs.
-- Profiles are cached for 5 minutes, then served stale for 20 more minutes.
-- Search result pages seed user ids and prefetch a few profiles so a click
-  often hits cache.
+- `clientBudget` caps how fast one visitor IP can spend X calls. Media and
+  static files are free. SearchTimeline costs 2 tokens.
+- HTML is not kept in the process. A profile is fetched from X, and a repeat
+  view is Cloudflare's `s-maxage` on the response.
 
 Some otherwise valid cookie accounts are not allowed to search: X answers
 their `SearchTimeline` calls with an empty HTTP 404. teapawt retries the same
 search on another session. When that session returns results, the first
-account is recorded in `session-limits.json` and permanently left out of
-search rotation; it can still serve other operations. If both sessions return
-nothing, teapawt treats it as an upstream/query-id problem instead of blaming
-either account. Dead cookies are 401, or 403 with code 326 — not those empty
-404s.
+account is recorded and permanently left out of search rotation; it can still
+serve other operations. If both sessions return nothing, teapawt treats it as
+an upstream/query-id problem instead of blaming either account. Dead cookies
+are 401, or 403 with code 326 — not those empty 404s.
+
+### PostgreSQL
+
+Two tables in a database named `teapot`, owned by a login role named `teapot`.
+The process creates the tables. Nothing here is a copy of a page.
+
+| Table | What it holds |
+| --- | --- |
+| `session_limits` | One jsonb row per account: remaining calls, refusals, and the filter flags. A change updates that row. |
+| `user_ids` | Lowercase screen name to the numeric id `UserTweets` requires. A known name requests the header and the posts in the same wave. |
+
+The default connection is peer auth on the local socket, with no password in
+the repo:
+
+```
+host=/var/run/postgresql user=teapot dbname=teapot
+```
+
+`TEAPOT_LIMITS_DATABASE_URL` overrides that string. The OS user that runs
+teapawt has to be allowed to log in as `teapot` (a `pg_ident` map when that
+user is not `teapot`).
+
+```sql
+CREATE ROLE teapot LOGIN;
+CREATE DATABASE teapot OWNER teapot;
+```
+
+Rate-limit state still has a JSON fallback, `session-limits.json`, or
+whatever `TEAPOT_SESSION_STATE_FILE` points at. An empty value turns that
+store off. The first time Postgres is reachable and `session_limits` is
+empty, that file is imported and later updates go to the one row. If Postgres
+is down at startup, the file is used until it is back. User ids learned while
+it is down stay in memory for that process.
 
 Some queries fail with X error 214 (`Query is denylisted in Search Content
 Control tool`). That is X's platform denylist, not a teapawt setting.
@@ -153,7 +185,7 @@ teapawt/
 │   ├── error.rs         # Error types
 │   ├── types/           # Data structures (User, Tweet, Timeline, etc.)
 │   ├── api/             # Twitter API client, SOCKS5 pool, OAuth, parsing
-│   ├── cache/           # In-process cache (TTL + stale-while-revalidate)
+│   ├── cache/           # Page cache (off in the server) and the user-id store
 │   ├── routes/          # HTTP route handlers
 │   ├── views/           # Maud HTML templates
 │   └── utils/           # Utilities (HMAC, formatters)

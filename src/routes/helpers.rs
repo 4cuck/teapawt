@@ -58,14 +58,18 @@ pub fn user_hint(state: &AppState, username: &str) -> Option<User> {
    if let Some(Hit::Fresh(user) | Hit::Stale(user)) = state.cache.lookup(&key) {
       return Some(user);
    }
-   let id = state
+   if let Some(id) = state
       .cache
-      .get::<String>(&cache_keys::username_id(username))?;
-   Some(User {
-      id,
-      username: username.to_owned(),
-      ..User::default()
-   })
+      .get::<String>(&cache_keys::username_id(username))
+      .or_else(|| crate::cache::ids::get(username))
+   {
+      return Some(User {
+         id,
+         username: username.to_owned(),
+         ..User::default()
+      });
+   }
+   None
 }
 
 /// Persist the bidirectional id mapping. Does not overwrite a full user card.
@@ -73,6 +77,7 @@ pub fn remember_user_id(state: &AppState, user: &User) {
    if user.id.is_empty() || user.username.is_empty() {
       return;
    }
+   crate::cache::ids::remember(&user.username, &user.id);
    state.cache.set(
       &cache_keys::user_id(&user.id),
       &user.username,
@@ -244,6 +249,11 @@ pub fn remember_tweets(state: &AppState, tweets: &[Tweet]) {
 
 /// Warm a few uncached profiles in the background after search/timeline HTML.
 pub fn prefetch_profiles(state: &AppState, tweets: &[Tweet]) {
+   // Origin does not keep profiles, so there is nothing to warm. Fetching
+   // them anyway would add several X calls behind every page.
+   if !state.cache.enabled() {
+      return;
+   }
    let mut names = Vec::new();
    for tweet in tweets {
       let name = tweet.user.username.to_lowercase();

@@ -26,6 +26,8 @@ use crate::{
    types::{RateLimit, Session, SessionCredentials, SessionKind, SessionLimits, Spend},
 };
 
+use super::limits_db;
+
 #[derive(Serialize)]
 pub struct HealthResponse {
    pub sessions: SessionStats,
@@ -80,12 +82,13 @@ pub struct SessionPool {
    freed: Arc<Notify>,
 }
 
-/// Writes the rate-limit map to disk so a restart does not forget which
-/// sessions X has already cut off.
+/// Writes one account at a time. The JSON path remains only for a deployment
+/// that has no Postgres, and as the file imported on the first boot.
 struct LimitState {
    path: String,
    dirty: Notify,
    writing: Mutex<()>,
+   db: Option<limits_db::LimitsDb>,
 }
 
 const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(15);
@@ -167,25 +170,58 @@ impl SessionPool {
          limits.insert(id, lims);
       }
 
-      // Defaults on, like the sessions path, so a deployment that is not the
-      // Nix service does not silently forget its limits across a restart.
-      // Empty opts out.
       let state_path =
          env::var("TEAPOT_SESSION_STATE_FILE").unwrap_or_else(|_| "session-limits.json".to_owned());
       let state = if state_path.is_empty() {
          None
       } else {
-         Self::restore(&state_path, &mut limits).await;
-         Some(Arc::new(LimitState {
-            path: state_path,
+         match limits_db::Connected::connect().await {
+            Ok(mut db) => match db.load().await {
+               Ok(saved) if !saved.is_empty() => {
+                  let restored = Self::overlay(&mut limits, saved);
+                  tracing::info!("Restored rate-limit state for {restored} sessions from postgres");
+                  Some((state_path, Some(db)))
+               },
+               Ok(_) => {
+                  Self::restore(&state_path, &mut limits).await;
+                  if let Err(err) = db.import(&limits).await {
+                     tracing::warn!("could not import session limits into postgres: {err}");
+                  } else {
+                     tracing::info!(
+                        sessions = limits.len(),
+                        "imported session limits into postgres"
+                     );
+                  }
+                  Some((state_path, Some(db)))
+               },
+               Err(err) => {
+                  tracing::warn!("postgres limits unreadable, using the JSON file: {err}");
+                  Self::restore(&state_path, &mut limits).await;
+                  Some((state_path, None))
+               },
+            },
+            Err(err) => {
+               tracing::warn!("postgres limits store unavailable, keeping the JSON file: {err}");
+               Self::restore(&state_path, &mut limits).await;
+               Some((state_path, None))
+            },
+         }
+      };
+
+      let limits = Arc::new(RwLock::new(limits));
+      let state = state.map(|(path, ready)| {
+         let db = ready.map(|ready| ready.spawn(Arc::clone(&limits)));
+         Arc::new(LimitState {
+            path,
             dirty: Notify::new(),
             writing: Mutex::new(()),
-         }))
-      };
+            db,
+         })
+      });
 
       let pool = Self {
          sessions,
-         limits: Arc::new(RwLock::new(limits)),
+         limits,
          cursor: Arc::new(AtomicUsize::new(0)),
          state,
          source_path: path.to_owned(),
@@ -215,10 +251,29 @@ impl SessionPool {
       }
    }
 
+   fn overlay(
+      limits: &mut HashMap<i64, SessionLimits>,
+      saved: HashMap<i64, SessionLimits>,
+   ) -> usize {
+      let mut restored = 0_usize;
+      for (id, saved_limits) in saved {
+         if let Some(slot) = limits.get_mut(&id) {
+            *slot = saved_limits;
+            restored += 1;
+         }
+      }
+      restored
+   }
+
    fn spawn_flusher(&self) {
       let Some(state) = self.state.clone() else {
          return;
       };
+      // Postgres writes the one account that changed. The JSON rewrite is
+      // only the fallback when that database is not there.
+      if state.db.is_some() {
+         return;
+      }
       let limits = Arc::clone(&self.limits);
       tokio::spawn(async move {
          loop {
@@ -246,19 +301,29 @@ impl SessionPool {
       Ok(())
    }
 
-   fn mark_dirty(&self) {
-      if let Some(state) = self.state.as_ref() {
+   fn mark_dirty(&self, session_id: i64) {
+      let Some(state) = self.state.as_ref() else {
+         return;
+      };
+      if let Some(db) = &state.db {
+         db.save(session_id);
+      } else {
          state.dirty.notify_one();
       }
    }
 
-   /// Write the state before returning, for the transitions worth a restart.
-   async fn persist_now(&self) {
-      if let Some(state) = self.state.as_ref()
-         && let Err(err) = Self::store(state, &self.limits).await
-      {
+   /// Write the one account before returning, for the transitions worth a restart.
+   async fn persist_now(&self, session_id: i64) {
+      let Some(state) = self.state.as_ref() else {
+         return;
+      };
+      if let Some(db) = &state.db {
+         db.save_now(session_id).await;
+         return;
+      }
+      if let Err(err) = Self::store(state, &self.limits).await {
          tracing::warn!("Failed to store session state: {err}");
-         self.mark_dirty();
+         state.dirty.notify_one();
       }
    }
 
@@ -493,9 +558,9 @@ impl SessionPool {
       drop(limits);
 
       if remaining <= 0 && reset > time::OffsetDateTime::now_utc().unix_timestamp() {
-         self.persist_now().await;
+         self.persist_now(session_id).await;
       } else {
-         self.mark_dirty();
+         self.mark_dirty(session_id);
       }
    }
 
@@ -509,7 +574,7 @@ impl SessionPool {
          lim.limit_endpoint(api);
       }
       drop(limits);
-      self.persist_now().await;
+      self.persist_now(session_id).await;
    }
 
    /// Record that a session got results for `api`, which moves it ahead of
@@ -529,7 +594,7 @@ impl SessionPool {
          lim.verify(api);
       }
       drop(limits);
-      self.mark_dirty();
+      self.mark_dirty(session_id);
    }
 
    /// Cookie sessions nobody has yet seen get results for `api`, or refused
@@ -573,7 +638,7 @@ impl SessionPool {
             "account cannot search; leaving it out permanently"
          );
       }
-      self.persist_now().await;
+      self.persist_now(session_id).await;
    }
 
    /// Mark a session's credentials as refused, taking it out of rotation until
@@ -595,7 +660,7 @@ impl SessionPool {
          lim.limited_at = time::OffsetDateTime::now_utc().unix_timestamp();
       }
       drop(limits);
-      self.persist_now().await;
+      self.persist_now(session_id).await;
    }
 
    /// Get session count.
@@ -683,7 +748,7 @@ impl SessionPool {
          lim.age_gate_cleared = true;
       }
       drop(limits);
-      self.persist_now().await;
+      self.persist_now(session_id).await;
    }
 
    /// The account refused the settings write (`You may not change this
