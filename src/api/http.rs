@@ -88,9 +88,10 @@ const SLOW_PARK_MAX: Duration = Duration::from_mins(30);
 /// An exit that stays healthy this long after its parking ends starts over
 /// at [`SLOW_PARK_FIRST`].
 const SLOW_PARK_MEMORY_MS: u64 = 10 * 60 * 1000;
-/// Timeouts in a row from one exit before it is taken out of rotation. A
-/// response that arrives resets the count.
-const TIMEOUTS_IN_A_ROW: u32 = 8;
+/// Timeouts from one exit before it is taken out. Only a response on the
+/// first try resets the count. The retry after a timeout does not, or a
+/// proxy that misses once and then answers would never be removed.
+const TIMEOUTS_IN_A_ROW: u32 = 5;
 /// Exits taken out for timeouts. Delete a line and restart to use that port
 /// again. Empty means none are recorded.
 const DISABLED_PROXIES_FILE: &str = "disabled-proxies.txt";
@@ -674,8 +675,8 @@ impl HttpClient {
       }
    }
 
-   /// One timeout from this exit, or a response that clears its streak.
-   /// Eight timeouts in a row disable the exit.
+   /// One timeout from this exit, or a first-try response that clears its
+   /// streak. Five timeouts before a clean answer disable the exit.
    fn note_proxy_timeout(&self, via: Option<&Egress>, timed_out: bool) {
       let Some(pool) = self.primary_pool.as_ref() else {
          return;
@@ -1182,7 +1183,7 @@ impl HttpClient {
       if !body.is_empty() {
          request = request.body(body.clone());
       }
-      let probe = ExitProbe::start(self, via);
+      let probe = ExitProbe::retry(self, via);
       match request.send().await {
          Ok(inner) => {
             probe.answered();
@@ -1208,21 +1209,34 @@ struct ExitProbe<'a> {
    via: Option<&'a Egress>,
    started: Instant,
    settled: bool,
+   /// A retry that answers does not wipe the timeout that caused it.
+   clears_streak: bool,
 }
 
 impl<'a> ExitProbe<'a> {
    fn start(client: &'a HttpClient, via: Option<&'a Egress>) -> Self {
+      Self::new(client, via, true)
+   }
+
+   fn retry(client: &'a HttpClient, via: Option<&'a Egress>) -> Self {
+      Self::new(client, via, false)
+   }
+
+   fn new(client: &'a HttpClient, via: Option<&'a Egress>, clears_streak: bool) -> Self {
       Self {
          client,
          via,
          started: Instant::now(),
          settled: false,
+         clears_streak,
       }
    }
 
    fn answered(mut self) {
       let slow = self.started.elapsed() >= SLOW_HEADERS;
-      self.client.note_proxy_timeout(self.via, false);
+      if self.clears_streak {
+         self.client.note_proxy_timeout(self.via, false);
+      }
       self.settle(slow);
    }
 
@@ -1851,7 +1865,7 @@ mod tests {
    }
 
    #[test]
-   fn eight_timeouts_in_a_row_disable_the_exit_and_one_answer_resets_it() {
+   fn timeouts_in_a_row_disable_the_exit_and_one_answer_resets_it() {
       let path = std::env::temp_dir().join(format!(
          "teapot-disabled-proxies-{}.txt",
          std::process::id()
