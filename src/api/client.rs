@@ -390,16 +390,20 @@ impl ApiClient {
             if !parked.is_empty() {
                tracing::info!(?parked, "proxy exits parked (port, seconds left)");
             }
+            let disabled = api.client.disabled_exits();
+            if !disabled.is_empty() {
+               tracing::warn!(
+                  ?disabled,
+                  "proxy exits disabled for timeouts; delete the line in disabled-proxies.txt and restart to use one again"
+               );
+            }
          }
       });
    }
 
    /// The proxy port this account is pinned to, when there is a SOCKS pool.
    fn pinned_port(&self, session_id: i64) -> Option<u16> {
-      self
-         .proxies
-         .as_ref()
-         .map(|pool| pool.port_for(session_id))
+      self.proxies.as_ref().map(|pool| pool.port_for(session_id))
    }
 
    /// The browser and proxy a request for this session goes out as.
@@ -541,7 +545,14 @@ impl ApiClient {
       T: DeserializeOwned,
    {
       let (answered_on, mut last) = self
-         .hedged_attempt(session, endpoint, variables, features, field_toggles, retry_kind)
+         .hedged_attempt(
+            session,
+            endpoint,
+            variables,
+            features,
+            field_toggles,
+            retry_kind,
+         )
          .await;
       session = answered_on;
 
@@ -558,9 +569,7 @@ impl ApiClient {
             // A 502/503/504 is the edge dropping the stream, not this account's
             // quota. Try one other session. Do not mark the first as refused:
             // that path is for an account X answers with an empty 404.
-            Err(Error::TwitterApi(message)) if is_gateway_blip(message) && replacement == 0 => {
-               true
-            },
+            Err(Error::TwitterApi(message)) if is_gateway_blip(message) && replacement == 0 => true,
             // Headers never arrived, so the pooled connection is the thing
             // that stalled. Another account is pinned to another exit.
             Err(Error::Internal(message))
