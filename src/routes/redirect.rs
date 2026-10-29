@@ -152,7 +152,7 @@ fn apply_url_replacements(url: &str, prefs: &Prefs, config: &Config) -> String {
 
    // Replace the full Twitter origin so the scheme and port remain correct
    let twitter_prefix = if prefs.replace_twitter.is_empty() {
-      config.url_prefix().to_owned()
+      crate::utils::host::current_origin(config.url_prefix())
    } else {
       format!("https://{}", prefs.replace_twitter.trim_end_matches('/'))
    };

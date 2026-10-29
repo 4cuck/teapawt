@@ -365,21 +365,49 @@ const SEED_PROFILES: &[&str] = &[
 ];
 
 /// Profile paths worth listing for each handle.
-const PROFILE_PATHS: &[&str] = &["", "/with_replies", "/reposts", "/articles", "/media", "/search"];
+const PROFILE_PATHS: &[&str] = &[
+   "",
+   "/with_replies",
+   "/reposts",
+   "/articles",
+   "/media",
+   "/search",
+];
 const XML_CONTENT_TYPE: &str = "text/xml; charset=utf-8";
 
-pub fn router() -> Router<AppState> {
-   Router::new()
+pub fn router(indexnow_key: &str) -> Router<AppState> {
+   let mut router = Router::new()
       .route("/robots.txt", get(robots_txt))
       .route("/sitemap.xml", get(sitemap_index))
       .route("/sitemap-static.xml", get(sitemap_static))
-      .route("/sitemap-profiles.xml", get(sitemap_profiles))
+      .route("/sitemap-profiles.xml", get(sitemap_profiles));
+   if let Some(key) = crate::utils::host::indexnow_key(indexnow_key) {
+      let path = format!("/{key}.txt");
+      router = router.route(&path, get(indexnow_key_file));
+   }
+   router
 }
 
-/// Sitemap and robots loc URLs always use the configured public host
-/// (`nitter.cf`) so www / xitter responses don't split Google's property.
-fn public_origin(_headers: &HeaderMap, config: &Config) -> String {
-   config.url_prefix().trim_end_matches('/').to_owned()
+/// IndexNow ownership file. The body is the configured key and nothing else.
+async fn indexnow_key_file(State(state): State<AppState>) -> Response {
+   let Some(key) = crate::utils::host::indexnow_key(&state.config.config.indexnow_key) else {
+      return axum::http::StatusCode::NOT_FOUND.into_response();
+   };
+   (
+      [
+         (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+         (header::CACHE_CONTROL, "public, max-age=86400"),
+         (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+      ],
+      key.to_owned(),
+   )
+      .into_response()
+}
+
+/// Sitemap and robots loc URLs use the host that was requested when it is one
+/// of the public instances, so each webmaster property lists its own URLs.
+fn public_origin(headers: &HeaderMap, config: &Config) -> String {
+   crate::utils::host::origin_from_headers(headers, config.url_prefix())
 }
 
 fn text_response(body: String, content_type: &'static str) -> Response {

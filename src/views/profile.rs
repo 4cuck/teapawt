@@ -1,7 +1,7 @@
 use maud::{Markup, PreEscaped, html};
 
 use super::timeline::{
-   render_timeline_tabs, render_timeline_with_pinned_and_prefs, tab_to_kind, PostsMenu,
+   PostsMenu, render_timeline_tabs, render_timeline_with_pinned_and_prefs, tab_to_kind,
 };
 use crate::{
    config::Config,
@@ -11,8 +11,8 @@ use crate::{
       formatters,
    },
    views::renderutils::{
-      gen_img, get_avatar_class, icon, link_user, parse_location, render_bio_html, short_link,
-      verified_icon,
+      gen_img, get_avatar_class, header_alt, icon, link_user, parse_location, person_label,
+      profile_picture_alt, render_bio_html, short_link, verified_icon,
    },
 };
 
@@ -52,7 +52,7 @@ pub fn render_profile_with_prefs(
                div class="profile-header" {
                    @if !hide_banner {
                        div class="profile-banner" {
-                           (render_banner(&profile.user.banner, config, prefs.is_some_and(|pref| pref.proxy_media)))
+                           (render_banner(&profile.user, config, prefs.is_some_and(|pref| pref.proxy_media)))
                        }
                    }
                    (render_user_card(&profile.user, config, prefs))
@@ -130,7 +130,7 @@ pub fn render_profile_page(
                    div class="profile-header" {
                        @if !hide_banner {
                            div class="profile-banner" {
-                               (render_banner(&user.banner, config, prefs.proxy_media))
+                               (render_banner(user, config, prefs.proxy_media))
                            }
                        }
                        (render_user_card(user, config, Some(prefs)))
@@ -280,7 +280,8 @@ fn render_user_card(user: &User, config: &Config, prefs: Option<&Prefs>) -> Mark
    html! {
        div class="profile-card" {
            a class="profile-card-avatar" href=(orig_avatar_url) target="_blank" {
-               (gen_img(&avatar_pic, avatar_class, config, proxy))
+               @let alt = profile_picture_alt(user);
+               (gen_img(&avatar_pic, avatar_class, &alt, config, proxy))
            }
 
            div class="profile-card-identity" {
@@ -365,15 +366,17 @@ fn render_user_card(user: &User, config: &Config, prefs: Option<&Prefs>) -> Mark
 }
 
 /// Render banner.
-fn render_banner(banner: &str, config: &Config, proxy: bool) -> Markup {
+fn render_banner(user: &User, config: &Config, proxy: bool) -> Markup {
+   let banner = &user.banner;
    if banner.is_empty() {
       html! { a {} }
    } else if banner.starts_with('#') {
       html! { a style=(format!("background-color: {banner}")) {} }
    } else {
+      let alt = header_alt(&person_label(user));
       html! {
           a href=(formatters::get_pic_url(banner, config.config.base64_media, proxy)) target="_blank" {
-              (gen_img(banner, "", config, proxy))
+              (gen_img(banner, "", &alt, config, proxy))
           }
       }
    }
@@ -413,7 +416,11 @@ fn render_photo_rail(photos: &[GalleryPhoto], user: &User, config: &Config, prox
                @for photo in photos.iter().take(15) {
                    @let photo_suffix = if photo.url.contains("format") || photo.url.contains("placeholder") { "" } else { ":thumb" };
                    a href=(format!("/{}/status/{}#m", user.username, photo.tweet_id)) {
-                       (gen_img(&format!("{}{}", photo.url, photo_suffix), "", config, proxy))
+                       @let alt = {
+                           let who = person_label(user);
+                           if who.is_empty() { "Photo".to_owned() } else { format!("Photo by {who}") }
+                       };
+                       (gen_img(&format!("{}{}", photo.url, photo_suffix), "", &alt, config, proxy))
                    }
                }
            }

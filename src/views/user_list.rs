@@ -4,7 +4,9 @@ use crate::{
    config::Config,
    types::{Prefs, User},
    utils::formatters,
-   views::renderutils::{get_avatar_class, link_user, render_bio_html, verified_icon},
+   views::renderutils::{
+      get_avatar_class, link_user, profile_picture_alt, render_bio_html, verified_icon,
+   },
 };
 
 /// Render a list of users in timeline format.
@@ -65,7 +67,8 @@ pub fn render_user(user: &User, config: &Config, prefs: Option<&Prefs>) -> Marku
            div class="tweet-body profile-result" {
                div class="tweet-header" {
                    a class="tweet-avatar" href=(&href) {
-                       img src=(avatar_url) class=(avatar_class) alt="" loading="lazy";
+                       @let alt = profile_picture_alt(user);
+                       img src=(avatar_url) class=(avatar_class) alt=(alt) loading="lazy";
                    }
 
                    div class="tweet-name-row" {

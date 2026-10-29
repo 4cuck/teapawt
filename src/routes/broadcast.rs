@@ -59,7 +59,7 @@ async fn broadcast(
                        }
                    } @else if !stream.is_empty() {
                        @if !thumb.is_empty() {
-                           img src=(thumb) alt=(broadcast.title);
+                           img src=(thumb) alt=(crate::views::renderutils::alt_text(&broadcast.title, "Broadcast"));
                        }
                        div class="video-overlay" {
                            form method="post" action="/enablehls" {
@@ -71,7 +71,7 @@ async fn broadcast(
                            }
                        }
                    } @else if !thumb.is_empty() {
-                       img src=(thumb) alt=(broadcast.title);
+                       img src=(thumb) alt=(crate::views::renderutils::alt_text(&broadcast.title, "Broadcast"));
                        div class="video-overlay" {
                            p { @if broadcast.replay { "Stream unavailable" } @else { "Replay is not available" } }
                        }

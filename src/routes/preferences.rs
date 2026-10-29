@@ -266,7 +266,10 @@ async fn settings(
    let referer = local_redirect_target(query.referer.as_deref(), "/");
    let prefs_code = encode_prefs(&prefs, &state.config);
    let encoded_prefs = utf8_percent_encode(&prefs_code, NON_ALPHANUMERIC).to_string();
-   let prefs_url = format!("{}/?prefs={encoded_prefs}", state.config.url_prefix());
+   let prefs_url = format!(
+      "{}/?prefs={encoded_prefs}",
+      crate::utils::host::current_origin(state.config.url_prefix())
+   );
    let content = pref_view::render_preferences_form(&prefs, &themes, &referer, &prefs_url, firefox);
    let markup = layout::PageLayout::new(&state.config, "Settings", content)
       .description("Customize your teapawt experience")

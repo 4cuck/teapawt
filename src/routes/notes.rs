@@ -107,7 +107,7 @@ async fn show_note_inner(state: AppState, jar: CookieJar, id: String) -> Result<
       String::new()
    } else {
       formatters::join_base(
-         &state.config.url_prefix(),
+         &crate::utils::host::current_origin(state.config.url_prefix()),
          &formatters::get_pic_url(
             &article.cover_image,
             state.config.config.base64_media,

@@ -24,6 +24,7 @@ fn test_config() -> Config {
       },
       config: AppConfig {
          hmac_key: "0123456789abcdef0123456789abcdef".to_owned(),
+         indexnow_key: String::new(),
          base64_media: true,
          enable_rss: true,
          client_budget: false,

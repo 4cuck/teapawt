@@ -44,8 +44,13 @@ pub async fn client_middleware(
    request: Request,
    next: Next,
 ) -> Response {
+   let origin =
+      crate::utils::host::origin_from_headers(request.headers(), state.config.url_prefix());
    let client = budget::client_from(peer.ip(), request.headers(), &state.trusted_proxies);
-   budget::CLIENT.scope(client, next.run(request)).await
+   crate::utils::host::scope(origin, async move {
+      budget::CLIENT.scope(client, next.run(request)).await
+   })
+   .await
 }
 
 /// Browsers without `Sec-Fetch-Site` predate 2023, and non-browser clients

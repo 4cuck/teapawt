@@ -421,7 +421,7 @@ fn build_oembed_url(tweet: &Tweet, config: &Config) -> String {
    );
    let mut url = format!(
       "{}/owoembed?text={}&author={}&status={}",
-      config.url_prefix(),
+      crate::utils::host::current_origin(config.url_prefix()),
       formatters::url_encode(&engagement_text),
       formatters::url_encode(&tweet.user.username),
       tweet.id,
@@ -449,7 +449,8 @@ pub fn render_tweet_embed(
    discord_activity: bool,
    proxy: bool,
 ) -> Markup {
-   let url_prefix = config.url_prefix();
+   let url_prefix_owned = crate::utils::host::current_origin(config.url_prefix());
+   let url_prefix = url_prefix_owned.as_str();
    let oembed_url = build_oembed_url(tweet, config);
    let description = if discord_activity {
       build_discord_embed_description(tweet)
@@ -505,7 +506,8 @@ pub fn render_tweet_embed(
    reason = "public API name is clear and conventional"
 )]
 pub fn render_video_embed(tweet: &Tweet, config: &Config, proxy: bool) -> Markup {
-   let url_prefix = config.url_prefix();
+   let url_prefix_owned = crate::utils::host::current_origin(config.url_prefix());
+   let url_prefix = url_prefix_owned.as_str();
 
    let media = video_embed_media(tweet);
    let thumbnail_path = media
@@ -587,7 +589,8 @@ pub fn render_status_page(
    id: &str,
    activity: Option<ActivityId>,
 ) -> Markup {
-   let url_prefix = config.url_prefix();
+   let url_prefix_owned = crate::utils::host::current_origin(config.url_prefix());
+   let url_prefix = url_prefix_owned.as_str();
    let discord_activity = activity.is_some();
    let oembed_url = build_oembed_url(tweet, config);
 

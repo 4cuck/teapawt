@@ -236,7 +236,10 @@ async fn oembed(
       provider_name: provider
          .clone()
          .unwrap_or_else(|| state.config.server.title.clone()),
-      provider_url: provider.map_or_else(|| state.config.url_prefix().to_owned(), |_| author_url),
+      provider_url: provider.map_or_else(
+         || crate::utils::host::current_origin(state.config.url_prefix()),
+         |_| author_url,
+      ),
       title: "Embed",
       kind: "rich",
       version: "1.0",
@@ -278,7 +281,7 @@ async fn oembed_standard(
       .ok_or_else(|| Error::InvalidUrl("Could not parse tweet URL".into()))?;
 
    let tweet = state.api.get_tweet(tweet_id).await?;
-   let url_prefix = state.config.url_prefix();
+   let url_prefix = crate::utils::host::current_origin(state.config.url_prefix());
 
    let author_name = format!("{} (@{})", tweet.user.fullname, tweet.user.username);
    let author_url = format!("{url_prefix}/{}", tweet.user.username);

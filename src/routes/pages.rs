@@ -18,9 +18,52 @@ use crate::{
    },
 };
 
-const HOME_DESCRIPTION: &str = "nitter.cf is a public Nitter replacement — a privacy-focused Twitter/X frontend. nitter.net shut down; this instance is a drop-in successor.";
-const ABOUT_DESCRIPTION: &str = "About nitter.cf, a public Nitter replacement. After nitter.net shut down, this teapawt instance lets you browse Twitter/X without JavaScript or tracking.";
-const HOME_JSON_LD: &str = r#"{"@context":"https://schema.org","@type":"WebSite","name":"nitter.cf","alternateName":["Nitter","teapawt","xitter.cf"],"url":"https://nitter.cf/","description":"Public Nitter replacement. nitter.net shut down; nitter.cf is a privacy-focused Twitter/X frontend.","sameAs":["https://xitter.cf"],"potentialAction":{"@type":"SearchAction","target":{"@type":"EntryPoint","urlTemplate":"https://nitter.cf/search?f=tweets&q={search_term_string}"},"query-input":"required name=search_term_string"}}"#;
+fn request_host(config: &crate::config::Config) -> (String, String) {
+   let origin = crate::utils::host::current_origin(config.url_prefix());
+   let host = crate::utils::host::request_origin().map_or_else(
+      || crate::utils::host::host_label(config.url_prefix()).to_owned(),
+      |value| crate::utils::host::host_label(&value).to_owned(),
+   );
+   (origin, host)
+}
+
+fn home_description(host: &str) -> String {
+   format!(
+      "{host} is a public Nitter replacement — a privacy-focused Twitter/X frontend. nitter.net shut down; this instance is a drop-in successor."
+   )
+}
+
+fn about_description(host: &str) -> String {
+   format!(
+      "About {host}, a public Nitter replacement. After nitter.net shut down, this teapawt instance lets you browse Twitter/X without JavaScript or tracking."
+   )
+}
+
+fn home_json_ld(origin: &str, host: &str) -> String {
+   let same_as: Vec<String> = crate::utils::host::APEX_HOSTS
+      .iter()
+      .filter(|item| **item != host)
+      .map(|item| format!("https://{item}"))
+      .collect();
+   let value = serde_json::json!({
+      "@context": "https://schema.org",
+      "@type": "WebSite",
+      "name": host,
+      "alternateName": ["teapawt", "Nitter", "xitter"],
+      "url": format!("{origin}/"),
+      "description": home_description(host),
+      "sameAs": same_as,
+      "potentialAction": {
+         "@type": "SearchAction",
+         "target": {
+            "@type": "EntryPoint",
+            "urlTemplate": format!("{origin}/search?f=tweets&q={{search_term_string}}")
+         },
+         "query-input": "required name=search_term_string"
+      }
+   });
+   value.to_string().replace('<', "\\u003c")
+}
 
 /// High-traffic public accounts linked from the homepage so crawlers discover
 /// profile URLs immediately instead of waiting for the sitemap.
@@ -75,11 +118,7 @@ pub fn router() -> Router<AppState> {
       .route("/help", get(|| async { Redirect::to("/about") }))
 }
 
-async fn home(
-   State(state): State<AppState>,
-   jar: CookieJar,
-   headers: HeaderMap,
-) -> Response {
+async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap) -> Response {
    let prefs = Prefs::from_cookies(&jar, &state.config);
    let firefox = headers
       .get(header::USER_AGENT)
@@ -132,15 +171,19 @@ async fn home(
       })
    };
    let content = search_view::render_search_page(notice, Some(below));
+   let (origin, host) = request_host(&state.config);
+   let title = format!("{host} — Nitter replacement");
+   let description = home_description(&host);
+   let json_ld = home_json_ld(&origin, &host);
    let head = html! {
        meta property="og:type" content="website";
        script type="application/ld+json" {
-           (PreEscaped(HOME_JSON_LD))
+           (PreEscaped(json_ld))
        }
    };
 
-   let markup = PageLayout::new(&state.config, "nitter.cf — Nitter replacement", content)
-      .description(HOME_DESCRIPTION)
+   let markup = PageLayout::new(&state.config, &title, content)
+      .description(&description)
       .prefs(&prefs)
       .referer("/")
       .head_extra(&head)
@@ -183,15 +226,23 @@ fn mirror_announcement() -> maud::Markup {
 
 async fn about(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
    let prefs = Prefs::from_cookies(&jar, &state.config);
+   let (_, host) = request_host(&state.config);
+   let title = format!("About {host}");
+   let description = about_description(&host);
+   let mirrors: Vec<&str> = crate::utils::host::APEX_HOSTS
+      .iter()
+      .copied()
+      .filter(|item| *item != host)
+      .collect();
    let head = html! {
        meta property="og:type" content="website";
    };
    let content = html! {
        div class="overlay-panel" {
-           h1 { "About nitter.cf" }
+           h1 { "About " (host) }
 
            p {
-               strong { "nitter.cf" }
+               strong { (host) }
                " is a public Nitter replacement — a privacy-focused Twitter/X frontend. "
                "nitter.net shut down; this instance is meant as a drop-in successor. "
                "Same URL style ("
@@ -200,7 +251,10 @@ async fn about(State(state): State<AppState>, jar: CookieJar) -> impl IntoRespon
                code { "/username/status/id" }
                "), no JavaScript required, and Twitter never sees your IP or fingerprint. "
                "Also available at "
-               a href="https://xitter.cf" { "xitter.cf" }
+               @for (i, mirror) in mirrors.iter().enumerate() {
+                   @if i > 0 { ", " }
+                   a href=(format!("https://{mirror}/")) { (*mirror) }
+               }
                "."
            }
 
@@ -267,8 +321,8 @@ async fn about(State(state): State<AppState>, jar: CookieJar) -> impl IntoRespon
        }
    };
 
-   let markup = PageLayout::new(&state.config, "About nitter.cf", content)
-      .description(ABOUT_DESCRIPTION)
+   let markup = PageLayout::new(&state.config, &title, content)
+      .description(&description)
       .prefs(&prefs)
       .referer("/about")
       .head_extra(&head)

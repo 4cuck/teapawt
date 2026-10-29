@@ -155,7 +155,7 @@ fn render_community(
            @if !banner.is_empty() {
                div class="timeline-banner" {
                    a href=(banner) target="_blank" {
-                       img src=(banner) alt="";
+                       img src=(banner) alt=(crate::views::renderutils::header_alt(&info.name));
                    }
                }
            }

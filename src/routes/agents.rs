@@ -402,7 +402,7 @@ fn decode_entities(text: &str) -> String {
 }
 
 fn origin(state: &AppState) -> String {
-   state.config.url_prefix().trim_end_matches('/').to_owned()
+   crate::utils::host::current_origin(state.config.url_prefix())
 }
 
 fn json_doc(body: Value, content_type: &'static str) -> Response {

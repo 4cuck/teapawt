@@ -8,8 +8,9 @@ use crate::{
    },
    utils::{country, entity_expander::expand_with_regex, expand_entities, formatters},
    views::renderutils::{
-      button_referer, gen_img, get_avatar_class, get_medium_pic, get_small_pic, icon, link_user,
-      parse_location, proxy_media, render_community_note, verified_icon,
+      alt_text, button_referer, gen_img, get_avatar_class, get_medium_pic, get_small_pic, icon,
+      link_user, parse_location, person_label, profile_picture_alt, proxy_media,
+      render_community_note, verified_icon,
    },
 };
 
@@ -304,7 +305,7 @@ impl<'a> TweetRenderer<'a> {
 
                   // Media (photos)
                   @if !display_tweet.photos.is_empty() {
-                      (render_photos(&display_tweet.photos, config, big_thumb, proxy_media(prefs)))
+                      (render_photos(&display_tweet.photos, &display_tweet.user, config, big_thumb, proxy_media(prefs)))
                   }
 
                   // Video
@@ -406,7 +407,13 @@ impl<'a> TweetRenderer<'a> {
 /// Photos are grouped into rows:
 /// - 1-2 photos: single row
 /// - 3+ photos: distributed into 2 rows (e.g. 3 → [2, 1], 4 → [2, 2])
-fn render_photos(photos: &[Photo], config: &Config, big_thumb: bool, proxy: bool) -> Markup {
+fn render_photos(
+   photos: &[Photo],
+   user: &User,
+   config: &Config,
+   big_thumb: bool,
+   proxy: bool,
+) -> Markup {
    let groups: Vec<&[Photo]> = if photos.len() < 3 {
       vec![photos]
    } else {
@@ -430,9 +437,10 @@ fn render_photos(photos: &[Photo], config: &Config, big_thumb: bool, proxy: bool
                            get_small_pic(&photo.url, config, proxy)
                        };
                        @let orig_url = formatters::get_orig_pic_url(&photo.url, config.config.base64_media, proxy);
+                       @let alt = alt_text(&photo.alt_text, &format!("Image from {}", person_label(user)));
                        div class="attachment image" {
                            a class="still-image" href=(orig_url) target="_blank" {
-                               img src=(small) alt=(photo.alt_text) loading="lazy";
+                               img src=(small) alt=(alt) loading="lazy";
                            }
                            @if !photo.alt_text.is_empty() {
                                p class="alt-text" { "ALT  " (photo.alt_text) }
@@ -477,8 +485,9 @@ fn render_mini_avatar(user: &User, config: &Config, prefs: Option<&Prefs>) -> Ma
    };
    let pic = formatters::get_user_pic(&user.user_pic, "_mini");
    let pic_url = formatters::get_pic_url(&pic, config.config.base64_media, proxy_media(prefs));
+   let alt = profile_picture_alt(user);
    html! {
-       img src=(pic_url) class=(avatar_class) alt="" loading="lazy";
+       img src=(pic_url) class=(avatar_class) alt=(alt) loading="lazy";
    }
 }
 
@@ -559,7 +568,7 @@ fn render_quote(quote: &Tweet, config: &Config, prefs: Option<&Prefs>) -> Markup
 
            // Media
            @if !quote.photos.is_empty() {
-               (render_photos(&quote.photos, config, false, proxy_media(prefs)))
+               (render_photos(&quote.photos, &quote.user, config, false, proxy_media(prefs)))
            }
            @if let Some(ref video) = quote.video {
                (render_video(video, config, prefs, false))
@@ -634,8 +643,9 @@ fn render_poll(poll: &Poll, config: &Config, proxy: bool) -> Markup {
        div class="poll" {
            @if has_images {
                div class="poll-choice-images" {
-                   @for img in &poll.choice_images {
-                       (gen_img(img, "poll-choice-img", config, proxy))
+                   @for (idx, img) in poll.choice_images.iter().enumerate() {
+                       @let alt = poll.options.get(idx).map_or("Poll choice", |option| option.as_str());
+                       (gen_img(img, "poll-choice-img", alt, config, proxy))
                    }
                }
            }
@@ -664,7 +674,8 @@ fn render_card_image(card: &Card, config: &Config, proxy: bool) -> Markup {
    html! {
        div class="card-image-container" {
            div class="card-image" {
-               (gen_img(&card.image, "", config, proxy))
+               @let alt = alt_text(&card.title, "Link preview");
+               (gen_img(&card.image, "", &alt, config, proxy))
                @if matches!(card.kind, CardKind::Player) {
                    div class="card-overlay" {
                        div class="overlay-circle" {
@@ -773,8 +784,9 @@ fn render_user_avatar(user: &User, config: &Config, prefs: Option<&Prefs>) -> Ma
       proxy_media(prefs),
    );
    let avatar_class = get_avatar_class(prefs);
+   let alt = profile_picture_alt(user);
    html! {
-       img src=(avatar_url) class=(avatar_class) alt="" loading="lazy";
+       img src=(avatar_url) class=(avatar_class) alt=(alt) loading="lazy";
    }
 }
 
@@ -798,7 +810,8 @@ pub fn render_thread_context(tweet: &Tweet, config: &Config, prefs: &Prefs) -> M
        aside class="thread-context-bar" aria-label="Original post context" {
            a class="thread-context-link" href="#m" title="Back to the original post" {
                span class="sr-only" { "Back to the original post: " }
-               img class="thread-context-avatar" src=(avatar_url) alt="" loading="lazy";
+               @let alt = profile_picture_alt(&display_tweet.user);
+               img class="thread-context-avatar" src=(avatar_url) alt=(alt) loading="lazy";
                span class="thread-context-copy" {
                    strong class="thread-context-author" { (&display_tweet.user.fullname) }
                    span class="thread-context-text" dir="auto" { (text) }
@@ -899,13 +912,14 @@ fn render_video(video: &Video, config: &Config, prefs: Option<&Prefs>, big_thumb
    let playback_enabled = prefs.is_none_or(|pref| pref.mp4_playback);
 
    let mute_videos = prefs.is_some_and(|pref| pref.mute_videos);
+   let video_alt = alt_text(&video.title, "Video");
 
    html! {
        div class="attachments card" {
            div class=(format!("gallery-video{container}")) {
                div class="attachment video-container" {
                    @if !video.available {
-                       img src=(thumb) loading="lazy";
+                       img src=(thumb) alt=(&video_alt) loading="lazy";
                        div class="video-overlay" {
                            @if video.reason == "dmcaed" {
                                p { "This media has been disabled in response to a report by the copyright owner" }
@@ -915,12 +929,12 @@ fn render_video(video: &Video, config: &Config, prefs: Option<&Prefs>, big_thumb
                        }
                    } @else if !playback_enabled {
                        // Playback disabled in preferences
-                       img src=(thumb) loading="lazy";
+                       img src=(thumb) alt=(&video_alt) loading="lazy";
                        div class="video-overlay" {
                            (button_referer("/enablemp4", "Enable mp4 playback", "", "", ""))
                        }
                    } @else if proxy_media(prefs) && video.exceeds_cloudflare_cache() {
-                       img src=(thumb) loading="lazy";
+                       img src=(thumb) alt=(&video_alt) loading="lazy";
                        div class="video-overlay cache-limit" {
                            p {
                                (VIDEO_CACHE_LIMIT_MESSAGE)
@@ -947,13 +961,13 @@ fn render_video(video: &Video, config: &Config, prefs: Option<&Prefs>, big_thumb
                            }
                        }
                    } @else if video.best_hls_url().is_some() {
-                       img src=(thumb) loading="lazy";
+                       img src=(thumb) alt=(&video_alt) loading="lazy";
                        div class="video-overlay" {
                            (button_referer("/enablehls", "Enable hls playback", "", "", ""))
                        }
                    } @else {
                        // No playable URL available - show thumbnail with duration
-                       img src=(thumb) loading="lazy";
+                       img src=(thumb) alt=(&video_alt) loading="lazy";
                        div class="video-overlay" {
                            div class="overlay-duration" { (duration) }
                        }

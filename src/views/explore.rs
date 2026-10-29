@@ -176,7 +176,7 @@ fn render_trend(rank: usize, trend: &Trend, config: &Config, prefs: &Prefs) -> M
                    span class="trend-meta" { (trend.detail) }
                }
                @if !image.is_empty() {
-                   img class="trend-thumb" src=(image) alt="" loading="lazy";
+                   img class="trend-thumb" src=(image) alt=(crate::views::renderutils::alt_text(&trend.name, "Trending topic")) loading="lazy";
                }
            }
        }

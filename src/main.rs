@@ -200,7 +200,7 @@ async fn main() -> eyre::Result<()> {
    // Build the router with specific routes before static files
    let static_dir = config.server.static_dir.clone();
    let app = Router::new()
-        .merge(routes::router())
+        .merge(routes::router(&config.config.indexnow_key))
         // Serve static files at various paths
         .nest_service("/public", ServeDir::new(&static_dir))
         .nest_service("/css", ServeDir::new(format!("{static_dir}/css")))

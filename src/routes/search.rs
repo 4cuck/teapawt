@@ -594,17 +594,20 @@ async fn hashtag(
 }
 
 async fn opensearch(State(state): State<AppState>) -> Response {
+   let origin = crate::utils::host::current_origin(state.config.url_prefix());
+   let host = crate::utils::host::request_origin().map_or_else(
+      || state.config.server.hostname.clone(),
+      |value| crate::utils::host::host_label(&value).to_owned(),
+   );
    let xml = format!(
       r#"<?xml version="1.0" encoding="UTF-8"?>
 <OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/">
   <ShortName>{}</ShortName>
   <Description>Twitter search via {}</Description>
   <InputEncoding>UTF-8</InputEncoding>
-  <Url type="text/html" template="{}/search?q={{searchTerms}}"/>
+  <Url type="text/html" template="{origin}/search?q={{searchTerms}}"/>
 </OpenSearchDescription>"#,
-      state.config.server.title,
-      state.config.server.hostname,
-      state.config.url_prefix()
+      state.config.server.title, host,
    );
 
    (

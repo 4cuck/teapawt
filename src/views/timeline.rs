@@ -5,7 +5,7 @@ use crate::{
    config::Config,
    types::{List, Prefs, TimelineKind, Tweet, Tweets},
    utils::formatters,
-   views::renderutils::{gen_img, icon},
+   views::renderutils::{gen_img, header_alt, icon},
 };
 
 /// Render a timeline of tweets with optional "Load more" link.
@@ -304,7 +304,11 @@ pub fn posts_href(username: &str, filter: &str, sort: &str) -> String {
 }
 
 /// Render timeline with tabs (tweets, replies, media).
-pub fn render_timeline_tabs(active_tab: TimelineKind, username: &str, menu: &PostsMenu<'_>) -> Markup {
+pub fn render_timeline_tabs(
+   active_tab: TimelineKind,
+   username: &str,
+   menu: &PostsMenu<'_>,
+) -> Markup {
    let on_posts = active_tab == TimelineKind::Tweets;
    let posts_label = match menu.filter {
       "posts" if on_posts => "Posts",
@@ -414,7 +418,8 @@ pub fn render_list_header(list: &List, active_tab: &str, config: &Config, proxy:
        @if !list.banner.is_empty() {
            div class="timeline-banner" {
                a href=(formatters::get_pic_url(&list.banner, config.config.base64_media, proxy)) target="_blank" {
-                   (gen_img(&list.banner, "", config, proxy))
+                   @let alt = header_alt(&list.name);
+                   (gen_img(&list.banner, "", &alt, config, proxy))
                }
            }
        }

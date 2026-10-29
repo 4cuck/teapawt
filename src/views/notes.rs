@@ -36,16 +36,19 @@ pub fn render_note(
    html! {
        div class="note" {
            @if !cover.is_empty() {
-               img class="cover" src=(cover) alt="" loading="lazy";
+               @let alt = renderutils::alt_text(&article.title, "Article cover");
+               img class="cover" src=(cover) alt=(alt) loading="lazy";
            }
 
            article {
                h1 { (article.title) }
 
                div class="author" {
+                   @let alt = renderutils::profile_picture_alt(&article.user);
                    (renderutils::gen_img(
                       &formatters::get_user_pic(&article.user.user_pic, "_normal"),
                       avatar_class,
+                      &alt,
                       config,
                       proxy,
                    ))
@@ -226,7 +229,7 @@ fn render_atomic(
                   let pic = formatters::get_pic_url(&media.url, config.config.base64_media, proxy);
                   markup_parts.push(html! {
                       span class="image" {
-                          img src=(pic) alt="" loading="lazy";
+                          img src=(pic) alt=(renderutils::alt_text(&article.title, "Article image")) loading="lazy";
                       }
                   });
                },
@@ -300,7 +303,11 @@ fn render_text_with_entities(para: &ArticleParagraph, article: &Article, proxy: 
          },
          ArticleEntityType::Twemoji => {
             let pic = formatters::get_pic_url(&entity.twemoji, false, proxy);
-            parts.push(html! { img class="twemoji" src=(pic) alt=""; });
+            let end = (er.offset + er.length).min(chars.len());
+            let start = er.offset.min(end);
+            let emoji: String = chars[start..end].iter().collect();
+            let alt = renderutils::alt_text(&emoji, "emoji");
+            parts.push(html! { img class="twemoji" src=(pic) alt=(alt); });
          },
          _ => {
             parts.push(styled_inner);

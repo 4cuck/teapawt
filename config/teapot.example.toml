@@ -25,6 +25,10 @@ rssMinutes  = 10    # How long to cache RSS queries
 # Generate a unique value for every instance, e.g. with openssl rand -hex 32
 hmacKey = ""
 
+# IndexNow key, served at /{key}.txt. Leave empty to disable. The file is
+# public by design; still keep the live value in the gitignored config.
+indexNowKey = ""
+
 # Use base64 encoding for proxied media URLs
 base64Media = false
 

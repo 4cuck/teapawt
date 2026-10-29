@@ -156,13 +156,63 @@ pub fn button_referer(action: &str, text: &str, path: &str, class: &str, method:
    }
 }
 
+/// Prefer `preferred` when it has visible text, otherwise `fallback`.
+///
+/// Bing Webmaster treats a missing or blank `alt` as an error, so the result
+/// is never empty.
+pub fn alt_text(preferred: &str, fallback: &str) -> String {
+   let preferred = preferred.split_whitespace().collect::<Vec<_>>().join(" ");
+   if !preferred.is_empty() {
+      return preferred;
+   }
+   let fallback = fallback.split_whitespace().collect::<Vec<_>>().join(" ");
+   if fallback.is_empty() {
+      "Image".to_owned()
+   } else {
+      fallback
+   }
+}
+
+/// "Name (@handle)" for alt text. Empty when the account has neither.
+pub fn person_label(user: &User) -> String {
+   let name = user.fullname.trim();
+   let handle = user.username.trim();
+   match (name.is_empty(), handle.is_empty()) {
+      (false, false) => format!("{name} (@{handle})"),
+      (false, true) => name.to_owned(),
+      (true, false) => format!("@{handle}"),
+      (true, true) => String::new(),
+   }
+}
+
+/// Alt text for a profile picture.
+pub fn profile_picture_alt(user: &User) -> String {
+   let label = person_label(user);
+   if label.is_empty() {
+      "Profile picture".to_owned()
+   } else {
+      format!("{label} profile picture")
+   }
+}
+
+/// Alt text for a profile, list, or community header image.
+pub fn header_alt(label: &str) -> String {
+   let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+   if label.is_empty() {
+      "Header image".to_owned()
+   } else {
+      format!("{label} header")
+   }
+}
+
 /// Render a proxied image.
 ///
-/// Produces: `<img src="{pic_url}" class="{class}" alt="" loading="lazy">`.
-pub fn gen_img(url: &str, class: &str, config: &Config, proxy: bool) -> Markup {
+/// Produces: `<img src="{pic_url}" class="{class}" alt="..." loading="lazy">`.
+pub fn gen_img(url: &str, class: &str, alt: &str, config: &Config, proxy: bool) -> Markup {
    let pic_url = formatters::get_pic_url(url, config.config.base64_media, proxy);
+   let alt = alt_text(alt, "Image");
    html! {
-       img src=(pic_url) class=(class) alt="" loading="lazy";
+       img src=(pic_url) class=(class) alt=(alt) loading="lazy";
    }
 }
 
@@ -286,6 +336,13 @@ mod tests {
       let rendered = community_note_to_html(&note);
 
       assert_eq!(rendered, "&lt;img src=x onerror=alert(1)&gt;");
+   }
+
+   #[test]
+   fn alt_text_never_stays_blank() {
+      assert_eq!(super::alt_text("  a beach  ", "Photo"), "a beach");
+      assert_eq!(super::alt_text("   ", "Photo"), "Photo");
+      assert_eq!(super::alt_text("", "  "), "Image");
    }
 
    #[test]

@@ -7,7 +7,7 @@ use axum::{
    routing::get,
 };
 use axum_extra::extract::CookieJar;
-use maud::html;
+use maud::{PreEscaped, html};
 use serde::Deserialize;
 
 use super::{
@@ -27,6 +27,69 @@ use crate::{
 /// Below this many accounts with `UserTweets` left, a stale profile is shown
 /// as-is. The background refresh would spend the quota the visitor needs.
 const TIMELINE_REFRESH_FLOOR: usize = 8;
+
+fn profile_description(user: &crate::types::User, host: &str) -> String {
+   let who = if user.fullname.trim().is_empty() {
+      format!("@{}", user.username)
+   } else {
+      format!("{} (@{})", user.fullname.trim(), user.username)
+   };
+   let bio = layout::strip_html(&user.bio);
+   let bio = bio.split_whitespace().collect::<Vec<_>>().join(" ");
+   let lead = format!("{who} on {host}.");
+   if bio.is_empty() {
+      return format!("{lead} Read their latest posts without an X account.");
+   }
+   let desc = format!("{lead} {bio}");
+   if desc.chars().count() > 160 {
+      format!("{}…", desc.chars().take(159).collect::<String>())
+   } else {
+      desc
+   }
+}
+
+fn profile_json_ld(user: &crate::types::User, page_url: &str, image: &str) -> maud::Markup {
+   let name = if user.fullname.trim().is_empty() {
+      format!("@{}", user.username)
+   } else {
+      user.fullname.trim().to_owned()
+   };
+   let bio = layout::strip_html(&user.bio);
+   let mut entity = serde_json::json!({
+      "@type": "Person",
+      "name": name,
+      "alternateName": format!("@{}", user.username),
+      "identifier": user.username,
+      "url": page_url,
+      "description": bio,
+      "sameAs": format!("https://x.com/{}", user.username),
+      "interactionStatistic": [
+         {
+            "@type": "InteractionCounter",
+            "interactionType": "https://schema.org/FollowAction",
+            "userInteractionCount": user.followers.max(0)
+         },
+         {
+            "@type": "InteractionCounter",
+            "interactionType": "https://schema.org/WriteAction",
+            "userInteractionCount": user.tweets.max(0)
+         }
+      ]
+   });
+   if !image.is_empty() {
+      entity["image"] = serde_json::Value::String(image.to_owned());
+   }
+   let value = serde_json::json!({
+      "@context": "https://schema.org",
+      "@type": "ProfilePage",
+      "url": page_url,
+      "mainEntity": entity
+   });
+   let json = value.to_string().replace('<', "\\u003c");
+   html! {
+       script type="application/ld+json" { (PreEscaped(json)) }
+   }
+}
 
 async fn load_first_profile(state: &AppState, username: &str) -> Result<Profile> {
    let cache_key = cache_keys::profile(username);
@@ -396,22 +459,34 @@ async fn user_timeline(
             return Ok(Html(content.into_string()).into_response());
          }
 
-         let title = format!(
-            "{} (@{})",
-            profile_data.user.fullname, profile_data.user.username
+         let origin = crate::utils::host::current_origin(state.config.url_prefix());
+         let host = crate::utils::host::request_origin().map_or_else(
+            || crate::utils::host::host_label(state.config.url_prefix()).to_owned(),
+            |value| crate::utils::host::host_label(&value).to_owned(),
          );
-         let desc = format!("The latest tweets from {}", profile_data.user.fullname);
+         let title = if profile_data.user.fullname.trim().is_empty() {
+            format!("@{}", profile_data.user.username)
+         } else {
+            format!(
+               "{} (@{})",
+               profile_data.user.fullname.trim(),
+               profile_data.user.username
+            )
+         };
+         let desc = profile_description(&profile_data.user, &host);
          let canonical = format!("https://x.com/{}", profile_data.user.username);
          let rss_url = format!("/{}/rss", profile_data.user.username);
          let referer = format!("/{}", profile_data.user.username);
+         let page_url = format!("{origin}/{}", profile_data.user.username);
          let og_image = formatters::join_base(
-            &state.config.url_prefix(),
+            &origin,
             &formatters::get_pic_url(
                &profile_data.user.user_pic.replace("_normal", "_400x400"),
                state.config.config.base64_media,
                prefs.proxy_media,
             ),
          );
+         let head = profile_json_ld(&profile_data.user, &page_url, &og_image);
          let newer = query
             .cursor
             .is_some()
@@ -446,6 +521,7 @@ async fn user_timeline(
             .referer(&referer)
             .og_image(&og_image)
             .og_type("object")
+            .head_extra(&head)
             .render();
 
          Ok(Html(markup.into_string()).into_response())
@@ -835,7 +911,14 @@ async fn multi_user_timeline(
             })
             .await
             .ok()?;
-            Some(timeline.ok()?.content.into_iter().flatten().collect::<Vec<_>>())
+            Some(
+               timeline
+                  .ok()?
+                  .content
+                  .into_iter()
+                  .flatten()
+                  .collect::<Vec<_>>(),
+            )
          }))
       })
       .collect();

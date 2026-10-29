@@ -80,7 +80,8 @@ impl<'a> PageLayout<'a> {
       if self.referer.is_empty() || !self.referer.starts_with('/') {
          return None;
       }
-      Some(format!("{}{}", self.config.url_prefix(), self.referer))
+      let origin = crate::utils::host::current_origin(self.config.url_prefix());
+      Some(format!("{origin}{}", self.referer))
    }
 
    pub const fn og_image(mut self, og_image: &'a str) -> Self {
@@ -172,7 +173,10 @@ impl<'a> PageLayout<'a> {
                   // OpenSearch description (full absolute URL to /opensearch)
                   link rel="search" type="application/opensearchdescription+xml"
                       title=(self.config.server.title)
-                      href=(format!("{}/opensearch", self.config.url_prefix()));
+                      href=(format!(
+                          "{}/opensearch",
+                          crate::utils::host::current_origin(self.config.url_prefix())
+                      ));
 
                   // RSS alternate link
                   @if self.config.config.enable_rss && !self.rss.is_empty() {

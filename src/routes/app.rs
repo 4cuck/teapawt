@@ -6,9 +6,9 @@ use crate::AppState;
 
 /// Axum matches in merge order, so anything that would be swallowed by
 /// `timeline`'s greedy `/{username}` must be merged before it.
-pub fn router() -> Router<AppState> {
+pub fn router(indexnow_key: &str) -> Router<AppState> {
    Router::new()
-      .merge(super::seo::router())
+      .merge(super::seo::router(indexnow_key))
       .merge(super::agents::router())
       .merge(super::pages::router())
       .merge(super::donate::router())

@@ -100,7 +100,7 @@ async fn start_donation(
       return page(&state, &jar, Some("That payment method is not available."), false).await;
    }
    let id = donations::new_donation_id();
-   let base = state.config.url_prefix();
+   let base = crate::utils::host::current_origin(state.config.url_prefix());
    let cancel = format!("{base}/donate?canceled=1");
    let result = match provider {
       "stripe" => {

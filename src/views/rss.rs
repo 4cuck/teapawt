@@ -74,7 +74,8 @@ pub fn render_user_rss_with_pinned(
    pinned: Option<&Tweet>,
    proxy: bool,
 ) -> String {
-   let url_prefix = config.url_prefix();
+   let url_prefix_owned = crate::utils::host::current_origin(config.url_prefix());
+   let url_prefix = url_prefix_owned.as_str();
    let feed_path = match feed_kind {
       "replies" => format!("/{}/with_replies/rss", user.username),
       "reposts" => format!("/{}/reposts/rss", user.username),
@@ -115,7 +116,8 @@ pub fn render_user_rss_with_pinned(
    reason = "public API name is clear and conventional"
 )]
 pub fn render_search_rss(query: &str, tweets: &Tweets, config: &Config, proxy: bool) -> String {
-   let url_prefix = config.url_prefix();
+   let url_prefix_owned = crate::utils::host::current_origin(config.url_prefix());
+   let url_prefix = url_prefix_owned.as_str();
    let esc_name = escape_xml(query);
    let encoded_q = percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC);
    let items = render_tweet_items(tweets, config, proxy);
@@ -136,7 +138,8 @@ pub fn render_search_rss(query: &str, tweets: &Tweets, config: &Config, proxy: b
    reason = "public API name is clear and conventional"
 )]
 pub fn render_list_rss(list: &List, tweets: &Tweets, config: &Config, proxy: bool) -> String {
-   let url_prefix = config.url_prefix();
+   let url_prefix_owned = crate::utils::host::current_origin(config.url_prefix());
+   let url_prefix = url_prefix_owned.as_str();
    let link = with_proxy_media(&format!("{url_prefix}/i/lists/{}", list.id), proxy);
    let items = render_tweet_items(tweets, config, proxy);
    let title = format!("{} / @{}", escape_xml(&list.name), list.username);
@@ -158,7 +161,8 @@ pub fn render_thread_rss(
    config: &Config,
    proxy: bool,
 ) -> String {
-   let url_prefix = config.url_prefix();
+   let url_prefix_owned = crate::utils::host::current_origin(config.url_prefix());
+   let url_prefix = url_prefix_owned.as_str();
    let page = format!("{url_prefix}/{}/status/{}", tweet.user.username, tweet.id);
    let self_url = with_proxy_media(&format!("{page}/rss"), proxy);
    let link = with_proxy_media(&page, proxy);
@@ -176,14 +180,7 @@ pub fn render_thread_rss(
       .filter(|tw| tw.available)
       .map(|tw| render_tweet_item(tw, url_prefix, config, proxy))
       .collect();
-   rss_channel(
-      &self_url,
-      &title,
-      &link,
-      &description,
-      "",
-      &items,
-   )
+   rss_channel(&self_url, &title, &link, &description, "", &items)
 }
 
 /// Render tweet items for RSS feed.
@@ -199,7 +196,8 @@ fn render_tweet_items_with_pinned(
    user_id: Option<&str>,
    proxy: bool,
 ) -> String {
-   let url_prefix = config.url_prefix();
+   let url_prefix_owned = crate::utils::host::current_origin(config.url_prefix());
+   let url_prefix = url_prefix_owned.as_str();
    let pinned_id = pinned.map(|tweet| tweet.id);
    let mut seen_links: HashSet<String> = HashSet::new();
 
@@ -282,7 +280,8 @@ fn get_title(tweet: &Tweet, retweet_username: &str) -> String {
 
 /// Render the body of a single tweet for RSS.
 fn render_rss_tweet(tweet: &Tweet, config: &Config, proxy: bool) -> String {
-   let url_prefix = config.url_prefix();
+   let url_prefix_owned = crate::utils::host::current_origin(config.url_prefix());
+   let url_prefix = url_prefix_owned.as_str();
 
    // Use replaceUrls with absolute URLs
    let text = formatters::replace_urls_abs(&escape_tags(&tweet.text), config, url_prefix);
@@ -292,32 +291,49 @@ fn render_rss_tweet(tweet: &Tweet, config: &Config, proxy: bool) -> String {
    if !tweet.photos.is_empty() {
       for photo in &tweet.photos {
          let pic_url = formatters::join_base(url_prefix, &get_pic_url(&photo.url, config, proxy));
-         let _ = write!(body, r#"<img src="{pic_url}" style="max-width:250px;" />"#);
+         let alt = crate::views::renderutils::alt_text(
+            &photo.alt_text,
+            &format!(
+               "Image from {}",
+               crate::views::renderutils::person_label(&tweet.user)
+            ),
+         );
+         let alt = html_escape(&alt);
+         let _ = write!(
+            body,
+            r#"<img src="{pic_url}" alt="{alt}" style="max-width:250px;" />"#
+         );
       }
    }
    if let Some(ref video) = tweet.video {
       // Render videos as linked thumbnails with a "Video" label
       if !video.thumb.is_empty() {
-         let thumb_url = formatters::join_base(url_prefix, &get_pic_url(&video.thumb, config, proxy));
+         let thumb_url =
+            formatters::join_base(url_prefix, &get_pic_url(&video.thumb, config, proxy));
          let tweet_link = format!("{}{}", url_prefix, tweet_link(tweet));
+         let alt = crate::views::renderutils::alt_text(&video.title, "Video");
+         let alt = html_escape(&alt);
          let _ = write!(
             body,
             r#"<a href="{tweet_link}">
 <br>Video<br>
-  <img src="{thumb_url}" style="max-width:250px;" />
+  <img src="{thumb_url}" alt="{alt}" style="max-width:250px;" />
 </a>"#
          );
       }
    }
    for video in &tweet.additional_videos {
       if !video.thumb.is_empty() {
-         let thumb_url = formatters::join_base(url_prefix, &get_pic_url(&video.thumb, config, proxy));
+         let thumb_url =
+            formatters::join_base(url_prefix, &get_pic_url(&video.thumb, config, proxy));
          let tweet_link = format!("{}{}", url_prefix, tweet_link(tweet));
+         let alt = crate::views::renderutils::alt_text(&video.title, "Video");
+         let alt = html_escape(&alt);
          let _ = write!(
             body,
             r#"<a href="{tweet_link}">
 <br>Video<br>
-  <img src="{thumb_url}" style="max-width:250px;" />
+  <img src="{thumb_url}" alt="{alt}" style="max-width:250px;" />
 </a>"#
          );
       }
@@ -336,7 +352,12 @@ fn render_rss_tweet(tweet: &Tweet, config: &Config, proxy: bool) -> String {
       // Card image
       if !card.image.is_empty() {
          let card_url = formatters::join_base(url_prefix, &get_pic_url(&card.image, config, proxy));
-         let _ = write!(body, r#"<img src="{card_url}" style="max-width:250px;" />"#);
+         let alt = crate::views::renderutils::alt_text(&card.title, "Link preview");
+         let alt = html_escape(&alt);
+         let _ = write!(
+            body,
+            r#"<img src="{card_url}" alt="{alt}" style="max-width:250px;" />"#
+         );
       }
    }
 

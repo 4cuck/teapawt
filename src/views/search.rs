@@ -243,7 +243,7 @@ fn render_list_hit(list: &List, config: &Config, proxy: bool) -> Markup {
                        }
                    }
                } @else {
-                   img src=(formatters::get_pic_url(&list.cover, config.config.base64_media, proxy)) alt="" loading="lazy";
+                   img src=(formatters::get_pic_url(&list.cover, config.config.base64_media, proxy)) alt=(crate::views::renderutils::alt_text(&list.name, "List cover")) loading="lazy";
                }
            }
            div class="list-hit-copy" {
@@ -256,7 +256,7 @@ fn render_list_hit(list: &List, config: &Config, proxy: bool) -> Markup {
                        @if !list.pictures.is_empty() {
                            span class="list-hit-faces" {
                                @for picture in &list.pictures {
-                                   img src=(formatters::get_pic_url(picture, config.config.base64_media, proxy)) alt="" loading="lazy";
+                                   img src=(formatters::get_pic_url(picture, config.config.base64_media, proxy)) alt=(crate::views::renderutils::alt_text(&list.name, "List member")) loading="lazy";
                                }
                            }
                        }

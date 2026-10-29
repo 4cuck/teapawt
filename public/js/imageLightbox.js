@@ -9,7 +9,7 @@
     <div class="image-lightbox-frame">
       <button class="image-lightbox-close" type="button" aria-label="Close image viewer">×</button>
       <button class="image-lightbox-nav image-lightbox-prev" type="button" aria-label="Previous image">‹</button>
-      <img class="image-lightbox-image" alt="">
+      <img class="image-lightbox-image" alt="Image">
       <button class="image-lightbox-nav image-lightbox-next" type="button" aria-label="Next image">›</button>
       <div class="image-lightbox-footer">
         <span class="image-lightbox-caption"></span>

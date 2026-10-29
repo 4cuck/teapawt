@@ -108,6 +108,11 @@ pub struct CacheConfig {
 pub struct AppConfig {
    #[serde(rename = "hmacKey")]
    pub hmac_key: String,
+   /// IndexNow ownership key. Served at `/{key}.txt` when it is 8–128 hex
+   /// characters. Empty disables the file. Keep the real value in the
+   /// gitignored config, not the public repo.
+   #[serde(default, rename = "indexNowKey")]
+   pub indexnow_key: String,
    #[serde(default, rename = "base64Media")]
    pub base64_media: bool,
    #[serde(default = "default_true", rename = "enableRSS")]
