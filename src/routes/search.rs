@@ -20,6 +20,37 @@ use crate::{
    views::{layout, search as search_view},
 };
 
+fn search_host(config: &Config) -> String {
+   crate::utils::host::request_origin().map_or_else(
+      || crate::utils::host::host_label(config.url_prefix()).to_owned(),
+      |value| crate::utils::host::host_label(&value).to_owned(),
+   )
+}
+
+/// Bing treats a search URL with no `meta name="description"` as an error.
+fn search_description(query: &str, host: &str, kind: &str) -> String {
+   let query = query.split_whitespace().collect::<Vec<_>>().join(" ");
+   let what = match kind {
+      "users" => "people",
+      "lists" => "lists",
+      _ => "posts",
+   };
+   if query.is_empty() {
+      return format!(
+         "Search public {what} on {host}. Find posts, people, and media without an X account."
+      );
+   }
+   let suffix = format!(" on {host}. Read matching public {what} without an X account.");
+   let prefix = "Search results for ";
+   let budget = 160usize.saturating_sub(prefix.chars().count() + suffix.chars().count());
+   let mut quoted = format!("\"{query}\"");
+   if quoted.chars().count() > budget.max(8) {
+      let keep = budget.max(8).saturating_sub(1);
+      quoted = format!("{}…", quoted.chars().take(keep).collect::<String>());
+   }
+   format!("{prefix}{quoted}{suffix}")
+}
+
 /// One card per original tweet. Latest search otherwise lists every retweet
 /// of a viral post as its own row.
 fn dedup_search_tweets(tweets: Vec<Tweet>) -> Vec<Tweet> {
@@ -287,7 +318,9 @@ async fn search(
             )
          },
       };
+      let description = search_description("", &search_host(&state.config), active_tab);
       let markup = layout::PageLayout::new(&state.config, "Search", content)
+         .description(&description)
          .prefs(&prefs)
          .render();
       return Ok(Html(markup.into_string()).into_response());
@@ -355,7 +388,9 @@ async fn search(
             if is_scroll {
                return Ok(Html(content.into_string()).into_response());
             }
+            let description = search_description(&raw_q, &search_host(&state.config), "lists");
             let markup = layout::PageLayout::new(&state.config, &title, content)
+               .description(&description)
                .prefs(&prefs)
                .canonical(&canonical)
                .referer(&referer)
@@ -430,7 +465,9 @@ async fn search(
             if is_scroll {
                return Ok(Html(content.into_string()).into_response());
             }
+            let description = search_description(&raw_q, &search_host(&state.config), "users");
             let markup = layout::PageLayout::new(&state.config, &title, content)
+               .description(&description)
                .prefs(&prefs)
                .canonical(&canonical)
                .referer(&referer)
@@ -555,7 +592,9 @@ async fn search(
             if is_scroll {
                return Ok(Html(content.into_string()).into_response());
             }
+            let description = search_description(&raw_q, &search_host(&state.config), "posts");
             let markup = layout::PageLayout::new(&state.config, &title, content)
+               .description(&description)
                .prefs(&prefs)
                .rss(&rss_url)
                .canonical(&canonical)

@@ -285,7 +285,7 @@ fn render_user_card(user: &User, config: &Config, prefs: Option<&Prefs>) -> Mark
            }
 
            div class="profile-card-identity" {
-               div {
+               h1 class="profile-card-heading" {
                    (link_user(user, "profile-card-fullname"))
                    " "
                    (verified_icon(user))

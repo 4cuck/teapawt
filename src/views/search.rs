@@ -8,6 +8,20 @@ use crate::{
    views::{renderutils::icon, user_list::render_user},
 };
 
+/// Visible page heading. Bing flags a crawled URL that has no `<h1>`.
+fn search_heading(query: &str) -> String {
+   let query = query.split_whitespace().collect::<Vec<_>>().join(" ");
+   if query.is_empty() {
+      return "Search".to_owned();
+   }
+   let heading = format!("Search: {query}");
+   if heading.chars().count() <= 140 {
+      heading
+   } else {
+      format!("{}…", heading.chars().take(139).collect::<String>())
+   }
+}
+
 /// Search pagination URL. The Twitter cursor is opaque and must be encoded —
 /// raw `+` / `=` in the query string get treated as form syntax and break paging.
 fn search_page_url(query: &str, tab: &str, cursor: Option<&str>, view: &str) -> String {
@@ -87,6 +101,7 @@ pub fn render_search_results_with_prefs(
    html! {
        div class=(container_class) {
            div class="timeline-header" {
+               h1 class="search-heading" { (search_heading(query)) }
                (render_search_panel_with_action(query, filters, "/search", active_tab, view))
            }
 
@@ -121,6 +136,7 @@ pub fn render_user_search_results(
    html! {
        div class="timeline-container search-results" {
            div class="timeline-header" {
+               h1 class="search-heading" { (search_heading(query)) }
                form method="get" action="/search" class="search-field user-search-field" autocomplete="off" {
                    input type="hidden" name="f" value="users";
                    div class="pref-group pref-input pref-inline" {
@@ -177,6 +193,7 @@ pub fn render_list_search_results(
    html! {
        div class="timeline-container search-results" {
            div class="timeline-header" {
+               h1 class="search-heading" { (search_heading(query)) }
                form method="get" action="/search" class="search-field user-search-field" autocomplete="off" {
                    input type="hidden" name="f" value="lists";
                    div class="pref-group pref-input pref-inline" {

@@ -698,6 +698,8 @@ main .container {
 .profile-card-avatar img.avatar.round { border-radius: 50%; }
 .profile-card-tabs-name { margin: 0; overflow: visible; }
 .profile-card-fullname { font-family: inherit; font-size: 19px; font-weight: 700; }
+.profile-card-heading, .tweet-page-heading { margin: 0; font-size: inherit; font-weight: inherit; line-height: inherit; display: inline; }
+.search-heading { margin: 0 0 10px; font-size: 20px; font-weight: 700; line-height: 1.3; }
 .profile-card-username { font-size: 14px; }
 .account-context-trigger {
   position: relative;

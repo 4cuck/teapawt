@@ -235,7 +235,13 @@ impl<'a> TweetRenderer<'a> {
 
                           div class="tweet-name-row" {
                               div class="fullname-and-username" {
-                                  (link_user(&display_tweet.user, "fullname"))
+                                  @if is_main {
+                                      h1 class="tweet-page-heading" {
+                                          (link_user(&display_tweet.user, "fullname"))
+                                      }
+                                  } @else {
+                                      (link_user(&display_tweet.user, "fullname"))
+                                  }
                                   (verified_icon(&display_tweet.user))
                                   span class="tweet-author-meta" {
                                       (link_user(&display_tweet.user, "username"))
