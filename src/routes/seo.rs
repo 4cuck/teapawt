@@ -433,6 +433,9 @@ async fn robots_txt(State(state): State<AppState>, headers: HeaderMap) -> Respon
 # Google, Bing, Yandex, DuckDuckGo, Baidu, and every other crawler are welcome.
 
 User-agent: *
+# Cloudflare Content Signals. Bing does not parse this line; crawlers ignore it.
+# https://contentsignals.org/
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 Allow: /
 
 User-agent: Googlebot
