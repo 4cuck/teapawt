@@ -195,13 +195,13 @@ impl Error {
             "The media URL signature is invalid.",
          ),
          Self::ClientBudgetExhausted => (
-            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::SERVICE_UNAVAILABLE,
             "Slow down",
             client_budget_message(),
          ),
          Self::RateLimited | Self::IpThrottled => (
-            StatusCode::TOO_MANY_REQUESTS,
-            "Rate limited",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Try again",
             rate_limited_message(),
          ),
          Self::TransientUpstream => (

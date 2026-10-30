@@ -56,6 +56,12 @@ pub struct SessionLimits {
    /// operation name, with when.
    #[serde(default)]
    pub verified_ops: HashMap<String, i64>,
+   /// 429s on profile reads. Two means the account is done viewing profiles.
+   #[serde(default)]
+   pub profile_strikes: u32,
+   /// Kept out of profile pages. Search is tracked separately in `refused_ops`.
+   #[serde(default)]
+   pub profile_banned: bool,
 }
 
 /// How long a globally-limited session stays limited before auto-recovery (15
@@ -73,7 +79,33 @@ fn operation_name(api: &str) -> &str {
    api.rsplit('/').next().unwrap_or(api)
 }
 
-/// Result of taking one call from a session's local window.
+/// A profile read. One 429 sits the account out for the window. A second
+/// takes it off profile pages for good.
+fn is_profile_op(name: &str) -> bool {
+   matches!(
+      name,
+      "UserTweets"
+         | "UserTweetsAndReplies"
+         | "UserByScreenName"
+         | "UserMedia"
+         | "TweetDetail"
+         | "UserOriginalsTimeline"
+         | "UserHighlightsTweets"
+         | "UserArticlesTweets"
+         | "UserRepostsTimeline"
+   )
+}
+
+/// What a 429 did to the account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Damage {
+   /// Out of this call until its window resets.
+   Window,
+   /// Out of search for good. Profile pages still use it.
+   Search,
+   /// Out of profile pages for good.
+   Profile,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Spend {
    /// Remaining was decremented.
@@ -84,7 +116,38 @@ pub(crate) enum Spend {
    Denied,
 }
 
+/// Calls kept back on an account. Sending the last one is what X answers
+/// with 429, so a window of one is already spent.
+const QUOTA_RESERVE: i32 = 1;
+
+/// How much room `api` has. [`Headroom::Safe`] is a known window we can spend
+/// without using the reserved call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Headroom {
+   Safe(i32),
+   /// No window yet. Usable only when nobody has a known budget.
+   Unknown,
+   Blocked,
+}
+
 impl SessionLimits {
+   /// Room for another call to `api` that will not be the one X rejects.
+   pub(crate) fn headroom(&self, api: &str) -> Headroom {
+      if self.rejected || self.is_globally_limited() || self.refuses(api) {
+         return Headroom::Blocked;
+      }
+      let now = time::OffsetDateTime::now_utc().unix_timestamp();
+      let Some(rate) = self.apis.get(api) else {
+         return Headroom::Unknown;
+      };
+      if rate.reset <= now {
+         return Headroom::Unknown;
+      }
+      if rate.remaining <= QUOTA_RESERVE {
+         return Headroom::Blocked;
+      }
+      Headroom::Safe(rate.remaining)
+   }
    /// Check if rate limited for a specific API.
    pub fn is_limited(&self, api: &str) -> bool {
       if self.is_globally_limited() {
@@ -104,6 +167,9 @@ impl SessionLimits {
    #[must_use]
    pub fn refuses(&self, api: &str) -> bool {
       let name = operation_name(api);
+      if self.profile_banned && is_profile_op(name) {
+         return true;
+      }
       let Some(&at) = self.refused_ops.get(name) else {
          return false;
       };
@@ -212,6 +278,25 @@ impl SessionLimits {
       let limit = self.apis.get(api).map_or(0, |rate| rate.limit);
       self.update_limit(api, limit, 0, now + GLOBAL_LIMIT_DURATION_SECS);
    }
+
+   /// Record a 429. Search is removed immediately. A profile read is removed
+   /// for the window, and a second one removes the account from profile pages.
+   pub fn note_rate_limit(&mut self, api: &str) -> Damage {
+      self.limit_endpoint(api);
+      let name = operation_name(api);
+      if name == "SearchTimeline" {
+         self.refuse(api);
+         return Damage::Search;
+      }
+      if is_profile_op(name) {
+         self.profile_strikes = self.profile_strikes.saturating_add(1);
+         if self.profile_strikes >= 2 {
+            self.profile_banned = true;
+            return Damage::Profile;
+         }
+      }
+      Damage::Window
+   }
 }
 
 /// Authentication session for Twitter API (used for JSONL deserialization).
@@ -257,6 +342,8 @@ impl Session {
             apis: self.apis,
             refused_ops: HashMap::new(),
             verified_ops: HashMap::new(),
+            profile_strikes: 0,
+            profile_banned: false,
          },
       )
    }
@@ -278,5 +365,27 @@ mod tests {
       *limits.refused_ops.get_mut("UserTweets").unwrap() -= day;
       assert!(!limits.refuses("x/UserTweets"));
       assert!(limits.refuses("new/SearchTimeline"));
+   }
+
+   #[test]
+   fn a_search_limit_is_permanent_and_a_profile_limit_waits_for_a_second_strike() {
+      let mut limits = SessionLimits::default();
+      assert_eq!(
+         limits.note_rate_limit("ph2f/SearchTimeline"),
+         Damage::Search
+      );
+      assert!(limits.refuses("other/SearchTimeline"));
+      assert!(!limits.profile_banned);
+      assert!(limits.try_spend("ph2f/SearchTimeline") == super::Spend::Denied);
+
+      assert_eq!(limits.note_rate_limit("x/UserTweets"), Damage::Window);
+      assert!(!limits.profile_banned);
+      assert!(!limits.refuses("x/TweetDetail"));
+      assert_eq!(limits.note_rate_limit("x/TweetDetail"), Damage::Profile);
+      assert!(limits.profile_banned);
+      assert!(limits.refuses("x/UserByScreenName"));
+      assert!(limits.refuses("x/UserTweets"));
+      assert!(limits.refuses("other/SearchTimeline"));
+      assert_eq!(limits.try_spend("x/UserTweets"), super::Spend::Denied);
    }
 }

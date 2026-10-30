@@ -24,7 +24,7 @@ use tokio::{
 
 use crate::{
    error::{Error, Result},
-   types::{RateLimit, Session, SessionCredentials, SessionKind, SessionLimits, Spend},
+   types::{Headroom, RateLimit, Session, SessionCredentials, SessionKind, SessionLimits, Spend},
 };
 
 use super::limits_db;
@@ -102,6 +102,15 @@ enum Miss {
    Spent,
    /// A candidate has quota but is at its concurrency cap.
    Busy,
+}
+
+/// A candidate with known budget. Higher remaining is chosen. At a tie, an
+/// account that has returned results for this call wins.
+#[derive(Clone, Copy)]
+struct Candidate {
+   index: usize,
+   remaining: i32,
+   verified: bool,
 }
 
 struct SessionSlot {
@@ -457,10 +466,9 @@ impl SessionPool {
          .ok()
    }
 
-   /// Verified accounts go first, still in rotation. Stop at the first one
-   /// with a free slot instead of listing every account first: this lock is
-   /// taken on every call to X, and walking the whole pool made later
-   /// requests wait out the scan.
+   /// The account with the most calls left, starting from the rotation point.
+   /// A known window always beats an account we have never measured: that
+   /// unknown account is how a 429 still gets through.
    fn scan<'a>(
       &self,
       limits: &mut HashMap<i64, SessionLimits>,
@@ -470,51 +478,84 @@ impl SessionPool {
    ) -> StdResult<SessionLease, Miss> {
       let start = self.cursor.fetch_add(1, Ordering::Relaxed);
       let count = self.sessions.len();
-      let mut busy = false;
+      let mut best: Option<Candidate> = None;
+      let mut known_account: Option<usize> = None;
+      let mut unknown: Option<usize> = None;
       let mut any = false;
-      for verified_only in [true, false] {
-         for offset in 0..count {
-            let index = start.wrapping_add(offset) % count;
-            let slot = &self.sessions[index];
-            if !accept(slot.credentials.id)
-               || required_kind.is_some_and(|kind| slot.credentials.kind != kind)
-            {
-               continue;
-            }
-            let api = api_for(slot.credentials.kind);
-            let (rejected, verified) = match limits.get(&slot.credentials.id) {
-               Some(session_limits) => (session_limits.rejected, session_limits.verified(api)),
-               None => (false, false),
-            };
-            if rejected || verified != verified_only {
-               continue;
-            }
-            any = true;
-            let spent = match limits.get_mut(&slot.credentials.id) {
-               Some(session_limits) => session_limits.try_spend(api),
-               None => Spend::Unmetered,
-            };
-            if spent == Spend::Denied {
-               continue;
-            }
-            let metered = spent == Spend::Metered;
-            if let Ok(permit) = Arc::clone(&slot.permits).try_acquire_owned() {
-               let credentials = Arc::clone(&slot.credentials);
-               return Ok(self.lease(credentials, permit, metered));
-            }
-            if metered && let Some(session_limits) = limits.get_mut(&slot.credentials.id) {
-               session_limits.refund_spend(api);
-            }
+      let mut busy = false;
+      for offset in 0..count {
+         let index = start.wrapping_add(offset) % count;
+         let slot = &self.sessions[index];
+         if !accept(slot.credentials.id)
+            || required_kind.is_some_and(|kind| slot.credentials.kind != kind)
+         {
+            continue;
+         }
+         any = true;
+         if slot.permits.available_permits() == 0 {
             busy = true;
+            continue;
+         }
+         let api = api_for(slot.credentials.kind);
+         let session_limits = limits.get(&slot.credentials.id);
+         let rejected = session_limits.is_some_and(|limits| limits.rejected);
+         if rejected {
+            continue;
+         }
+         let verified = session_limits.is_some_and(|limits| limits.verified(api));
+         match session_limits.map(|limits| limits.headroom(api)) {
+            Some(Headroom::Blocked) => {},
+            Some(Headroom::Safe(remaining)) => {
+               let better = best.is_none_or(|chosen: Candidate| {
+                  remaining > chosen.remaining
+                     || (remaining == chosen.remaining && verified && !chosen.verified)
+               });
+               if better {
+                  best = Some(Candidate {
+                     index,
+                     remaining,
+                     verified,
+                  });
+               }
+            },
+            Some(Headroom::Unknown) | None => {
+               if verified && known_account.is_none() {
+                  known_account = Some(index);
+               } else if unknown.is_none() {
+                  unknown = Some(index);
+               }
+            },
          }
       }
-      Err(if !any {
-         Miss::Nobody
-      } else if busy {
-         Miss::Busy
-      } else {
-         Miss::Spent
-      })
+
+      let index = best
+         .map(|chosen| chosen.index)
+         .or(known_account)
+         .or(unknown)
+         .ok_or(if !any {
+            Miss::Nobody
+         } else if busy {
+            Miss::Busy
+         } else {
+            Miss::Spent
+         })?;
+      let slot = &self.sessions[index];
+      let api = api_for(slot.credentials.kind);
+      let spent = match limits.get_mut(&slot.credentials.id) {
+         Some(session_limits) => session_limits.try_spend(api),
+         None => Spend::Unmetered,
+      };
+      if spent == Spend::Denied {
+         return Err(if busy { Miss::Busy } else { Miss::Spent });
+      }
+      let Ok(permit) = Arc::clone(&slot.permits).try_acquire_owned() else {
+         return Err(Miss::Busy);
+      };
+      Ok(self.lease(
+         Arc::clone(&slot.credentials),
+         permit,
+         spent == Spend::Metered,
+      ))
    }
 
    fn lease(
@@ -616,11 +657,31 @@ impl SessionPool {
    /// about the rest.
    pub async fn mark_endpoint_limited(&self, session_id: i64, api: &str) {
       let mut limits = self.limits.write().await;
-
-      if let Some(lim) = limits.get_mut(&session_id) {
-         lim.limit_endpoint(api);
-      }
+      let damage = limits
+         .get_mut(&session_id)
+         .map(|lim| lim.note_rate_limit(api));
       drop(limits);
+      if let Some(damage) = damage {
+         let username = self
+            .sessions
+            .iter()
+            .find(|slot| slot.credentials.id == session_id)
+            .map(|slot| slot.credentials.username.clone())
+            .unwrap_or_default();
+         match damage {
+            crate::types::Damage::Search => tracing::info!(
+               session_id,
+               session_user = %username,
+               "account hit a search limit; leaving it out of search"
+            ),
+            crate::types::Damage::Profile => tracing::info!(
+               session_id,
+               session_user = %username,
+               "account hit a second profile limit; leaving it out of profile pages"
+            ),
+            crate::types::Damage::Window => {},
+         }
+      }
       self.persist_now(session_id).await;
    }
 
@@ -1208,6 +1269,49 @@ mod tests {
    }
 
    #[tokio::test]
+   async fn the_account_with_the_most_remaining_goes_next() {
+      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
+      let path = env::temp_dir().join(format!(
+         "teapot-session-pool-richest-{}.jsonl",
+         process::id()
+      ));
+      fs::write(
+         &path,
+         concat!(
+            r#"{"id":1,"username":"one","kind":"cookie","auth_token":"a","ct0":"c"}"#,
+            "\n",
+            r#"{"id":2,"username":"two","kind":"cookie","auth_token":"b","ct0":"d"}"#,
+            "\n"
+         ),
+      )
+      .await
+      .unwrap();
+      let pool = SessionPool::load(path.to_str().unwrap(), 4).await.unwrap();
+      let reset = time::OffsetDateTime::now_utc().unix_timestamp() + 900;
+      pool.update_session_limit(1, "TweetDetail", 50, 3, reset)
+         .await;
+      pool.update_session_limit(2, "TweetDetail", 50, 40, reset)
+         .await;
+      let got = pool
+         .acquire("TweetDetail", Some(SessionKind::Cookie))
+         .await
+         .unwrap();
+      assert_eq!(got.id, 2, "the fuller account is used before the thin one");
+
+      pool.update_session_limit(2, "TweetDetail", 50, 1, reset)
+         .await;
+      let next = pool
+         .acquire("TweetDetail", Some(SessionKind::Cookie))
+         .await
+         .unwrap();
+      assert_eq!(next.id, 1, "an account on its last call is not spent");
+
+      drop(got);
+      drop(next);
+      fs::remove_file(path).await.unwrap();
+   }
+
+   #[tokio::test]
    async fn a_full_pool_takes_whichever_account_frees() {
       unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!(
@@ -1322,14 +1426,11 @@ mod tests {
          .update_session_limit(1, "UserTweets", 50, 1, reset)
          .await;
 
-      let held = pool
-         .acquire("UserTweets", Some(SessionKind::Cookie))
-         .await
-         .unwrap();
-      assert_eq!(held.id, 1);
       let next = pool.acquire("UserTweets", Some(SessionKind::Cookie)).await;
-      assert!(matches!(next, Err(Error::RateLimited)));
-      drop(held);
+      assert!(
+         matches!(next, Err(Error::RateLimited)),
+         "the last reserved call is not sent"
+      );
 
       pool.update_session_limit(1, "Other", 50, 5, reset).await;
       let held = pool
