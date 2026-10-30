@@ -609,8 +609,9 @@ impl ApiClient {
             {
                true
             },
-            // Cloudflare blocked that exit's IP. Another account is on another exit.
-            Err(Error::IpThrottled) if replacement == 0 => true,
+            // The exit IP was blocked. Keep moving to other accounts, which are
+            // pinned to other exits, instead of handing the 429 to the visitor.
+            Err(Error::IpThrottled) => true,
             Err(Error::RateLimited) => {
                self
                   .sessions
@@ -640,7 +641,7 @@ impl ApiClient {
             Ok(next) => next,
             Err(err) => {
                self.refund(endpoint).await;
-               return last.and(Err(err));
+               return Err(err);
             },
          };
          last = self

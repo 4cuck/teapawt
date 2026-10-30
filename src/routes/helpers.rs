@@ -701,7 +701,14 @@ pub fn api_error_titled(config: &Config, err: &Error, generic: &str) -> Response
    }
 
    let markup = layout::render_error(config, title, message);
-   (status, Html(markup.into_string())).into_response()
+   // Cloudflare was storing this page for a minute and serving the 429 to
+   // people who had not hit the limit.
+   (
+      status,
+      [(header::CACHE_CONTROL, "private, no-store")],
+      Html(markup.into_string()),
+   )
+      .into_response()
 }
 
 fn classify_error<'a>(err: &'a Error, generic: &'a str) -> (StatusCode, &'a str, &'a str) {
