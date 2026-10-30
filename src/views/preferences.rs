@@ -147,7 +147,7 @@ pub fn render_preferences_form(
 
                // Header with animation
                div class="preferences-header" {
-                   h2 { "Preferences" }
+                   h1 { "Preferences" }
                    p { "Customize your teapawt experience" }
                }
 

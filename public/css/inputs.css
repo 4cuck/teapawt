@@ -227,7 +227,7 @@ input::-webkit-datetime-edit-year-field:focus {
   margin-bottom: 0;
 }
 
-.preferences-header h2 {
+.preferences-header h1 {
   font-size: 24px;
   font-weight: 600;
   margin: 0 0 4px 0;
@@ -499,7 +499,7 @@ input::-webkit-datetime-edit-year-field:focus {
     padding: 20px 16px 12px;
   }
 
-  .preferences-header h2 {
+  .preferences-header h1 {
     font-size: 20px;
   }
 

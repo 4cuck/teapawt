@@ -1603,6 +1603,7 @@ nav.explore-tabbar {
   box-shadow: none;
 }
 .preferences-header { padding: 0 0 4px; color: var(--text); }
+.preferences-header h1 { margin: 0 0 4px; font-size: 24px; font-weight: 600; line-height: 1.2; display: block; }
 .preferences-header p { margin: 2px 0 8px; font-size: 13px; }
 .preferences-form { padding: 0; }
 .preferences .pref-section { margin-bottom: 8px; }
