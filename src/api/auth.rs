@@ -1304,7 +1304,7 @@ mod tests {
          .acquire("TweetDetail", Some(SessionKind::Cookie))
          .await
          .unwrap();
-      assert_eq!(next.id, 1, "an account on its last call is not spent");
+      assert_eq!(next.id, 1, "the account with more calls left is still preferred");
 
       drop(got);
       drop(next);
@@ -1426,11 +1426,14 @@ mod tests {
          .update_session_limit(1, "UserTweets", 50, 1, reset)
          .await;
 
+      let held = pool
+         .acquire("UserTweets", Some(SessionKind::Cookie))
+         .await
+         .unwrap();
+      assert_eq!(held.id, 1);
       let next = pool.acquire("UserTweets", Some(SessionKind::Cookie)).await;
-      assert!(
-         matches!(next, Err(Error::RateLimited)),
-         "the last reserved call is not sent"
-      );
+      assert!(matches!(next, Err(Error::RateLimited)));
+      drop(held);
 
       pool.update_session_limit(1, "Other", 50, 5, reset).await;
       let held = pool

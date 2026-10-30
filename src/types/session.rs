@@ -116,12 +116,9 @@ pub(crate) enum Spend {
    Denied,
 }
 
-/// Calls kept back on an account. Sending the last one is what X answers
-/// with 429, so a window of one is already spent.
-const QUOTA_RESERVE: i32 = 1;
-
-/// How much room `api` has. [`Headroom::Safe`] is a known window we can spend
-/// without using the reserved call.
+/// How much room `api` has. [`Headroom::Safe`] is a known window with at
+/// least one call left. The account with the most left is used next, so the
+/// last recorded call is spent only after every fuller account is used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Headroom {
    Safe(i32),
@@ -143,7 +140,7 @@ impl SessionLimits {
       if rate.reset <= now {
          return Headroom::Unknown;
       }
-      if rate.remaining <= QUOTA_RESERVE {
+      if rate.remaining <= 0 {
          return Headroom::Blocked;
       }
       Headroom::Safe(rate.remaining)
