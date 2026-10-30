@@ -139,6 +139,11 @@ pub struct ClientKey(String);
 
 impl ClientKey {
    #[must_use]
+   pub fn as_str(&self) -> &str {
+      &self.0
+   }
+
+   #[must_use]
    pub fn from_ip(ip: IpAddr) -> Self {
       match ip {
          IpAddr::V4(v4) => Self(v4.to_string()),

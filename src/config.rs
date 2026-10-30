@@ -62,6 +62,9 @@ pub struct Config {
    pub gif_transcoding: GifTranscodingConfig,
    #[serde(default)]
    pub donations: DonationsConfig,
+   /// Search checkbox. Empty keys leave search open.
+   #[serde(default)]
+   pub turnstile: TurnstileConfig,
    /// Precomputed `{scheme}://{hostname}` value set in `Config::load`.
    #[serde(skip)]
    pub url_prefix: String,
@@ -183,6 +186,30 @@ pub struct DonationsConfig {
    pub nowpayments: NowPaymentsDonationConfig,
    #[serde(default)]
    pub lzt: LztDonationConfig,
+}
+
+#[derive(Clone, Deserialize, Default)]
+pub struct TurnstileConfig {
+   #[serde(default, rename = "siteKey")]
+   pub site_key: String,
+   #[serde(default, rename = "secretKey")]
+   pub secret_key: String,
+}
+
+impl TurnstileConfig {
+   #[must_use]
+   pub fn configured(&self) -> bool {
+      !self.site_key.is_empty() && !self.secret_key.is_empty()
+   }
+}
+
+impl std::fmt::Debug for TurnstileConfig {
+   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+      formatter
+         .debug_struct("TurnstileConfig")
+         .field("configured", &self.configured())
+         .finish()
+   }
 }
 
 impl std::fmt::Debug for DonationsConfig {

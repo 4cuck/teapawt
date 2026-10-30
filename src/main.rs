@@ -233,12 +233,13 @@ async fn main() -> eyre::Result<()> {
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static(
                 "default-src 'none'; \
-                 script-src 'self'; \
+                 script-src 'self' https://challenges.cloudflare.com; \
                  style-src 'self' 'unsafe-inline'; \
                  img-src 'self' data: https://*.twimg.com https://video.pscp.tv https://*.video.pscp.tv; \
                  media-src 'self' blob: https://*.twimg.com; \
                  font-src 'self'; \
-                 connect-src 'self' https://*.twimg.com https://video.pscp.tv https://*.video.pscp.tv; \
+                 connect-src 'self' https://challenges.cloudflare.com https://*.twimg.com https://video.pscp.tv https://*.video.pscp.tv; \
+                 frame-src https://challenges.cloudflare.com; \
                  manifest-src 'self'; \
                  form-action 'self' https://nitter.cf https://www.nitter.cf https://xitter.cf https://www.xitter.cf \
                  https://checkout.stripe.com https://nowpayments.io https://*.nowpayments.io \

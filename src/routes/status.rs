@@ -54,6 +54,8 @@ pub struct StatusQuery {
    pub cursor: Option<String>,
    pub scroll: Option<String>,
    pub sort: Option<String>,
+   #[serde(rename = "cf-turnstile-response")]
+   pub turnstile: Option<String>,
 }
 
 /// Path for this post, keeping a non-default reply order in the query.
@@ -98,7 +100,7 @@ pub fn router() -> Router<AppState> {
          )
          .route(
             &format!("/{{username}}/{prefix}/{{id}}/quotes"),
-            get(quotes),
+            get(quotes).post(quotes_submit),
          );
    }
 
@@ -744,6 +746,15 @@ async fn retweets(
 }
 
 /// Render tweets that quote this tweet with infinite scrolling support.
+async fn quotes_submit(
+   State(state): State<AppState>,
+   jar: CookieJar,
+   Path(params): Path<(String, String)>,
+   axum::Form(query): axum::Form<StatusQuery>,
+) -> Result<Response> {
+   quotes(State(state), jar, Path(params), Query(query)).await
+}
+
 async fn quotes(
    State(state): State<AppState>,
    jar: CookieJar,
@@ -753,6 +764,34 @@ async fn quotes(
    let prefs = Prefs::from_cookies(&jar, &state.config);
    let is_scroll = query.scroll.as_deref() == Some("true");
    let search_query = format!("quoted_tweet_id:{id}");
+   let action = format!("/{username}/status/{id}/quotes");
+   let mut fields = Vec::new();
+   if let Some(cursor) = query.cursor.as_deref().filter(|cursor| !cursor.is_empty()) {
+      fields.push(("cursor", cursor));
+   }
+   let resume = if fields.is_empty() {
+      action.clone()
+   } else {
+      format!(
+         "{action}?cursor={}",
+         percent_encoding::utf8_percent_encode(fields[0].1, percent_encoding::NON_ALPHANUMERIC)
+      )
+   };
+   if let Err(response) = super::search_gate::admit(
+      &state,
+      &jar,
+      &prefs,
+      query.turnstile.as_deref(),
+      super::search_gate::Prompt {
+         resume: &resume,
+         action: &action,
+         fields: &fields,
+      },
+   )
+   .await
+   {
+      return Ok(response);
+   }
 
    let timeline = state
       .api

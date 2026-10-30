@@ -273,7 +273,7 @@ pub fn router() -> Router<AppState> {
       .route("/{username}/reposts", get(user_reposts))
       .route("/{username}/articles", get(user_articles))
       .route("/{username}/media", get(user_media))
-      .route("/{username}/search", get(user_search))
+      .route("/{username}/search", get(user_search).post(user_search_submit))
 }
 
 async fn filtered_posts(
@@ -770,6 +770,17 @@ pub struct UserSearchQuery {
    #[serde(rename = "q")]
    pub query: Option<String>,
    pub cursor: Option<String>,
+   #[serde(rename = "cf-turnstile-response")]
+   pub turnstile: Option<String>,
+}
+
+async fn user_search_submit(
+   State(state): State<AppState>,
+   jar: CookieJar,
+   Path(username): Path<String>,
+   axum::Form(query): axum::Form<UserSearchQuery>,
+) -> Result<Response> {
+   user_search(State(state), jar, Path(username), Query(query)).await
 }
 
 async fn user_search(
@@ -782,6 +793,43 @@ async fn user_search(
 
    let search_query = query.query.as_deref().unwrap_or("");
    let search_action = format!("/{username}/search");
+   let mut fields = Vec::new();
+   if !search_query.is_empty() {
+      fields.push(("q", search_query));
+   }
+   if let Some(cursor) = query.cursor.as_deref().filter(|cursor| !cursor.is_empty()) {
+      fields.push(("cursor", cursor));
+   }
+   let resume = if fields.is_empty() {
+      search_action.clone()
+   } else {
+      format!(
+         "{search_action}?{}",
+         fields
+            .iter()
+            .map(|(name, value)| format!(
+               "{name}={}",
+               percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
+            ))
+            .collect::<Vec<_>>()
+            .join("&")
+      )
+   };
+   if let Err(response) = super::search_gate::admit(
+      &state,
+      &jar,
+      &prefs,
+      query.turnstile.as_deref(),
+      super::search_gate::Prompt {
+         resume: &resume,
+         action: &search_action,
+         fields: &fields,
+      },
+   )
+   .await
+   {
+      return Ok(response);
+   }
 
    // When search query is empty, default to showing the user's recent tweets
    let api_query = if search_query.is_empty() {

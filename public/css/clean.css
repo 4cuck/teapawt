@@ -1441,6 +1441,29 @@ nav.explore-tabbar {
 .home-announce p:last-child { margin-bottom: 0; }
 .home-announce a { color: var(--accent); }
 
+.turnstile-panel {
+  width: min(100%, 480px);
+  margin: 32px auto;
+  padding: 24px 20px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  text-align: center;
+}
+.turnstile-panel h1 { font-size: 20px; margin: 0 0 8px; }
+.turnstile-panel p { margin: 0 0 16px; color: var(--text); }
+.turnstile-panel .turnstile-error { color: var(--accent); }
+.turnstile-panel form { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.turnstile-panel button {
+  min-height: 40px;
+  padding: 0 18px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
 .donate-drive {
   width: min(100%, 640px);
   margin: 0 auto 18px;

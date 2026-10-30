@@ -26,8 +26,8 @@ pub fn render_donate_page(
                "xitter.cf needs " (format_usd(progress.goal_cents)) " every month for accounts and proxies. "
                "The counter resets on the 23rd. "
                "About 1,000 accounts are in rotation. Scraping from one IP is allowed. "
-               "Cloudflare Turnstile may turn on if someone starts spamming searches. "
-               "If you scrape from multiple IPs through proxies, Turnstile turns on for about 3 to 5 minutes, depending on how many requests arrive at once. "
+               "Search asks for a Cloudflare Turnstile checkbox that lasts 5 minutes, because bots got about 1,000 accounts suspended from search. "
+               "Donations are what turn that check off. "
                "Choose an amount from $1 to $10,000."
            }
            (money_meter(progress, false))

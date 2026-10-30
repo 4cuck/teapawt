@@ -124,6 +124,12 @@ merchantId = 0
 secretKey = ""
 currency = "usd"
 
+# Checkbox shown before a search is sent upstream. Leave both empty to disable.
+# Create a Managed widget so the visitor has to press it. A pass lasts 5 minutes.
+[turnstile]
+siteKey = ""
+secretKey = ""
+
 [preferences]
 # Default theme
 theme = "black"

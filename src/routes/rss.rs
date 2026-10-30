@@ -1,7 +1,8 @@
 use axum::{
    Router,
    extract::{Path, Query, State},
-   response::Response,
+   http::{HeaderValue, StatusCode, header},
+   response::{IntoResponse, Response},
    routing::get,
 };
 use axum_extra::extract::CookieJar;
@@ -55,6 +56,20 @@ fn feed_key(key: String, proxy: bool) -> String {
    } else {
       key
    }
+}
+
+/// A search feed that has not pressed the checkbox.
+fn search_feed_blocked() -> Response {
+   let mut response = (
+      StatusCode::FORBIDDEN,
+      "Search feeds need the checkbox on the search page.",
+   )
+      .into_response();
+   response.headers_mut().insert(
+      header::CACHE_CONTROL,
+      HeaderValue::from_static("private, no-store"),
+   );
+   response
 }
 
 /// Return a 404 error when RSS is disabled.
@@ -230,6 +245,9 @@ async fn search_rss(
    if let Some(cached) = check_rss_cache(&state, &rss_cache_key) {
       return Ok(cached);
    }
+   if !super::search_gate::cleared(&state, &jar) {
+      return Ok(search_feed_blocked());
+   }
 
    let timeline = state
       .api
@@ -275,6 +293,9 @@ async fn user_search_rss(
    let rss_cache_key = feed_key(cache_keys::rss_user_search(&username, search_query), proxy);
    if let Some(cached) = check_rss_cache(&state, &rss_cache_key) {
       return Ok(cached);
+   }
+   if !super::search_gate::cleared(&state, &jar) {
+      return Ok(search_feed_blocked());
    }
 
    let timeline = state.api.search(&api_query, None, "Latest").await?;

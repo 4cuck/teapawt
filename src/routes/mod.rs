@@ -20,6 +20,7 @@ mod preferences;
 mod redirect;
 mod rss;
 mod search;
+mod search_gate;
 mod seo;
 mod status;
 mod timeline;

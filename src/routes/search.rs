@@ -1,7 +1,7 @@
 use std::slice;
 
 use axum::{
-   Router,
+   Form, Router,
    extract::{Path, Query as AxumQuery, RawQuery, State},
    http::header::CONTENT_TYPE,
    response::{Html, IntoResponse as _, Redirect, Response},
@@ -109,6 +109,9 @@ pub struct SearchQuery {
    pub e_retweets: Option<String>,
    /// AJAX infinite-scroll request — return a timeline fragment, not a page.
    pub scroll: Option<String>,
+   /// Checkbox token. Stripped before the search runs.
+   #[serde(rename = "cf-turnstile-response")]
+   pub turnstile: Option<String>,
 }
 
 impl SearchQuery {
@@ -207,6 +210,55 @@ fn is_scroll_request(params: &SearchQuery) -> bool {
    params.scroll.as_deref() == Some("true")
 }
 
+fn push_field<'a>(
+   fields: &mut Vec<(&'static str, &'a str)>,
+   name: &'static str,
+   value: Option<&'a String>,
+) {
+   if let Some(value) = value.map(String::as_str).filter(|value| !value.is_empty()) {
+      fields.push((name, value));
+   }
+}
+
+fn search_fields(params: &SearchQuery) -> Vec<(&'static str, &str)> {
+   let mut fields = Vec::new();
+   push_field(&mut fields, "q", params.query.as_ref());
+   push_field(&mut fields, "f", params.filter.as_ref());
+   push_field(&mut fields, "cursor", params.cursor.as_ref());
+   push_field(&mut fields, "view", params.view.as_ref());
+   push_field(&mut fields, "from", params.from.as_ref());
+   push_field(&mut fields, "since", params.since.as_ref());
+   push_field(&mut fields, "until", params.until.as_ref());
+   push_field(&mut fields, "min_faves", params.min_faves.as_ref());
+   push_field(&mut fields, "f-media", params.f_media.as_ref());
+   push_field(&mut fields, "f-images", params.f_images.as_ref());
+   push_field(&mut fields, "f-videos", params.f_videos.as_ref());
+   push_field(&mut fields, "f-links", params.f_links.as_ref());
+   push_field(&mut fields, "f-news", params.f_news.as_ref());
+   push_field(&mut fields, "f-quote", params.f_quote.as_ref());
+   push_field(&mut fields, "f-verified", params.f_verified.as_ref());
+   push_field(&mut fields, "e-replies", params.e_replies.as_ref());
+   push_field(&mut fields, "e-retweets", params.e_retweets.as_ref());
+   fields
+}
+
+fn search_resume(fields: &[(&str, &str)]) -> String {
+   if fields.is_empty() {
+      return "/search".to_owned();
+   }
+   let query = fields
+      .iter()
+      .map(|(name, value)| {
+         format!(
+            "{name}={}",
+            percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
+         )
+      })
+      .collect::<Vec<_>>()
+      .join("&");
+   format!("/search?{query}")
+}
+
 fn search_tab(params: &SearchQuery) -> &'static str {
    match params.filter.as_deref() {
       Some("users") => "users",
@@ -225,9 +277,17 @@ fn search_error(config: &Config, err: &crate::error::Error) -> Response {
 
 pub fn router() -> Router<AppState> {
    Router::new()
-      .route("/search", get(search))
+      .route("/search", get(search).post(search_submit))
       .route("/hashtag/{tag}", get(hashtag))
       .route("/opensearch", get(opensearch))
+}
+
+async fn search_submit(
+   State(state): State<AppState>,
+   jar: CookieJar,
+   Form(params): Form<SearchQuery>,
+) -> Result<Response> {
+   search(State(state), jar, RawQuery(None), AxumQuery(params)).await
 }
 
 async fn search(
@@ -324,6 +384,24 @@ async fn search(
          .prefs(&prefs)
          .render();
       return Ok(Html(markup.into_string()).into_response());
+   }
+
+   let fields = search_fields(&params);
+   let resume = search_resume(&fields);
+   if let Err(response) = super::search_gate::admit(
+      &state,
+      &jar,
+      &prefs,
+      params.turnstile.as_deref(),
+      super::search_gate::Prompt {
+         resume: &resume,
+         action: "/search",
+         fields: &fields,
+      },
+   )
+   .await
+   {
+      return Ok(response);
    }
 
    if active_tab == "lists" {

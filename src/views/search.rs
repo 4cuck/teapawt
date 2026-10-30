@@ -451,6 +451,36 @@ pub fn render_search_panel_with_action(
    }
 }
 
+/// Checkbox Turnstile shown before a search is sent to X.
+pub fn render_turnstile_prompt(
+   site_key: &str,
+   action: &str,
+   fields: &[(&str, &str)],
+   failed: bool,
+) -> Markup {
+   html! {
+       div class="turnstile-panel" {
+           h1 { "Confirm this search" }
+           @if failed {
+               p class="turnstile-error" { "That check did not go through. Press the checkbox and try again." }
+           } @else {
+               p { "Press the checkbox, then continue. It lasts 5 minutes." }
+           }
+           form method="post" action=(action) autocomplete="off" {
+               @for (name, value) in fields {
+                   input type="hidden" name=(name) value=(value);
+               }
+               div class="cf-turnstile" data-sitekey=(site_key) data-appearance="always" data-theme="auto" {}
+               button type="submit" { "Continue" }
+           }
+           noscript {
+               p { "This search needs the checkbox. Turn JavaScript on for this page." }
+           }
+           script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer {}
+       }
+   }
+}
+
 /// Generate a search checkbox.
 fn gen_search_checkbox(name: &str, label: &str, checked: bool) -> Markup {
    let id = format!("search-{name}");

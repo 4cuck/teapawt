@@ -964,6 +964,9 @@ fn clean_username(username: &str) -> String {
 }
 
 async fn search_text(state: &AppState, query: &str) -> Result<String, String> {
+   if state.config.turnstile.configured() {
+      return Err("Search requires the checkbox on the website.".into());
+   }
    let timeline = state
       .api
       .search(query, None, "Latest")

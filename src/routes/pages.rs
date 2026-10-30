@@ -162,10 +162,16 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
    let drive = Some(donate_view::donate_drive_banner(&progress));
    let firefox_note = (firefox && !prefs.proxy_media && !warning_hidden)
       .then(|| crate::views::preferences::firefox_media_warning(false));
-   let notice = if drive.is_none() && firefox_note.is_none() {
+   let search_note = state
+      .config
+      .turnstile
+      .configured()
+      .then(search_turnstile_warning);
+   let notice = if drive.is_none() && firefox_note.is_none() && search_note.is_none() {
       None
    } else {
       Some(html! {
+          @if let Some(search_note) = search_note { (search_note) }
           @if let Some(drive) = drive { (drive) }
           @if let Some(firefox_note) = firefox_note { (firefox_note) }
       })
@@ -196,6 +202,20 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
       HeaderValue::from_static("private, no-store"),
    );
    response
+}
+
+fn search_turnstile_warning() -> maud::Markup {
+   html! {
+       aside class="home-announce" {
+           strong { "Search requires a check" }
+           p {
+               "Search requires a Cloudflare Turnstile because too many bots are using the site and 1,000 accounts have been suspended from search. "
+               "We need more "
+               a href="/donate" { "donations" }
+               " to disable Cloudflare Turnstile on search."
+           }
+       }
+   }
 }
 
 fn mirror_announcement() -> maud::Markup {
