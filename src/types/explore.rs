@@ -30,8 +30,12 @@ pub struct TrendStory {
    pub title:   String,
    pub summary: String,
    pub updated: String,
-   pub tweets:  Vec<Tweet>,
-   pub related: Vec<Trend>,
+   pub tweets:      Vec<Tweet>,
+   pub related:     Vec<Trend>,
+   /// X timeline that supplied `tweets`, when the story named one.
+   pub timeline_id: String,
+   /// Cursor for the next page of `timeline_id`.
+   pub bottom:      Option<String>,
 }
 
 /// A row on an Explore timeline, in the order X returned it.

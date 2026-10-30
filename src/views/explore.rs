@@ -17,38 +17,6 @@ use crate::{
    views::{game::render_game_cards, tweet::TweetRenderer},
 };
 
-/// Compact "What's happening" list for the front page.
-pub fn render_explore_preview(trends: &[Trend]) -> Markup {
-   html! {
-       section class="landing-explore" aria-labelledby="explore-preview-title" {
-           div class="landing-explore-head" {
-               h2 id="explore-preview-title" { "What's happening" }
-               a href="/explore" { "Explore" }
-           }
-           @if trends.is_empty() {
-               p class="landing-explore-empty" {
-                   a href="/explore" { "News, sports, entertainment, and highlights" }
-                   " — open Explore to browse them."
-               }
-           } @else {
-               ol class="trend-list trend-list-compact" {
-                   @for (index, trend) in trends.iter().enumerate() {
-                       li {
-                           a href=(trend_href(trend)) {
-                               span class="trend-kicker" { (kicker(index + 1, &trend.category)) }
-                               span class="trend-name" dir="auto" { (trend.name) }
-                               @if !trend.detail.is_empty() {
-                                   span class="trend-meta" { (trend.detail) }
-                               }
-                           }
-                       }
-                   }
-               }
-           }
-       }
-   }
-}
-
 /// Explore page body. Tabs are ordinary links, so the page works with
 /// JavaScript off.
 pub fn render_explore_page(
@@ -210,6 +178,7 @@ pub fn render_trend_story(
    story: &crate::types::TrendStory,
    config: &Config,
    prefs: &Prefs,
+   more: Option<&str>,
 ) -> Markup {
    let search = format!(
       "/search?q={}&f=tweets",
@@ -246,22 +215,43 @@ pub fn render_trend_story(
                    }
                }
            }
-           div class="timeline explore-timeline" {
-               @if story.tweets.is_empty() {
-                   div class="timeline-header" {
-                       h2 { "Posts" }
-                   }
-                   p class="explore-intro" {
-                       "No posts came back with this story. "
-                       a href=(search) { "Search it" }
-                       "."
-                   }
-               } @else {
-                   @for tweet in &story.tweets {
-                       (TweetRenderer::new(tweet, config, false).maybe_prefs(Some(prefs)).render())
-                   }
+           (render_story_posts(&story.tweets, config, prefs, more, &search))
+       }
+   }
+}
+
+/// Posts for one page of a story, plus the link infinite scroll follows.
+pub fn render_story_posts(
+   tweets: &[crate::types::Tweet],
+   config: &Config,
+   prefs: &Prefs,
+   more: Option<&str>,
+   search: &str,
+) -> Markup {
+   html! {
+       div class="timeline explore-timeline" {
+           @if tweets.is_empty() {
+               div class="timeline-header" {
+                   h2 class="timeline-none" { "Posts" }
                }
-               div class="timeline-end" {}
+               p class="explore-intro" {
+                   "No posts came back with this story. "
+                   a href=(search) { "Search it" }
+                   "."
+               }
+               h2 class="timeline-end" { "No more items" }
+           } @else {
+               @for tweet in tweets {
+                   (TweetRenderer::new(tweet, config, false).maybe_prefs(Some(prefs)).render())
+               }
+               @if more.is_none() {
+                   h2 class="timeline-end" { "No more items" }
+               }
+           }
+           @if let Some(url) = more {
+               div class="show-more" {
+                   a href=(url) { "Load more" }
+               }
            }
        }
    }

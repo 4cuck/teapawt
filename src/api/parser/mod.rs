@@ -19,7 +19,7 @@ pub use conversation::parse_conversation;
 pub use search::{
    parse_list, parse_list_members, parse_list_search, parse_retweeters, parse_user_search,
 };
-pub use explore::parse_explore;
+pub use explore::{parse_explore, timeline_posts};
 pub use story::{parse_trend_story, story_clues, story_post_refs};
 pub use game::{
    GameSide, NflGame, ScheduledGame, json_skeleton, parse_nfl_game, parse_nfl_schedule,

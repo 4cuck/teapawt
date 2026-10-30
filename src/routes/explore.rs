@@ -1,8 +1,6 @@
 //! Explore: For you, Trending, News, Sports, Entertainment, Highlights, and
 //! whatever extra tabs the account turned on.
 
-use std::time::Duration;
-
 use axum::{
    Router,
    extract::{
@@ -20,8 +18,6 @@ use axum::{
 };
 use axum_extra::extract::CookieJar;
 use serde::Deserialize;
-use tokio::time::timeout;
-
 use super::helpers;
 use crate::{
    AppState,
@@ -39,7 +35,6 @@ use crate::{
       ExploreItem,
       ExploreTab,
       Prefs,
-      Trend,
       merge_tabs,
       normalize_slug,
       timeline_name,
@@ -51,9 +46,6 @@ use crate::{
    },
 };
 
-const PREVIEW_LIMIT: usize = 8;
-const HOME_WAIT: Duration = Duration::from_secs(8);
-
 #[derive(Debug, Deserialize)]
 struct ExploreQuery {
    cursor: Option<String>,
@@ -64,15 +56,6 @@ pub fn router() -> Router<AppState> {
    Router::new()
       .route("/explore", get(explore_home))
       .route("/explore/{tab}", get(explore_tab))
-}
-
-/// Trending topics for the front page. A slow or failed fetch leaves the
-/// page up; the Explore link still works.
-pub async fn trending_preview(state: &AppState) -> Vec<Trend> {
-   match timeout(HOME_WAIT, load_explore(state, "trending", None)).await {
-      Ok(Ok(feed)) => preview_trends(&feed),
-      _ => Vec::new(),
-   }
 }
 
 async fn explore_home(
@@ -316,20 +299,6 @@ fn tabs_for(state: &AppState, feed: &ExploreFeed) -> Vec<ExploreTab> {
       feed.tabs.clone()
    };
    merge_tabs(&discovered)
-}
-
-fn preview_trends(feed: &ExploreFeed) -> Vec<Trend> {
-   feed
-      .items
-      .iter()
-      .filter_map(|item| {
-         match item {
-            ExploreItem::Trend(trend) => Some(trend.clone()),
-            ExploreItem::Header(_) | ExploreItem::Tweet(_) => None,
-         }
-      })
-      .take(PREVIEW_LIMIT)
-      .collect()
 }
 
 fn remember_posts(state: &AppState, feed: &ExploreFeed, warm: bool) {

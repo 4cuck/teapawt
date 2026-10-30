@@ -31,6 +31,26 @@ pub fn parse_explore(data: &Value) -> ExploreFeed {
    feed
 }
 
+/// Posts in a timeline payload, plus the cursor for the following page.
+pub struct TimelinePosts {
+   pub tweets: Vec<Tweet>,
+   pub bottom: Option<String>,
+}
+
+pub fn timeline_posts(data: &Value) -> TimelinePosts {
+   let feed = parse_explore(data);
+   let tweets = feed
+      .items
+      .into_iter()
+      .filter_map(|item| match item {
+         ExploreItem::Tweet(tweet) => Some(*tweet),
+         ExploreItem::Header(_) | ExploreItem::Trend(_) => None,
+      })
+      .collect::<Vec<_>>();
+   let bottom = if tweets.is_empty() { None } else { feed.bottom };
+   TimelinePosts { tweets, bottom }
+}
+
 fn walk(value: &Value, feed: &mut ExploreFeed) {
    let Value::Object(object) = value else {
       if let Value::Array(items) = value {

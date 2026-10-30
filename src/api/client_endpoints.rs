@@ -994,9 +994,18 @@ impl ApiClient {
 
    /// One timeline by the id X already returned, such as a story's Top posts.
    pub async fn timeline_by_id(&self, timeline_id: &str) -> Result<serde_json::Value> {
+      self.timeline_by_id_at(timeline_id, None).await
+   }
+
+   /// A later page of [`timeline_by_id`](Self::timeline_by_id).
+   pub async fn timeline_by_id_at(
+      &self,
+      timeline_id: &str,
+      cursor: Option<&str>,
+   ) -> Result<serde_json::Value> {
       self.graphql_request(
          endpoints::GRAPH_GENERIC_TIMELINE,
-         &endpoints::generic_timeline_vars(timeline_id, None),
+         &endpoints::generic_timeline_vars(timeline_id, cursor),
          endpoints::EXPLORE_FEATURES,
          None,
       )

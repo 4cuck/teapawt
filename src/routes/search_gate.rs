@@ -6,7 +6,7 @@ use std::{
 };
 
 use axum::{
-   http::{HeaderValue, header},
+   http::{HeaderValue, StatusCode, header},
    response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::{
@@ -110,7 +110,17 @@ fn challenge(state: &AppState, prefs: &Prefs, prompt: &Prompt<'_>, failed: bool)
       .prefs(prefs)
       .referer(prompt.resume)
       .render();
-   private(axum::response::Html(markup.into_string()).into_response())
+   // 403, not 200. Cloudflare caches this status for search and does not
+   // mix it with the finished results.
+   (
+      StatusCode::FORBIDDEN,
+      [(
+         header::CACHE_CONTROL,
+         HeaderValue::from_static("public, max-age=0, s-maxage=300"),
+      )],
+      axum::response::Html(markup.into_string()),
+   )
+      .into_response()
 }
 
 fn absolute(origin: &str, url: &str) -> String {

@@ -13,9 +13,7 @@ use maud::{PreEscaped, html};
 use crate::{
    AppState,
    types::Prefs,
-   views::{
-      donate as donate_view, explore as explore_view, layout::PageLayout, search as search_view,
-   },
+   views::{donate as donate_view, layout::PageLayout, search as search_view},
 };
 
 fn request_host(config: &crate::config::Config) -> (String, String) {
@@ -149,15 +147,11 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
            }
        }
    };
-   let (trends, progress) = tokio::join!(
-      super::explore::trending_preview(&state),
-      crate::donations::month_progress(&state.donations, state.config.donations.goal_cents),
-   );
-   let preview = explore_view::render_explore_preview(&trends);
+   let progress =
+      crate::donations::month_progress(&state.donations, state.config.donations.goal_cents).await;
    let below = html! {
        (mirror_announcement())
        (hub)
-       (preview)
    };
    let drive = Some(donate_view::donate_drive_banner(&progress));
    let firefox_note = (firefox && !prefs.proxy_media && !warning_hidden)

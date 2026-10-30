@@ -102,6 +102,10 @@ pub fn trend_story(id: &str) -> String {
    format!("trend:{id}")
 }
 
+pub fn trend_timeline(timeline_id: &str, cursor: Option<&str>) -> String {
+   format!("trendtl:{timeline_id}:{}", cursor.unwrap_or(""))
+}
+
 pub fn search_timeline(query: &str, product: &str, cursor: Option<&str>) -> String {
    format!(
       "search:{}:{}:{}",
