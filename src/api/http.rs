@@ -88,13 +88,11 @@ const SLOW_PARK_MAX: Duration = Duration::from_mins(30);
 /// An exit that stays healthy this long after its parking ends starts over
 /// at [`SLOW_PARK_FIRST`].
 const SLOW_PARK_MEMORY_MS: u64 = 10 * 60 * 1000;
-/// Timeouts from one exit before it is taken out. Only a response on the
-/// first try resets the count. The retry after a timeout does not, or a
-/// proxy that misses once and then answers would never be removed.
-const TIMEOUTS_IN_A_ROW: u32 = 5;
-/// Exits taken out for timeouts. Delete a line and restart to use that port
-/// again. Empty means none are recorded.
-const DISABLED_PROXIES_FILE: &str = "disabled-proxies.txt";
+/// Exits that stay in rotation on a pool this size or smaller. The tests use
+/// a handful of ports and still park one.
+const SMALL_POOL: usize = 4;
+/// Exits Cloudflare has blocked by IP. A header stall does not belong here.
+const BANNED_PROXIES_FILE: &str = "disabled-proxies.txt";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProxyKind {
@@ -231,11 +229,9 @@ struct PrimaryPool {
    samples: Mutex<HashMap<u64, ExitSamples>>,
    /// Slow parkings in a row per exit, and when the last one ends.
    relapses: Mutex<HashMap<u64, (u32, u64)>>,
-   /// Timeouts since this exit's last response, per exit.
-   timeouts: Mutex<HashMap<u64, u32>>,
-   /// Exits taken out for timeouts. They stay out across restarts.
-   disabled: Mutex<HashSet<u64>>,
-   disabled_file: Option<PathBuf>,
+   /// Exits whose IP Cloudflare blocked. They stay out across restarts.
+   banned: Mutex<HashSet<u64>>,
+   banned_file: Option<PathBuf>,
 }
 
 impl PrimaryPool {
@@ -246,47 +242,85 @@ impl PrimaryPool {
          blocked_until: Mutex::new(HashMap::new()),
          samples: Mutex::new(HashMap::new()),
          relapses: Mutex::new(HashMap::new()),
-         timeouts: Mutex::new(HashMap::new()),
-         disabled: Mutex::new(HashSet::new()),
-         disabled_file: None,
+         banned: Mutex::new(HashSet::new()),
+         banned_file: None,
       }
    }
 
-   /// Keep exits named in `path` out of rotation, and append there when
-   /// another one is disabled. A missing file means nothing is disabled.
-   fn watch_disabled_file(&mut self, path: PathBuf) {
-      let loaded = load_disabled(&path, &self.proxies);
-      self.disabled = Mutex::new(loaded);
-      self.disabled_file = Some(path);
+   fn watch_banned_file(&mut self, path: PathBuf) {
+      let loaded = load_banned(&path, &self.proxies);
+      self.banned = Mutex::new(loaded);
+      self.banned_file = Some(path);
    }
 
-   fn retired(&self) -> HashSet<u64> {
-      self
-         .disabled
+   fn banned_tags(&self) -> HashSet<u64> {
+      self.banned
          .lock()
-         .map(|disabled| disabled.clone())
+         .map(|banned| banned.clone())
          .unwrap_or_default()
    }
 
-   fn port_of(&self, tag: u64) -> Option<u16> {
-      self
-         .proxies
-         .iter()
-         .find(|proxy| proxy_tag(Some(proxy)) == tag)
-         .map(|proxy| proxy.port)
-   }
-
-   /// Ports taken out for timeouts, in ascending order.
-   fn disabled_ports(&self) -> Vec<u16> {
-      let retired = self.retired();
+   fn banned_ports(&self) -> Vec<u16> {
+      let banned = self.banned_tags();
       let mut ports = self
          .proxies
          .iter()
-         .filter(|proxy| retired.contains(&proxy_tag(Some(proxy))))
+         .filter(|proxy| banned.contains(&proxy_tag(Some(proxy))))
          .map(|proxy| proxy.port)
          .collect::<Vec<_>>();
       ports.sort_unstable();
       ports
+   }
+
+   /// Cloudflare blocked this exit's IP. Stays out until its line is removed
+   /// and teapot restarts. A header stall must not call this.
+   fn ban(&self, proxy: &ProxyConfig) -> bool {
+      let tag = proxy_tag(Some(proxy));
+      if !self.tags.contains(&tag) {
+         return false;
+      }
+      let Ok(mut banned) = self.banned.lock() else {
+         return false;
+      };
+      if !banned.insert(tag) {
+         return false;
+      }
+      let Some(path) = &self.banned_file else {
+         return true;
+      };
+      let fresh = !path.exists();
+      let mut line = String::new();
+      if fresh {
+         line.push_str(
+            "# Cloudflare blocked this exit IP. Delete a line and restart teapot to use that port again.\n",
+         );
+      }
+      let _ = writeln!(line, "{} {} cloudflare", proxy.port, utc_stamp(unix_millis()));
+      if let Err(err) = fs::OpenOptions::new()
+         .create(true)
+         .append(true)
+         .open(path)
+         .and_then(|mut file| file.write_all(line.as_bytes()))
+      {
+         tracing::warn!(port = proxy.port, %err, "could not record the banned proxy exit");
+      }
+      true
+   }
+
+   /// How many exits stay reachable. Search sent through one or two IPs is
+   /// what X's edge answers with 429. A header stall is not a reason to take
+   /// an exit out for good: X being slow looks the same as a dead port.
+   fn must_stay(&self) -> usize {
+      let count = self.proxies.len();
+      if count <= SMALL_POOL {
+         1
+      } else {
+         (count * 2 / 3).max(3)
+      }
+   }
+
+   fn out_cap(&self) -> usize {
+      self.proxies.len().saturating_sub(self.must_stay())
    }
 
    /// Count one call against `proxy`: answered, or slow (late headers, no
@@ -332,15 +366,12 @@ impl PrimaryPool {
    }
 
    fn park_slow(&self, tag: u64, now: u64) -> Option<Duration> {
-      if self.disabled.lock().ok()?.contains(&tag) {
-         return None;
-      }
+      let banned = self.banned_tags().len();
       let mut blocked = self.blocked_until.lock().ok()?;
       blocked.retain(|_, until| *until > now);
-      let retired = self.disabled.lock().ok()?.len();
-      // Parked already, or so many are out that the rest would carry the
-      // whole pool. Held across the decision so one slow burst parks once.
-      if blocked.contains_key(&tag) || blocked.len() + retired >= (self.proxies.len() / 3).max(1) {
+      // Parked already, or so many are out that search would share too few IPs.
+      // Held across the decision so one slow burst parks once.
+      if blocked.contains_key(&tag) || blocked.len() + banned >= self.out_cap() {
          return None;
       }
       let (park, until) = self.next_parking(tag, now)?;
@@ -365,67 +396,6 @@ impl PrimaryPool {
       relapses.insert(tag, (count, until));
       drop(relapses);
       Some((park, until))
-   }
-
-   /// Count one timeout, or clear the streak when a response arrives. Returns
-   /// true the time the streak reaches [`TIMEOUTS_IN_A_ROW`] and the exit is
-   /// taken out.
-   fn note_timeout(&self, proxy: &ProxyConfig, timed_out: bool) -> bool {
-      let tag = proxy_tag(Some(proxy));
-      if !self.tags.contains(&tag)
-         || self
-            .disabled
-            .lock()
-            .is_ok_and(|disabled| disabled.contains(&tag))
-      {
-         return false;
-      }
-      let Some(mut streaks) = self.timeouts.lock().ok() else {
-         return false;
-      };
-      if !timed_out {
-         streaks.remove(&tag);
-         return false;
-      }
-      let streak = streaks.entry(tag).or_insert(0);
-      *streak = streak.saturating_add(1);
-      let streak = *streak;
-      drop(streaks);
-      if streak < TIMEOUTS_IN_A_ROW {
-         return false;
-      }
-      self.retire(tag, proxy.port, unix_millis());
-      true
-   }
-
-   /// Take `port` out of rotation and append a line saying why. It stays out
-   /// for this process even when the file cannot be written.
-   fn retire(&self, tag: u64, port: u16, now: u64) {
-      let Ok(mut disabled) = self.disabled.lock() else {
-         return;
-      };
-      if !disabled.insert(tag) {
-         return;
-      }
-      let Some(path) = &self.disabled_file else {
-         return;
-      };
-      let fresh = !path.exists();
-      let mut line = String::new();
-      if fresh {
-         line.push_str(
-            "# Taken out of rotation after timeouts in a row. Delete a line and restart teapot to use that port again.\n",
-         );
-      }
-      let _ = writeln!(line, "{port} {} timeouts", utc_stamp(now));
-      if let Err(err) = fs::OpenOptions::new()
-         .create(true)
-         .append(true)
-         .open(path)
-         .and_then(|mut file| file.write_all(line.as_bytes()))
-      {
-         tracing::warn!(port, %err, "could not record the disabled proxy exit");
-      }
    }
 
    /// Parked exits by port, with the seconds each has left.
@@ -453,11 +423,7 @@ impl PrimaryPool {
 
    fn is_blocked(&self, proxy: &ProxyConfig) -> bool {
       let tag = proxy_tag(Some(proxy));
-      if self
-         .disabled
-         .lock()
-         .is_ok_and(|disabled| disabled.contains(&tag))
-      {
+      if self.banned_tags().contains(&tag) {
          return true;
       }
       self
@@ -470,6 +436,7 @@ impl PrimaryPool {
 
    /// Returns true only for the first report in a cooldown window, so a burst
    /// of in-flight responses produces one useful warning rather than hundreds.
+   /// Refuses a new block once too few exits would remain.
    fn block(&self, proxy: &ProxyConfig) -> bool {
       let tag = proxy_tag(Some(proxy));
       if !self.tags.contains(&tag) {
@@ -477,9 +444,15 @@ impl PrimaryPool {
       }
       let now = unix_millis();
       let until = now.saturating_add(EXIT_BLOCK_FOR.as_millis() as u64);
+      let banned = self.banned_tags().len();
       let Ok(mut blocked) = self.blocked_until.lock() else {
          return false;
       };
+      blocked.retain(|_, ends| *ends > now);
+      let already = blocked.contains_key(&tag);
+      if !already && blocked.len() + banned >= self.out_cap() {
+         return false;
+      }
       let previous = blocked.entry(tag).or_insert(0);
       let newly_blocked = *previous <= now;
       *previous = (*previous).max(until);
@@ -491,7 +464,7 @@ impl PrimaryPool {
    fn alternate(&self, session: i64, current: &ProxyConfig) -> Option<ProxyConfig> {
       let now = unix_millis();
       let current_tag = proxy_tag(Some(current));
-      let retired = self.retired();
+      let banned = self.banned_tags();
       let mut blocked = self.blocked_until.lock().ok()?;
       blocked.retain(|_, until| *until > now);
       let healthy = self
@@ -499,7 +472,7 @@ impl PrimaryPool {
          .iter()
          .filter(|proxy| {
             let tag = proxy_tag(Some(proxy));
-            tag != current_tag && !blocked.contains_key(&tag) && !retired.contains(&tag)
+            tag != current_tag && !blocked.contains_key(&tag) && !banned.contains(&tag)
          })
          .collect::<Vec<_>>();
       if healthy.is_empty() {
@@ -626,14 +599,14 @@ impl HttpClient {
             "proxy exit circuit breaker ready"
          );
          let mut pool = PrimaryPool::new(proxies, tags);
-         if let Some(path) = disabled_proxies_file() {
-            pool.watch_disabled_file(path.clone());
-            let disabled = pool.disabled_ports();
-            if !disabled.is_empty() {
+         if let Some(path) = banned_proxies_file() {
+            pool.watch_banned_file(path.clone());
+            let banned = pool.banned_ports();
+            if !banned.is_empty() {
                tracing::warn!(
-                  ports = ?disabled,
+                  ports = ?banned,
                   file = %path.display(),
-                  "proxy exits staying disabled for timeouts"
+                  "proxy exits staying out because Cloudflare blocked their IP"
                );
             }
          }
@@ -650,13 +623,11 @@ impl HttpClient {
          .map_or_else(Vec::new, |pool| pool.parked())
    }
 
-   /// Primary exits taken out for timeouts, by port. They stay out until
-   /// their line is removed from the disabled-proxies file and teapot restarts.
-   pub fn disabled_exits(&self) -> Vec<u16> {
-      self
-         .primary_pool
+   /// Cloudflare blocked this exit's IP. Header stalls must not call this.
+   pub fn ban_exit(&self, proxy: &ProxyConfig) -> bool {
+      self.primary_pool
          .as_ref()
-         .map_or_else(Vec::new, |pool| pool.disabled_ports())
+         .is_some_and(|pool| pool.ban(proxy))
    }
 
    fn note_exit(&self, via: Option<&Egress>, slow: bool) {
@@ -673,31 +644,6 @@ impl HttpClient {
             "X answers this proxy exit far slower than the rest; parking it"
          );
       }
-   }
-
-   /// One timeout from this exit, or a first-try response that clears its
-   /// streak. Five timeouts before a clean answer disable the exit.
-   fn note_proxy_timeout(&self, via: Option<&Egress>, timed_out: bool) {
-      let Some(pool) = self.primary_pool.as_ref() else {
-         return;
-      };
-      let Some(proxy) = via.and_then(|egress| egress.proxy.as_ref()) else {
-         return;
-      };
-      if !pool.note_timeout(proxy, timed_out) {
-         return;
-      }
-      let file = pool
-         .disabled_file
-         .as_ref()
-         .map(|path| path.display().to_string())
-         .unwrap_or_default();
-      tracing::warn!(
-         port = proxy.port,
-         timeouts = TIMEOUTS_IN_A_ROW,
-         file = %file,
-         "proxy exit disabled after timeouts in a row; delete its line and restart to use it again"
-      );
    }
 
    fn has_fallback(&self) -> bool {
@@ -1103,11 +1049,7 @@ impl HttpClient {
                inner
             },
             Ok(Err(err)) if is_transport_blip(&err) || err.is_connect() => {
-               if err.is_timeout() {
-                  probe.timed_out();
-               } else {
-                  probe.failed();
-               }
+               probe.failed();
                tracing::warn!(
                   uri = loggable(uri),
                   error = %describe(err.without_url()),
@@ -1118,7 +1060,7 @@ impl HttpClient {
                   .await?
             },
             Err(_elapsed) => {
-               probe.timed_out();
+               probe.failed();
                tracing::warn!(
                   uri = loggable(uri),
                   "API headers stalled, opening another connection"
@@ -1132,7 +1074,6 @@ impl HttpClient {
                   Ok(Ok(inner)) => inner,
                   Ok(Err(err)) => return Err(err),
                   Err(_elapsed) => {
-                     self.note_proxy_timeout(via, true);
                      self.retire(via);
                      tracing::warn!(uri = loggable(uri), "API headers stalled again");
                      return Err(Error::Internal("API headers stalled".into()));
@@ -1140,11 +1081,7 @@ impl HttpClient {
                }
             },
             Ok(Err(err)) => {
-               if err.is_timeout() {
-                  probe.timed_out();
-               } else {
-                  probe.failed();
-               }
+               probe.failed();
                return Err(describe(err));
             },
          };
@@ -1183,18 +1120,14 @@ impl HttpClient {
       if !body.is_empty() {
          request = request.body(body.clone());
       }
-      let probe = ExitProbe::retry(self, via);
+      let probe = ExitProbe::start(self, via);
       match request.send().await {
          Ok(inner) => {
             probe.answered();
             Ok(inner)
          },
          Err(err) => {
-            if err.is_timeout() {
-               probe.timed_out();
-            } else {
-               probe.failed();
-            }
+            probe.failed();
             Err(describe(err))
          },
       }
@@ -1209,43 +1142,24 @@ struct ExitProbe<'a> {
    via: Option<&'a Egress>,
    started: Instant,
    settled: bool,
-   /// A retry that answers does not wipe the timeout that caused it.
-   clears_streak: bool,
 }
 
 impl<'a> ExitProbe<'a> {
    fn start(client: &'a HttpClient, via: Option<&'a Egress>) -> Self {
-      Self::new(client, via, true)
-   }
-
-   fn retry(client: &'a HttpClient, via: Option<&'a Egress>) -> Self {
-      Self::new(client, via, false)
-   }
-
-   fn new(client: &'a HttpClient, via: Option<&'a Egress>, clears_streak: bool) -> Self {
       Self {
          client,
          via,
          started: Instant::now(),
          settled: false,
-         clears_streak,
       }
    }
 
    fn answered(mut self) {
       let slow = self.started.elapsed() >= SLOW_HEADERS;
-      if self.clears_streak {
-         self.client.note_proxy_timeout(self.via, false);
-      }
       self.settle(slow);
    }
 
    fn failed(mut self) {
-      self.settle(true);
-   }
-
-   fn timed_out(mut self) {
-      self.client.note_proxy_timeout(self.via, true);
       self.settle(true);
    }
 
@@ -1514,20 +1428,20 @@ fn proxy_tag(proxy: Option<&ProxyConfig>) -> u64 {
    tag | 1
 }
 
-/// Where disabled exits are recorded. An empty env var records nothing.
-fn disabled_proxies_file() -> Option<PathBuf> {
+fn banned_proxies_file() -> Option<PathBuf> {
    let path =
-      env::var("TEAPOT_DISABLED_PROXIES_FILE").unwrap_or_else(|_| DISABLED_PROXIES_FILE.to_owned());
+      env::var("TEAPOT_DISABLED_PROXIES_FILE").unwrap_or_else(|_| BANNED_PROXIES_FILE.to_owned());
    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
-/// Ports already taken out, ignoring lines for exits this process does not have.
-fn load_disabled(path: &Path, proxies: &[ProxyConfig]) -> HashSet<u64> {
+/// Ports Cloudflare blocked. Lines written for header timeouts are ignored,
+/// so a leftover false positive cannot take the pool down again.
+fn load_banned(path: &Path, proxies: &[ProxyConfig]) -> HashSet<u64> {
    let text = match fs::read_to_string(path) {
       Ok(text) => text,
       Err(err) if err.kind() == std::io::ErrorKind::NotFound => return HashSet::new(),
       Err(err) => {
-         tracing::warn!(%err, "disabled proxy file unreadable; no exit stays out");
+         tracing::warn!(%err, "banned proxy file unreadable; no exit stays out");
          return HashSet::new();
       },
    };
@@ -1537,16 +1451,16 @@ fn load_disabled(path: &Path, proxies: &[ProxyConfig]) -> HashSet<u64> {
       if line.is_empty() || line.starts_with('#') {
          continue;
       }
-      let Some(port) = line
-         .split_whitespace()
-         .next()
-         .and_then(|field| field.parse::<u16>().ok())
-      else {
-         tracing::warn!(line, "disabled proxy file has a line with no port");
+      let mut fields = line.split_whitespace();
+      let Some(port) = fields.next().and_then(|field| field.parse::<u16>().ok()) else {
          continue;
       };
+      let reason = fields.nth(1).unwrap_or("");
+      if reason == "timeouts" {
+         continue;
+      }
       let Some(proxy) = proxies.iter().find(|proxy| proxy.port == port) else {
-         tracing::warn!(port, "disabled proxy file names a port that is not an exit");
+         tracing::warn!(port, "banned proxy file names a port that is not an exit");
          continue;
       };
       tags.insert(proxy_tag(Some(proxy)));
@@ -1554,7 +1468,6 @@ fn load_disabled(path: &Path, proxies: &[ProxyConfig]) -> HashSet<u64> {
    tags
 }
 
-/// `2026-10-28T20:53:11Z` from unix milliseconds.
 fn utc_stamp(now_ms: u64) -> String {
    let secs = now_ms / 1000;
    let days = i64::try_from(secs / 86_400).unwrap_or(0);
@@ -1568,7 +1481,6 @@ fn utc_stamp(now_ms: u64) -> String {
    )
 }
 
-/// Year, month and day for `days` since 1970-01-01.
 fn civil_from_days(days: i64) -> (i32, u32, u32) {
    let z = days + 719_468;
    let era = z.div_euclid(146_097);
@@ -1865,52 +1777,63 @@ mod tests {
    }
 
    #[test]
-   fn timeouts_in_a_row_disable_the_exit_and_one_answer_resets_it() {
+   fn a_cloudflare_ban_stays_out_and_a_timeout_line_does_not() {
       let path = std::env::temp_dir().join(format!(
-         "teapot-disabled-proxies-{}.txt",
+         "teapot-banned-proxies-{}.txt",
          std::process::id()
       ));
-      let _ = fs::remove_file(&path);
-      let proxies = (10001..=10004).map(proxy_on).collect::<Vec<_>>();
+      std::fs::write(
+         &path,
+         "10001 2026-10-28T00:00:00Z timeouts\n10002 2026-10-28T00:00:00Z cloudflare\n",
+      )
+      .unwrap();
+      let proxies = (10001..=10006).map(proxy_on).collect::<Vec<_>>();
       let mut pool = PrimaryPool::new(
          proxies.clone(),
          proxies.iter().map(|proxy| proxy_tag(Some(proxy))).collect(),
       );
-      pool.watch_disabled_file(path.clone());
-      let dead = &proxies[0];
-      for _ in 0..(TIMEOUTS_IN_A_ROW - 1) {
-         assert!(!pool.note_timeout(dead, true));
-      }
-      assert!(!pool.is_blocked(dead));
-      assert!(
-         !pool.note_timeout(dead, false),
-         "a response clears the streak"
-      );
-      for _ in 0..(TIMEOUTS_IN_A_ROW - 1) {
-         assert!(!pool.note_timeout(dead, true));
-      }
-      assert!(pool.note_timeout(dead, true));
-      assert!(pool.is_blocked(dead));
-      assert_eq!(pool.disabled_ports(), vec![dead.port]);
-      assert_ne!(pool.alternate(7, dead).unwrap().port, dead.port);
-      let text = fs::read_to_string(&path).unwrap();
-      assert!(text.contains("timeouts in a row"));
-      assert!(text.contains(&format!("{} ", dead.port)));
-
-      let mut again = PrimaryPool::new(
-         proxies.clone(),
-         proxies.iter().map(|proxy| proxy_tag(Some(proxy))).collect(),
-      );
-      again.watch_disabled_file(path.clone());
-      assert!(again.is_blocked(dead), "a restart keeps the exit out");
-      assert!(!again.is_blocked(&proxies[1]));
-      fs::remove_file(&path).unwrap();
+      pool.watch_banned_file(path.clone());
+      assert!(!pool.is_blocked(&proxies[0]), "a header-timeout line stays ignored");
+      assert!(pool.is_blocked(&proxies[1]));
+      assert!(pool.ban(&proxies[2]));
+      assert!(!pool.ban(&proxies[2]), "banning the same exit twice is one line");
+      assert!(pool.is_blocked(&proxies[2]));
+      let text = std::fs::read_to_string(&path).unwrap();
+      assert!(text.contains("10003 "));
+      assert!(text.contains("cloudflare"));
+      assert!(!pool.is_blocked(&proxies[3]));
+      std::fs::remove_file(&path).unwrap();
    }
 
    #[test]
-   fn utc_stamp_formats_the_unix_epoch() {
-      assert_eq!(utc_stamp(0), "1970-01-01T00:00:00Z");
-      assert_eq!(utc_stamp(1_700_000_000_000), "2023-11-14T22:13:20Z");
+   fn a_run_of_header_stalls_parks_briefly_and_leaves_the_rest_up() {
+      let proxies = (10001..=10030).map(proxy_on).collect::<Vec<_>>();
+      let pool = PrimaryPool::new(
+         proxies.clone(),
+         proxies.iter().map(|proxy| proxy_tag(Some(proxy))).collect(),
+      );
+      let now = unix_millis();
+      for proxy in &proxies {
+         for _ in 0..20 {
+            let _ = pool.record(proxy, true);
+         }
+         let _ = pool.block(proxy);
+      }
+      let open = proxies
+         .iter()
+         .filter(|proxy| !pool.is_blocked(proxy))
+         .count();
+      assert!(
+         open >= pool.must_stay(),
+         "{open} exits left, need at least {}",
+         pool.must_stay()
+      );
+      let slow = &proxies[0];
+      assert!(pool
+         .parked()
+         .iter()
+         .all(|(_, secs)| *secs <= SLOW_PARK_MAX.as_secs()));
+      assert_ne!(pool.alternate(7, slow).unwrap().port, slow.port);
    }
 
    #[test]

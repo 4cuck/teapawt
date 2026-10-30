@@ -290,6 +290,45 @@ fn article_tweet_data<'a>(data: &'a ConversationData, tweet_id: &str) -> Option<
    raw.tweet.as_deref().or(Some(raw))
 }
 
+/// Cloudflare's "you have been blocked" page. That is the exit IP, not the account.
+fn cloudflare_ip_ban(status: axum::http::StatusCode, body: &str) -> bool {
+   if status.as_u16() != 403 {
+      return false;
+   }
+   let lower = body.to_ascii_lowercase();
+   lower.contains("sorry, you have been blocked")
+      || lower.contains("attention required")
+      || lower.contains("cf-error-details")
+}
+
+fn cloudflare_ray(body: &str) -> Option<String> {
+   let tail = body.split("Ray ID:").nth(1)?;
+   let mut run = String::new();
+   for ch in tail.chars() {
+      if ch.is_ascii_hexdigit() {
+         run.push(ch);
+         if run.len() == 16 {
+            return Some(run);
+         }
+      } else if !run.is_empty() {
+         run.clear();
+      }
+   }
+   None
+}
+
+/// What to write in a log. A Cloudflare HTML page is one line, not the document.
+fn log_upstream(body: &str) -> String {
+   let trimmed = body.trim_start();
+   if trimmed.starts_with('<') || body.len() > 240 {
+      if let Some(ray) = cloudflare_ray(body) {
+         return format!("Cloudflare block page, ray {ray}");
+      }
+      return format!("HTML error page, {} bytes", body.len());
+   }
+   body.to_owned()
+}
+
 fn twitter_error_code(body: &str) -> Option<i64> {
    #[derive(Deserialize)]
    struct ErrorCheck {
@@ -389,13 +428,6 @@ impl ApiClient {
             let parked = api.client.parked_exits();
             if !parked.is_empty() {
                tracing::info!(?parked, "proxy exits parked (port, seconds left)");
-            }
-            let disabled = api.client.disabled_exits();
-            if !disabled.is_empty() {
-               tracing::warn!(
-                  ?disabled,
-                  "proxy exits disabled for timeouts; delete the line in disabled-proxies.txt and restart to use one again"
-               );
             }
          }
       });
@@ -577,6 +609,8 @@ impl ApiClient {
             {
                true
             },
+            // Cloudflare blocked that exit's IP. Another account is on another exit.
+            Err(Error::IpThrottled) if replacement == 0 => true,
             Err(Error::RateLimited) => {
                self
                   .sessions
@@ -1026,6 +1060,28 @@ impl ApiClient {
          // 429 to the visitor.
          let account_window = account_rate_window(response.headers());
          let body = response.text().await.unwrap_or_default();
+         let shown = log_upstream(&body);
+
+         if cloudflare_ip_ban(status, &body) {
+            let ray = cloudflare_ray(&body);
+            let egress = self.egress_for(session);
+            if let Some(proxy) = egress.proxy.as_ref()
+               && self.client.ban_exit(proxy)
+            {
+               tracing::warn!(
+                  port = proxy.port,
+                  ray = ray.as_deref().unwrap_or(""),
+                  "Cloudflare blocked this proxy exit; disabling it"
+               );
+            } else {
+               tracing::warn!(
+                  ray = ray.as_deref().unwrap_or(""),
+                  "Cloudflare blocked this request"
+               );
+            }
+            self.sessions.refund_if_metered(session, endpoint).await;
+            return Err(Error::IpThrottled);
+         }
 
          if status.as_u16() == 429 {
             if ip_throttle(&body, account_window) {
@@ -1039,11 +1095,6 @@ impl ApiClient {
                self.sessions.refund_if_metered(session, endpoint).await;
                return Err(Error::IpThrottled);
             }
-            let shown = if body.trim_start().is_empty() || body.trim_start().starts_with('<') {
-               "Rate limit exceeded"
-            } else {
-               body.as_str()
-            };
             tracing::warn!(
                session_id = session.id,
                session_user = %session.username,
@@ -1069,11 +1120,11 @@ impl ApiClient {
             tracing::error!(
                session_id = session.id,
                session_user = %session.username,
-               "API request failed: {status} - {body}"
+               "API request failed: {status} - {shown}"
             );
             self.sessions.disarm_meter(session);
             self.sessions.mark_rejected(session.id).await;
-            return Err(Error::SessionRejected(format!("Status {status}: {body}")));
+            return Err(Error::SessionRejected(format!("Status {status}: {shown}")));
          }
 
          // Empty or HTML 404s are X/WAF blips, not a missing tweet or user.
@@ -1092,7 +1143,7 @@ impl ApiClient {
             tracing::warn!(
                session_id = session.id,
                session_user = %session.username,
-               "API 404: {body}"
+               "API 404: {shown}"
             );
             self.sessions.disarm_meter(session);
             if let Err(err) = Self::check_api_errors(body.as_bytes()) {
@@ -1105,7 +1156,7 @@ impl ApiClient {
             tracing::warn!(
                session_id = session.id,
                session_user = %session.username,
-               "API request failed: {status} - {body}"
+               "API request failed: {status} - {shown}"
             );
             // The gateway reset this stream. Drop the HTTP/2 session so the
             // next call from this account does not wait on it again.
@@ -1114,18 +1165,18 @@ impl ApiClient {
             tracing::error!(
                session_id = session.id,
                session_user = %session.username,
-               "API request failed: {status} - {body}"
+               "API request failed: {status} - {shown}"
             );
          } else {
             tracing::warn!(
                session_id = session.id,
                session_user = %session.username,
-               "API request failed: {status} - {body}"
+               "API request failed: {status} - {shown}"
             );
          }
 
          self.sessions.refund_if_metered(session, endpoint).await;
-         return Err(Error::TwitterApi(format!("Status {status}: {body}")));
+         return Err(Error::TwitterApi(format!("Status {status}: {shown}")));
       }
 
       self.sessions.disarm_meter(session);
@@ -1302,6 +1353,22 @@ pub use endpoint_methods::OpenProfile;
 #[cfg(test)]
 mod tests {
    use super::*;
+
+   #[test]
+   fn a_cloudflare_block_page_is_one_log_line() {
+      let page = "<html><title>Attention Required! | Cloudflare</title>\
+         <h1>Sorry, you have been blocked</h1>\
+         Cloudflare Ray ID: <strong>a5267bf16cead69c</strong></html>";
+      assert!(cloudflare_ip_ban(axum::http::StatusCode::FORBIDDEN, page));
+      assert!(!cloudflare_ip_ban(
+         axum::http::StatusCode::FORBIDDEN,
+         r#"{"errors":[{"code":326}]}"#
+      ));
+      let note = log_upstream(page);
+      assert!(note.contains("a5267bf16cead69c"));
+      assert!(!note.contains("<html"));
+      assert!(note.len() < 80);
+   }
 
    #[test]
    fn formats_scheduled_audio_space_status() {
