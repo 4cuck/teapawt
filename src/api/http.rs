@@ -253,6 +253,38 @@ impl PrimaryPool {
       self.banned_file = Some(path);
    }
 
+   /// Pick up handshake bans written while teapot is running. Deleting a
+   /// line puts that port back without a restart.
+   fn reload_banned_file(&self) {
+      let Some(path) = &self.banned_file else {
+         return;
+      };
+      let loaded = load_banned(path, &self.proxies);
+      let Ok(mut banned) = self.banned.lock() else {
+         return;
+      };
+      if *banned == loaded {
+         return;
+      }
+      *banned = loaded;
+      tracing::warn!(
+         ports = ?self.banned_ports_locked(&banned),
+         file = %path.display(),
+         "proxy ban file changed"
+      );
+   }
+
+   fn banned_ports_locked(&self, banned: &HashSet<u64>) -> Vec<u16> {
+      let mut ports = self
+         .proxies
+         .iter()
+         .filter(|proxy| banned.contains(&proxy_tag(Some(proxy))))
+         .map(|proxy| proxy.port)
+         .collect::<Vec<_>>();
+      ports.sort_unstable();
+      ports
+   }
+
    fn banned_tags(&self) -> HashSet<u64> {
       self.banned
          .lock()
@@ -606,11 +638,20 @@ impl HttpClient {
                tracing::warn!(
                   ports = ?banned,
                   file = %path.display(),
-                  "proxy exits staying out because Cloudflare blocked their IP"
+                  "proxy exits staying out because the ban file says so"
                );
             }
          }
-         self.primary_pool = Some(Arc::new(pool));
+         let pool = Arc::new(pool);
+         let refresh = Arc::clone(&pool);
+         tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(30));
+            loop {
+               tick.tick().await;
+               refresh.reload_banned_file();
+            }
+         });
+         self.primary_pool = Some(pool);
       }
       self
    }
