@@ -15,7 +15,7 @@ use std::{
    hash::{Hash as _, Hasher as _},
    io::Write as _,
    path::{Path, PathBuf},
-   pin::Pin,
+   pin::{Pin, pin},
    result::Result as StdResult,
    sync::{
       Arc, Mutex,
@@ -1102,7 +1102,8 @@ impl HttpClient {
 
       if self.purpose == Purpose::Api && is_idempotent(method) {
          let probe = ExitProbe::start(self, via);
-         let inner = match tokio::time::timeout(API_HEADER_DEADLINE, send()).await {
+         let mut first = pin!(send());
+         let inner = match tokio::time::timeout(API_HEADER_DEADLINE, first.as_mut()).await {
             Ok(Ok(inner)) => {
                probe.answered();
                inner
@@ -1124,24 +1125,9 @@ impl HttpClient {
                   uri = loggable(uri),
                   "API headers stalled, opening another connection"
                );
-               match tokio::time::timeout(
-                  API_HEADER_DEADLINE,
-                  self.fresh_headers(method, uri, extra_headers, body, via),
-               )
-               .await
-               {
-                  Ok(Ok(inner)) => inner,
-                  Ok(Err(err)) => return Err(err),
-                  Err(_elapsed) => {
-                     self.retire(via);
-                     if let Some(alternate) = via.and_then(|egress| self.alternate_primary(egress))
-                     {
-                        self.retire(Some(&alternate));
-                     }
-                     tracing::warn!(uri = loggable(uri), "API headers stalled again");
-                     return Err(Error::Internal("API headers stalled".into()));
-                  },
-               }
+               // Boxed: the race holds a second request future, and only a
+               // stall pays for it instead of every caller's future.
+               Box::pin(self.race_stalled(first, method, uri, extra_headers, body, via)).await?
             },
             Ok(Err(err)) => {
                probe.failed();
@@ -1180,7 +1166,107 @@ impl HttpClient {
    ) -> Result<primp::Response> {
       self.retire(via);
       let alternate = via.and_then(|egress| self.alternate_primary(egress));
-      let retry_via = alternate.as_ref().or(via);
+      self
+         .send_fresh(method, uri, extra_headers, body, alternate.as_ref().or(via))
+         .await
+   }
+
+   /// Headers are late on the first connection. Another connection gets one
+   /// more deadline, and the first request keeps running beside it: late
+   /// headers are mostly X taking its time over a big page, and dropping that
+   /// call only starts the same wait over. Whichever answers first is kept.
+   async fn race_stalled<F>(
+      &self,
+      mut first: Pin<&mut F>,
+      method: &Method,
+      uri: &str,
+      extra_headers: &HeaderMap,
+      body: &Bytes,
+      via: Option<&Egress>,
+   ) -> Result<primp::Response>
+   where
+      F: Future<Output = primp::Result<primp::Response>>,
+   {
+      let alternate = via.and_then(|egress| self.alternate_primary(egress));
+      if alternate.is_none() {
+         // Same account on the same exit: only a new connection differs. The
+         // request already on the old one keeps its own handle to it.
+         self.retire(via);
+      }
+      let race = async {
+         let mut fresh = pin!(self.send_fresh(
+            method,
+            uri,
+            extra_headers,
+            body,
+            alternate.as_ref().or(via),
+         ));
+         let (mut first_done, mut fresh_done) = (false, false);
+         // A 5xx or an error is held in case the other side does no better.
+         // A 5xx goes back up as a response, which callers retry elsewhere.
+         let mut fallback: Option<Result<primp::Response>> = None;
+         while !(first_done && fresh_done) {
+            tokio::select! {
+               late = first.as_mut(), if !first_done => {
+                  first_done = true;
+                  match late {
+                     Ok(inner) if !inner.status().is_server_error() => {
+                        tracing::info!(
+                           uri = loggable(uri),
+                           "late headers arrived on the first connection"
+                        );
+                        return Ok(inner);
+                     },
+                     Ok(inner) => fallback = Some(Ok(inner)),
+                     Err(err) => {
+                        if fallback.is_none() {
+                           fallback = Some(Err(describe(err)));
+                        }
+                     },
+                  }
+               },
+               outcome = fresh.as_mut(), if !fresh_done => {
+                  fresh_done = true;
+                  match outcome {
+                     Ok(inner) if !inner.status().is_server_error() => {
+                        if alternate.is_some() {
+                           // Silent past its deadline while another answered.
+                           self.retire(via);
+                        }
+                        return Ok(inner);
+                     },
+                     Ok(inner) => fallback = Some(Ok(inner)),
+                     Err(err) => {
+                        if fallback.is_none() {
+                           fallback = Some(Err(err));
+                        }
+                     },
+                  }
+               },
+            }
+         }
+         fallback.unwrap_or_else(|| Err(Error::Internal("API headers stalled".into())))
+      };
+      if let Ok(outcome) = tokio::time::timeout(API_HEADER_DEADLINE, race).await {
+         return outcome;
+      }
+      self.retire(via);
+      if let Some(alternate) = alternate.as_ref() {
+         self.retire(Some(alternate));
+      }
+      tracing::warn!(uri = loggable(uri), "API headers stalled again");
+      Err(Error::Internal("API headers stalled".into()))
+   }
+
+   /// One request on the client for `retry_via`, counted against its exit.
+   async fn send_fresh(
+      &self,
+      method: &Method,
+      uri: &str,
+      extra_headers: &HeaderMap,
+      body: &Bytes,
+      retry_via: Option<&Egress>,
+   ) -> Result<primp::Response> {
       let client = self.client_for(retry_via)?;
       let mut request = client
          .request(method.clone(), uri)
@@ -2186,6 +2272,70 @@ mod tests {
       let order = wire_header_order(Purpose::Script);
       let names: Vec<&str> = order.iter().map(HeaderName::as_str).collect();
       assert_eq!(&names[..3], &["sec-gpc", "origin", "sec-ch-ua-platform"]);
+   }
+
+   /// HTTP/1.1 on localhost whose n-th request waits `delays[n]` before
+   /// answering with its own index.
+   async fn delayed_server(delays: Vec<Duration>) -> String {
+      use tokio::{
+         io::{AsyncReadExt as _, AsyncWriteExt as _},
+         net::TcpListener,
+         time::sleep,
+      };
+
+      let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let addr = listener.local_addr().unwrap();
+      let delays = Arc::new(delays);
+      let count = Arc::new(AtomicUsize::new(0));
+      tokio::spawn(async move {
+         while let Ok((mut socket, _)) = listener.accept().await {
+            let delays = Arc::clone(&delays);
+            let count = Arc::clone(&count);
+            tokio::spawn(async move {
+               let mut buf = [0_u8; 4096];
+               let mut seen = Vec::new();
+               while !seen.windows(4).any(|window| window == b"\r\n\r\n") {
+                  match socket.read(&mut buf).await {
+                     Ok(0) | Err(_) => return,
+                     Ok(read) => seen.extend_from_slice(&buf[..read]),
+                  }
+               }
+               let index = count.fetch_add(1, Ordering::SeqCst);
+               sleep(delays.get(index).copied().unwrap_or_default()).await;
+               let body = index.to_string();
+               let response = format!(
+                  "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                  body.len()
+               );
+               let _ = socket.write_all(response.as_bytes()).await;
+            });
+         }
+      });
+      format!("http://{addr}/")
+   }
+
+   #[tokio::test]
+   async fn a_dead_first_connection_is_answered_by_a_fresh_one() {
+      let uri = delayed_server(vec![Duration::from_secs(10), Duration::ZERO]).await;
+      let client = HttpClient::new("", "", Purpose::Api);
+      let started = Instant::now();
+      let body = client.get(&uri).await.unwrap().text().await.unwrap();
+      assert_eq!(body, "1");
+      assert!(started.elapsed() < API_HEADER_DEADLINE * 2, "{:?}", started.elapsed());
+   }
+
+   #[tokio::test]
+   async fn late_headers_on_the_first_connection_are_kept() {
+      let uri = delayed_server(vec![
+         API_HEADER_DEADLINE + Duration::from_millis(300),
+         Duration::from_secs(10),
+      ])
+      .await;
+      let client = HttpClient::new("", "", Purpose::Api);
+      let started = Instant::now();
+      let body = client.get(&uri).await.unwrap().text().await.unwrap();
+      assert_eq!(body, "0", "the slow first call answered and was dropped");
+      assert!(started.elapsed() < API_HEADER_DEADLINE * 2, "{:?}", started.elapsed());
    }
 
    #[test]
