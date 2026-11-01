@@ -7,8 +7,11 @@
 
 use std::{
    collections::HashMap,
-   sync::Arc,
-   time::{Duration, Instant},
+   sync::{
+      Arc,
+      atomic::{AtomicU64, Ordering},
+   },
+   time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::http::{HeaderMap, header};
@@ -33,6 +36,8 @@ pub struct TidClient {
    proxies: Option<Arc<ProxyPool>>,
    operations: Operations,
    last_fetch: Arc<Mutex<Instant>>,
+   /// Unix millis before which `ensure_fresh` can return without locking.
+   next_refresh: Arc<AtomicU64>,
    refused: Arc<RwLock<HashMap<String, Instant>>>,
    /// When GraphQL operations were last read again after an empty answer.
    rechecked: Arc<Mutex<Option<Instant>>>,
@@ -71,9 +76,16 @@ impl TidClient {
          last_fetch: Arc::new(Mutex::new(
             Instant::now().checked_sub(REFRESH_INTERVAL).unwrap(),
          )),
+         next_refresh: Arc::new(AtomicU64::new(0)),
          refused: Arc::new(RwLock::new(HashMap::new())),
          rechecked: Arc::new(Mutex::new(None)),
       }
+   }
+
+   /// Warm the transaction ID client and live GraphQL operations at startup so
+   /// the first visitor does not wait for the homepage and script fetch.
+   pub async fn warmup(&self) {
+      self.ensure_fresh().await;
    }
 
    /// Read the GraphQL operations again after two accounts got an empty 404
@@ -133,8 +145,13 @@ impl TidClient {
    }
 
    pub(crate) async fn is_refused(&self, method: &str, path: &str) -> bool {
+      let guard = self.refused.read().await;
+      if guard.is_empty() {
+         return false;
+      }
       let key = Self::refusal_key(method, path);
-      let refused_at = self.refused.read().await.get(&key).copied();
+      let refused_at = guard.get(&key).copied();
+      drop(guard);
       match refused_at {
          Some(at) if at.elapsed() < REFUSAL_INTERVAL => true,
          Some(_) => {
@@ -160,6 +177,9 @@ impl TidClient {
    /// nothing else to serve. Once a client exists, the hourly refresh runs in
    /// the background so no request pays for two page fetches.
    async fn ensure_fresh(&self) {
+      if now_millis() < self.next_refresh.load(Ordering::Relaxed) {
+         return;
+      }
       let Ok(mut last) = self.last_fetch.try_lock() else {
          return; // another task is already refreshing
       };
@@ -170,7 +190,7 @@ impl TidClient {
 
       if self.inner.read().await.is_none() {
          let outcome = self.fetch_client().await;
-         Self::record_refresh(&mut last, &outcome);
+         Self::record_refresh(&mut last, &self.next_refresh, &outcome);
          if let Ok(ct) = outcome {
             *self.inner.write().await = Some(ct);
          }
@@ -180,22 +200,34 @@ impl TidClient {
       // Claim the window before spawning so concurrent callers do not each
       // start a refresh; a failure rewinds it to the retry interval.
       *last = Instant::now();
+      self.next_refresh.store(
+         now_millis().saturating_add(u64::try_from(REFRESH_INTERVAL.as_millis()).unwrap_or(0)),
+         Ordering::Relaxed,
+      );
       drop(last);
       let this = self.clone();
       tokio::spawn(async move {
          let outcome = this.fetch_client().await;
          let mut last = this.last_fetch.lock().await;
-         Self::record_refresh(&mut last, &outcome);
+         Self::record_refresh(&mut last, &this.next_refresh, &outcome);
          if let Ok(ct) = outcome {
             *this.inner.write().await = Some(ct);
          }
       });
    }
 
-   fn record_refresh(last: &mut Instant, outcome: &Result<ClientTransaction, String>) {
+   fn record_refresh(
+      last: &mut Instant,
+      next_refresh: &AtomicU64,
+      outcome: &Result<ClientTransaction, String>,
+   ) {
       match outcome {
          Ok(_) => {
             *last = Instant::now();
+            next_refresh.store(
+               now_millis().saturating_add(u64::try_from(REFRESH_INTERVAL.as_millis()).unwrap_or(0)),
+               Ordering::Relaxed,
+            );
             tracing::info!("TID client refreshed");
          },
          Err(err) => {
@@ -204,6 +236,10 @@ impl TidClient {
             *last = Instant::now()
                .checked_sub(REFRESH_INTERVAL.saturating_sub(RETRY_INTERVAL))
                .unwrap_or_else(Instant::now);
+            next_refresh.store(
+               now_millis().saturating_add(u64::try_from(RETRY_INTERVAL.as_millis()).unwrap_or(0)),
+               Ordering::Relaxed,
+            );
          },
       }
    }
@@ -294,4 +330,11 @@ impl TidClient {
          .map_err(|err| format!("read x.com body: {err}"))?;
       Ok((home_html, egress))
    }
+}
+
+fn now_millis() -> u64 {
+   SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+      .unwrap_or(0)
 }

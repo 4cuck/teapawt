@@ -26,4 +26,5 @@ pub use game::{
    parse_tweets_by_ids, tweets_in_timeline,
 };
 pub use timeline::{parse_list_timeline, parse_search_timeline, parse_timeline};
+pub use tweet::parse_tweet_object;
 pub use user::parse_user;

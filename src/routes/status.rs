@@ -12,7 +12,7 @@ use tweet_view::{TweetRenderer, render_reply_chains, thread_context};
 
 use super::{
    helpers,
-   helpers::{get_cached_translation, get_cached_tweet},
+   helpers::{get_cached_strato_translation, get_cached_translation, get_cached_tweet},
 };
 use crate::{
    AppState,
@@ -182,57 +182,86 @@ async fn render_status(
    photo: Option<usize>,
 ) -> Result<Response> {
    let prefs = Prefs::from_cookies(jar, &state.config);
-   let is_discord = headers
+   let user_agent = headers
       .get(header::USER_AGENT)
       .and_then(|value| value.to_str().ok())
-      .is_some_and(|user_agent| user_agent.contains("Discordbot"));
+      .unwrap_or_default();
+   let is_discord = user_agent.contains("Discordbot");
+   let is_preview = PREVIEW_AGENTS
+      .iter()
+      .any(|agent| user_agent.contains(agent));
 
    let sort_key = prefs.resolved_reply_sort(query.sort.as_deref());
    let sort = Prefs::reply_ranking_mode(sort_key);
    let is_sorted = sort != "Relevance";
+   let is_scroll = query.scroll.as_ref().is_some_and(|val| val == "true");
+   let has_cursor = query.cursor.is_some();
 
-   // Fetch conversation (with cache for first page, default sort only)
-   let conv_result = if query.cursor.is_none() && !is_sorted {
+   // Fetch conversation (with cache for first page, default sort only).
+   // Non-scroll cursor pages omit the focal tweet in X's response, so fetch the
+   // first page in the same wave when it is not cached.
+   let (conv_result, mut prefetched_first) = if !has_cursor && !is_sorted {
       let cache_key = cache_keys::conversation(&id);
       if let Some(cached) = state.cache.get(&cache_key) {
          tracing::debug!("Cache hit for conversation: {id}");
-         Ok(cached)
+         (Ok(cached), None)
       } else {
          let result = state.api.get_conversation(&id, None, sort).await;
-         if let Ok(mut conv) = result {
-            state.api.resolve_unavailable_quote(&mut conv.tweet).await;
-            state.cache.set(&cache_key, &conv, ttl::DEFAULT);
-            Ok(conv)
-         } else {
-            result
+         if let Ok(ref conv) = result {
+            state.cache.set(&cache_key, conv, ttl::DEFAULT);
          }
+         (result, None)
+      }
+   } else if has_cursor && !is_scroll {
+      let cache_key = cache_keys::conversation(&id);
+      let cached_first = (!is_sorted)
+         .then(|| state.cache.get::<Conversation>(&cache_key))
+         .flatten();
+      if let Some(first) = cached_first {
+         let result = state
+            .api
+            .get_conversation(&id, query.cursor.as_deref(), sort)
+            .await;
+         (result, Some(Ok(first)))
+      } else {
+         let (cursor_res, first_res) = tokio::join!(
+            state
+               .api
+               .get_conversation(&id, query.cursor.as_deref(), sort),
+            state.api.get_conversation(&id, None, sort),
+         );
+         if !is_sorted
+            && let Ok(ref first) = first_res
+         {
+            state.cache.set(&cache_key, first, ttl::DEFAULT);
+         }
+         (cursor_res, Some(first_res))
       }
    } else {
       let result = state
          .api
          .get_conversation(&id, query.cursor.as_deref(), sort)
          .await;
-      if let Ok(mut conv) = result {
-         state.api.resolve_unavailable_quote(&mut conv.tweet).await;
-         Ok(conv)
-      } else {
-         result
-      }
+      (result, None)
    };
 
    match conv_result {
       Ok(mut conversation) => {
-         let is_scroll = query.scroll.as_ref().is_some_and(|val| val == "true");
-         let has_cursor = query.cursor.is_some();
-
          helpers::enrich_conversation(&state, &mut conversation).await;
 
          let focused_photo = photo.filter(|&idx| conversation.tweet.keep_only_photo(idx));
          let activity =
             is_discord.then(|| embed::ActivityId::new(conversation.tweet.id, focused_photo));
 
-         // Auto-translate for embeds (OG tags / ActivityPub show translated text)
-         if !is_discord && !is_scroll && !has_cursor && conversation.tweet.is_translatable {
+         // Auto-translate for link-preview unfurlers (OG tags show translated text).
+         // Human visitors use the interactive "Translate post" button instead of
+         // blocking the page load on an upstream translation call.
+         if is_preview
+            && !is_discord
+            && !is_scroll
+            && !has_cursor
+            && conversation.tweet.is_translatable
+         {
             let kagi = &state.config.config.kagi_token;
             let token = (!kagi.is_empty()).then_some(kagi.as_str());
             if let Ok(tl) = get_cached_translation(&state, &conversation.tweet, token, false).await
@@ -268,21 +297,14 @@ async fn render_status(
          }
 
          // Paginated requests with no replies indicate that the cursor reached a
-         // dead end. Re-fetch the first page and render it without the bottom
-         // cursor so "Load more replies" disappears.
+         // dead end. Render the first page without the bottom cursor so "Load more
+         // replies" disappears.
          if has_cursor && conversation.replies.content.is_empty() {
-            let mut first_page = if is_sorted {
-               state.api.get_conversation(&id, None, sort).await?
-            } else {
-               let cache_key = cache_keys::conversation(&id);
-               if let Some(cached) = state.cache.get::<Conversation>(&cache_key) {
-                  cached
-               } else {
-                  let fresh = state.api.get_conversation(&id, None, sort).await?;
-                  state.cache.set(&cache_key, &fresh, ttl::DEFAULT);
-                  fresh
-               }
+            let mut first_page = match prefetched_first.take() {
+               Some(res) => res?,
+               None => state.api.get_conversation(&id, None, sort).await?,
             };
+            helpers::enrich_conversation(&state, &mut first_page).await;
             first_page.replies.bottom = None;
             if let Some(idx) = focused_photo {
                first_page.tweet.keep_only_photo(idx);
@@ -300,22 +322,16 @@ async fn render_status(
          }
 
          // Paginated responses (with cursor) don't include the main tweet.
-         // Recover it from the first-page cache, or re-fetch without cursor.
+         // Recover it from the parallel first-page fetch or cache.
          #[expect(clippy::shadow_same, reason = "rebinding as mutable")]
          let mut conversation = conversation;
          if conversation.tweet.id == 0 && has_cursor {
-            if is_sorted {
-               if let Ok(fresh) = state.api.get_conversation(&id, None, sort).await {
-                  conversation.tweet = fresh.tweet;
-               }
-            } else {
-               let cache_key = cache_keys::conversation(&id);
-               if let Some(cached) = state.cache.get::<Conversation>(&cache_key) {
-                  conversation.tweet = cached.tweet;
-               } else if let Ok(fresh) = state.api.get_conversation(&id, None, sort).await {
-                  state.cache.set(&cache_key, &fresh, ttl::DEFAULT);
-                  conversation.tweet = fresh.tweet;
-               }
+            if let Some(Ok(mut fresh)) = prefetched_first.take() {
+               helpers::enrich_conversation(&state, &mut fresh).await;
+               conversation.tweet = fresh.tweet;
+            } else if let Ok(mut fresh) = state.api.get_conversation(&id, None, sort).await {
+               helpers::enrich_conversation(&state, &mut fresh).await;
+               conversation.tweet = fresh.tweet;
             }
             if let Some(idx) = focused_photo {
                conversation.tweet.keep_only_photo(idx);
@@ -516,10 +532,14 @@ async fn status_by_id(
    }
 
    let prefs = Prefs::from_cookies(&jar, &state.config);
-   let discord_activity = headers
+   let user_agent = headers
       .get(header::USER_AGENT)
       .and_then(|value| value.to_str().ok())
-      .is_some_and(|user_agent| user_agent.contains("Discordbot"));
+      .unwrap_or_default();
+   let discord_activity = user_agent.contains("Discordbot");
+   let is_preview = PREVIEW_AGENTS
+      .iter()
+      .any(|agent| user_agent.contains(agent));
    let sort_key = prefs.resolved_reply_sort(query.sort.as_deref());
    let sort = Prefs::reply_ranking_mode(sort_key);
 
@@ -531,31 +551,23 @@ async fn status_by_id(
          Ok(cached)
       } else {
          let result = state.api.get_conversation(&id, None, sort).await;
-         if let Ok(mut conv) = result {
-            state.api.resolve_unavailable_quote(&mut conv.tweet).await;
-            state.cache.set(&cache_key, &conv, ttl::DEFAULT);
-            Ok(conv)
-         } else {
-            result
+         if let Ok(ref conv) = result {
+            state.cache.set(&cache_key, conv, ttl::DEFAULT);
          }
-      }
-   } else {
-      let result = state
-         .api
-         .get_conversation(&id, query.cursor.as_deref(), sort)
-         .await;
-      if let Ok(mut conv) = result {
-         state.api.resolve_unavailable_quote(&mut conv.tweet).await;
-         Ok(conv)
-      } else {
          result
       }
+   } else {
+      state
+         .api
+         .get_conversation(&id, query.cursor.as_deref(), sort)
+         .await
    };
 
    match conv_result {
       Ok(mut conversation) => {
-         // Auto-translate for embeds (OG tags / ActivityPub show translated text)
-         if !discord_activity && conversation.tweet.is_translatable {
+         helpers::enrich_conversation(&state, &mut conversation).await;
+         // Auto-translate for link-preview unfurlers (OG tags show translated text).
+         if is_preview && !discord_activity && conversation.tweet.is_translatable {
             let kagi = &state.config.config.kagi_token;
             let token = (!kagi.is_empty()).then_some(kagi.as_str());
             if let Ok(tl) = get_cached_translation(&state, &conversation.tweet, token, false).await
@@ -609,9 +621,13 @@ async fn translate(
          (!server_token.is_empty()).then(|| server_token.clone())
       });
 
-   let result = match get_cached_tweet(&state, &id).await {
-      Ok(tweet) => get_cached_translation(&state, &tweet, kagi_token.as_deref(), true).await,
-      Err(err) => Err(err),
+   let result = if let Some(ref token) = kagi_token {
+      match get_cached_tweet(&state, &id).await {
+         Ok(tweet) => get_cached_translation(&state, &tweet, Some(token.as_str()), true).await,
+         Err(err) => Err(err),
+      }
+   } else {
+      get_cached_strato_translation(&state, &id, true).await
    };
 
    match result {
@@ -715,6 +731,9 @@ async fn retweets(
       .api
       .get_retweeters(&id, query.cursor.as_deref())
       .await?;
+   for user in &result.content {
+      helpers::remember_user_id(&state, user);
+   }
 
    let cursor = result.bottom.as_deref();
    let base_url = format!("/{username}/status/{id}/retweets");
@@ -800,6 +819,9 @@ async fn quotes(
 
    let mut groups = timeline.content;
    helpers::enrich_tweet_groups(&state, &mut groups).await;
+   for group in &groups {
+      helpers::remember_tweets(&state, group);
+   }
    let cursor = timeline.bottom.as_deref();
    let base_url = format!("/{username}/status/{id}/quotes");
 

@@ -22,7 +22,7 @@ pub struct CommunityInfo {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct CommunityQueryData {
-   pub data: Option<CommunityDataField>,
+   data: Option<CommunityDataField>,
 }
 
 #[derive(Deserialize, Default)]

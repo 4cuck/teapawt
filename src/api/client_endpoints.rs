@@ -250,7 +250,9 @@ impl ApiClient {
             Some(endpoints::USER_FIELD_TOGGLES),
          )
          .await?;
-      parser::parse_user(&data)
+      let user = parser::parse_user(&data)?;
+      crate::cache::ids::remember(&user.username, &user.id);
+      Ok(user)
    }
 
    /// Read X's About Account record.
@@ -360,7 +362,9 @@ impl ApiClient {
             Some(endpoints::USER_FIELD_TOGGLES),
          )
          .await?;
-      parser::parse_user(&data)
+      let user = parser::parse_user(&data)?;
+      crate::cache::ids::remember(&user.username, &user.id);
+      Ok(user)
    }
 
    /// Get edit history for a tweet.
@@ -379,10 +383,37 @@ impl ApiClient {
    /// Get tweet by ID.
    ///
    /// Uses the `TweetDetail` endpoint (same as conversation) because
-   /// `TweetResultByIdQuery` returns 404 for many tweets.
+   /// `TweetResultByIdQuery` returns 404 for many tweets, but extracts the
+   /// focal tweet directly instead of parsing the reply chains.
    pub async fn get_tweet(&self, tweet_id: &str) -> Result<Tweet> {
-      let convo = self.get_conversation(tweet_id, None, "Relevance").await?;
-      Ok(convo.tweet)
+      snowflake(tweet_id)?;
+      let data = self
+         .graphql_request::<ConversationData>(
+            endpoints::GRAPH_TWEET_DETAIL,
+            &endpoints::tweet_detail_vars(tweet_id, None, "Relevance"),
+            endpoints::GQL_FEATURES,
+            Some(endpoints::TWEET_DETAIL_FIELD_TOGGLES),
+         )
+         .await?;
+      let mut tweet = if let Some(tweet_data) = article_tweet_data(&data, tweet_id)
+         && let Ok(mut parsed) = parser::parse_tweet_object(tweet_data)
+      {
+         if let Ok(article) = parser::parse_article(tweet_data) {
+            parser::attach_article_preview(&mut parsed, &article);
+         }
+         parsed
+      } else {
+         let mut conversation = parser::parse_conversation(&data, tweet_id, false)?;
+         if let Some(tweet_data) = article_tweet_data(&data, tweet_id)
+            && let Ok(article) = parser::parse_article(tweet_data)
+         {
+            parser::attach_article_preview(&mut conversation.tweet, &article);
+         }
+         conversation.tweet
+      };
+      self.enrich_audio_space_card(&mut tweet).await;
+      self.enrich_broadcast_card(&mut tweet).await;
+      Ok(tweet)
    }
 
    /// Re-fetch unavailable quote tweets (e.g. blocked-quoter tombstones).
@@ -506,30 +537,34 @@ impl ApiClient {
          )
          .await?;
       let mut conversation = parser::parse_conversation(&data, tweet_id, cursor.is_some())?;
-      let mut article_attached = false;
       if cursor.is_none()
          && let Some(tweet_data) = article_tweet_data(&data, tweet_id)
          && let Ok(article) = parser::parse_article(tweet_data)
       {
          parser::attach_article_preview(&mut conversation.tweet, &article);
-         article_attached = true;
-      }
-      // The article normally rides along in the detail response above; a second
-      // `TweetDetail` for the same id is only worth its round trip when it did not.
-      if cursor.is_none()
-         && !article_attached
-         && conversation
-            .tweet
-            .entities
-            .iter()
-            .any(|entity| entity.url.contains("/article/"))
-         && let Ok((_tweet, article)) = self.get_article_tweet(tweet_id).await
-      {
-         parser::attach_article_preview(&mut conversation.tweet, &article);
       }
       if cursor.is_none() {
-         self.enrich_audio_space_card(&mut conversation.tweet).await;
-         self.enrich_broadcast_card(&mut conversation.tweet).await;
+         let quote_id = conversation
+            .tweet
+            .quote
+            .as_ref()
+            .filter(|qt| !qt.available && qt.id != 0)
+            .map(|qt| qt.id.to_string());
+         let ((), resolved_quote) = tokio::join!(
+            async {
+               self.enrich_audio_space_card(&mut conversation.tweet).await;
+               self.enrich_broadcast_card(&mut conversation.tweet).await;
+            },
+            async {
+               match quote_id {
+                  Some(ref qid) => self.get_tweet(qid).await.ok(),
+                  None => None,
+               }
+            },
+         );
+         if let Some(resolved) = resolved_quote {
+            conversation.tweet.quote = Some(Box::new(resolved));
+         }
       }
       Ok(conversation)
    }
@@ -633,6 +668,24 @@ impl ApiClient {
       reason = "session lease is transferred into the complete upstream request"
    )]
    pub async fn get_user_media(&self, user_id: &str, cursor: Option<&str>) -> Result<Timeline> {
+      let key = Self::inflight_key(
+         endpoints::GRAPH_USER_MEDIA,
+         &endpoints::user_media_vars(user_id, cursor),
+         None,
+      );
+      let guard = match self.join_or_lead(key) {
+         super::InflightTicket::Follower(mut rx) => {
+            if rx.changed().await.is_ok()
+               && let Some(bytes) = rx.borrow_and_update().clone()
+               && let Ok(parsed) = Self::parse_coalesced::<UserTimelineData>(&bytes)
+            {
+               return parser::parse_timeline(&parsed);
+            }
+            None
+         },
+         super::InflightTicket::Leader(guard) => Some(guard),
+      };
+
       // Select the endpoint from the same leased session used for the request.
       let session = self
          .charged_session_by_kind(endpoints::GRAPH_USER_MEDIA, endpoints::GRAPH_USER_MEDIA_V2)
@@ -649,7 +702,7 @@ impl ApiClient {
       };
 
       let retry_kind = session.kind;
-      let data = self
+      let (data, bytes) = self
          .graphql_request_with_session::<UserTimelineData>(
             session,
             endpoint,
@@ -659,6 +712,9 @@ impl ApiClient {
             Some(retry_kind),
          )
          .await?;
+      if let Some(guard) = guard {
+         guard.complete(bytes);
+      }
 
       parser::parse_timeline(&data)
    }
@@ -763,6 +819,11 @@ impl ApiClient {
       }
 
       let (tweets, rail, media) = if cursor.is_none() {
+         let rail = if rail.is_none() && user.media == 0 && user.tweets > 0 {
+            Some(Vec::new())
+         } else {
+            rail
+         };
          let media = MediaFetch::start(self, &user.id, rail);
          let tweets = self.get_user_tweets(&user.id, None).await?;
          let (rail, media) = media.take_ready();
@@ -1125,6 +1186,24 @@ impl ApiClient {
       user_id: &str,
       cursor: Option<&str>,
    ) -> Result<Timeline> {
+      let key = Self::inflight_key(
+         endpoints::GRAPH_USER_TWEETS_AND_REPLIES,
+         &endpoints::user_tweets_and_replies_vars(user_id, cursor),
+         Some(endpoints::USER_TWEETS_FIELD_TOGGLES),
+      );
+      let guard = match self.join_or_lead(key) {
+         super::InflightTicket::Follower(mut rx) => {
+            if rx.changed().await.is_ok()
+               && let Some(bytes) = rx.borrow_and_update().clone()
+               && let Ok(parsed) = Self::parse_coalesced::<UserTimelineData>(&bytes)
+            {
+               return parser::parse_timeline(&parsed);
+            }
+            None
+         },
+         super::InflightTicket::Leader(guard) => Some(guard),
+      };
+
       let session = self
          .charged_session_by_kind(
             endpoints::GRAPH_USER_TWEETS_AND_REPLIES,
@@ -1144,7 +1223,7 @@ impl ApiClient {
          ),
       };
       let retry_kind = session.kind;
-      let data = self
+      let (data, bytes) = self
          .graphql_request_with_session::<UserTimelineData>(
             session,
             endpoint,
@@ -1154,6 +1233,9 @@ impl ApiClient {
             Some(retry_kind),
          )
          .await?;
+      if let Some(guard) = guard {
+         guard.complete(bytes);
+      }
       parser::parse_timeline(&data)
    }
 
@@ -1185,17 +1267,18 @@ impl ApiClient {
 
    /// Translate a tweet using the Strato translation API.
    ///
-   /// One account's window is about 187 calls. When that account is out, try
-   /// another instead of failing the click.
+   /// One account's window is about 187 calls. When that account is out or its
+   /// exit stalls, try another instead of failing the click.
    pub async fn translate_tweet(&self, tweet_id: &str) -> Result<Translation> {
-      let mut excluded = None;
+      let mut tried_ids = Vec::new();
+      let mut bad_ports = Vec::new();
       let mut last = Err(Error::NoSessions);
       for attempt in 0..=super::RATE_LIMIT_REPLACEMENTS {
          let session = if attempt == 0 {
             self.charged_session(endpoints::STRATO_TRANSLATE, Some(SessionKind::Cookie))
                .await?
          } else {
-            let previous = excluded.unwrap_or(0);
+            let previous = tried_ids.last().copied().unwrap_or(0);
             if !self
                .sessions
                .has_unlimited(endpoints::STRATO_TRANSLATE, Some(SessionKind::Cookie), previous)
@@ -1204,15 +1287,39 @@ impl ApiClient {
                break;
             }
             self.charge(endpoints::STRATO_TRANSLATE).await?;
-            match self
-               .sessions
-               .acquire_excluding(
-                  endpoints::STRATO_TRANSLATE,
-                  Some(SessionKind::Cookie),
-                  excluded,
-               )
-               .await
-            {
+            let next_session = if bad_ports.is_empty() {
+               self
+                  .sessions
+                  .acquire_where(endpoints::STRATO_TRANSLATE, Some(SessionKind::Cookie), |id| {
+                     !tried_ids.contains(&id)
+                  })
+                  .await
+            } else {
+               match self
+                  .sessions
+                  .acquire_where(endpoints::STRATO_TRANSLATE, Some(SessionKind::Cookie), |id| {
+                     !tried_ids.contains(&id)
+                        && self
+                           .pinned_port(id)
+                           .is_none_or(|port| !bad_ports.contains(&port))
+                  })
+                  .await
+               {
+                  Ok(next) => Ok(next),
+                  Err(Error::NoSessions) => {
+                     self
+                        .sessions
+                        .acquire_where(
+                           endpoints::STRATO_TRANSLATE,
+                           Some(SessionKind::Cookie),
+                           |id| !tried_ids.contains(&id),
+                        )
+                        .await
+                  },
+                  Err(err) => Err(err),
+               }
+            };
+            match next_session {
                Ok(session) => session,
                Err(err) => {
                   self.refund(endpoints::STRATO_TRANSLATE).await;
@@ -1221,11 +1328,24 @@ impl ApiClient {
             }
          };
          let session_id = session.id;
+         tried_ids.push(session_id);
          last = self.translate_with_session(&session, tweet_id).await;
-         if !matches!(last, Err(Error::RateLimited)) {
+         let exit_fault = matches!(&last, Err(Error::IpThrottled))
+            || matches!(&last, Err(Error::TwitterApi(msg)) if super::is_gateway_blip(msg))
+            || matches!(&last, Err(Error::Internal(msg)) if msg == "API headers stalled");
+         if exit_fault
+            && let Some(port) = self.pinned_port(session_id)
+            && !bad_ports.contains(&port)
+         {
+            bad_ports.push(port);
+         }
+         let retry = matches!(&last, Err(Error::RateLimited | Error::IpThrottled))
+            || (matches!(&last, Err(Error::SessionRejected(_)))
+               && attempt < super::GRAPHQL_REPLACEMENTS)
+            || (exit_fault && attempt == 0);
+         if !retry {
             return last;
          }
-         excluded = Some(session_id);
       }
       last
    }

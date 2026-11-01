@@ -55,6 +55,13 @@ pub fn remember(username: &str, id: &str) {
       return;
    }
    let key = username.to_lowercase();
+   if directory()
+      .read()
+      .ok()
+      .is_some_and(|ids| ids.by_name.get(&key).is_some_and(|stored| stored == id))
+   {
+      return;
+   }
    let changed = {
       let Ok(mut ids) = directory().write() else {
          return;

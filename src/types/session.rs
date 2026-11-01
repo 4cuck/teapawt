@@ -75,7 +75,7 @@ const REFUSED_OP_SECS: i64 = 24 * 60 * 60;
 
 /// `SearchTimeline` from `ph2fARFabkwfxqmSKQ1OPw/SearchTimeline`, so a mark
 /// outlives a change of query id.
-fn operation_name(api: &str) -> &str {
+pub(crate) fn operation_name(api: &str) -> &str {
    api.rsplit('/').next().unwrap_or(api)
 }
 
@@ -129,11 +129,10 @@ pub(crate) enum Headroom {
 
 impl SessionLimits {
    /// Room for another call to `api` that will not be the one X rejects.
-   pub(crate) fn headroom(&self, api: &str) -> Headroom {
-      if self.rejected || self.is_globally_limited() || self.refuses(api) {
+   pub(crate) fn headroom_at(&self, api: &str, op_name: &str, now: i64) -> Headroom {
+      if self.rejected || self.is_globally_limited_at(now) || self.refuses_at(op_name, now) {
          return Headroom::Blocked;
       }
-      let now = time::OffsetDateTime::now_utc().unix_timestamp();
       let Some(rate) = self.apis.get(api) else {
          return Headroom::Unknown;
       };
@@ -163,7 +162,11 @@ impl SessionLimits {
    /// Other operations are tried again after a day.
    #[must_use]
    pub fn refuses(&self, api: &str) -> bool {
-      let name = operation_name(api);
+      let now = time::OffsetDateTime::now_utc().unix_timestamp();
+      self.refuses_at(operation_name(api), now)
+   }
+
+   pub(crate) fn refuses_at(&self, name: &str, now: i64) -> bool {
       if self.profile_banned && is_profile_op(name) {
          return true;
       }
@@ -173,7 +176,6 @@ impl SessionLimits {
       if name == "SearchTimeline" {
          return true;
       }
-      let now = time::OffsetDateTime::now_utc().unix_timestamp();
       now - at < REFUSED_OP_SECS
    }
 
@@ -192,7 +194,12 @@ impl SessionLimits {
    /// Whether this account has been seen getting results for `api`.
    #[must_use]
    pub fn verified(&self, api: &str) -> bool {
-      self.verified_ops.contains_key(operation_name(api))
+      self.verified_op(operation_name(api))
+   }
+
+   #[must_use]
+   pub(crate) fn verified_op(&self, op_name: &str) -> bool {
+      self.verified_ops.contains_key(op_name)
    }
 
    /// Record that this account got results for `api`.
@@ -249,10 +256,13 @@ impl SessionLimits {
    /// Whether the session-wide limit is set and has not yet expired.
    #[must_use]
    pub fn is_globally_limited(&self) -> bool {
+      self.is_globally_limited_at(time::OffsetDateTime::now_utc().unix_timestamp())
+   }
+
+   #[must_use]
+   pub(crate) const fn is_globally_limited_at(&self, now: i64) -> bool {
       // Cleared on the next mutable access rather than here.
-      self.limited
-         && time::OffsetDateTime::now_utc().unix_timestamp() - self.limited_at
-            < GLOBAL_LIMIT_DURATION_SECS
+      self.limited && now - self.limited_at < GLOBAL_LIMIT_DURATION_SECS
    }
 
    pub fn update_limit(&mut self, api: &str, limit: i32, remaining: i32, reset: i64) {

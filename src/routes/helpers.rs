@@ -179,6 +179,10 @@ pub fn store_profile(state: &AppState, profile: &Profile) {
 /// Store the profile now, and file a photo rail that is still downloading
 /// when it arrives. The page does not wait on that call.
 pub fn publish_profile(state: &AppState, open: OpenProfile) -> Profile {
+   if !state.cache.enabled() {
+      remember_user_id(state, &open.profile.user);
+      return open.into_profile();
+   }
    let (profile, media) = open.into_parts();
    store_profile(state, &profile);
    if let Some(handle) = media {
@@ -350,6 +354,18 @@ pub async fn get_cached_user(state: &AppState, username: &str) -> Result<User> {
    Ok(fetched)
 }
 
+/// Numeric user id, from the id directory when known or `UserByScreenName` on a
+/// first visit. Used by scroll fragments that do not render the profile header.
+pub async fn user_id(state: &AppState, username: &str) -> Result<String> {
+   if let Some(id) = user_hint(state, username)
+      .map(|user| user.id)
+      .filter(|id| !id.is_empty())
+   {
+      return Ok(id);
+   }
+   Ok(get_cached_user(state, username).await?.id)
+}
+
 /// The user and something that needs their numeric id, asked for in the same
 /// wave when the id is already known. Without one, or when the name now
 /// belongs to another account, `fetch` waits for `UserByScreenName`.
@@ -467,8 +483,11 @@ pub async fn account_contexts(
 
 /// Decorate every author rendered by a conversation.
 pub async fn enrich_conversation(state: &AppState, conversation: &mut Conversation) {
-   let names = tweets(conversation).flat_map(tweet_users).collect();
-   let Some(contexts) = resolve_for(state, names).await else {
+   let users: Vec<&User> = tweets(conversation).flat_map(tweet_users).collect();
+   for user in &users {
+      remember_user_id(state, user);
+   }
+   let Some(contexts) = resolve_for(state, users).await else {
       return;
    };
    for tweet in tweets_mut(conversation) {
@@ -495,6 +514,9 @@ async fn resolve_for(
    state: &AppState,
    users: Vec<&User>,
 ) -> Option<BTreeMap<String, AccountContext>> {
+   if !state.cache.enabled() && !state.config.config.x_posed_community_cache {
+      return None;
+   }
    let mut names = users
       .into_iter()
       .map(|user| user.username.to_lowercase())
@@ -627,6 +649,29 @@ pub async fn get_cached_translation(
       state.translation_limiter.acquire().await?
    };
    let translation = state.api.translate_auto(tweet, kagi_token).await?;
+   if !translation.text.is_empty() {
+      state.cache.set(&key, &translation, ttl::TRANSLATION);
+   }
+   Ok(translation)
+}
+
+/// Translate a tweet by ID via Strato without fetching the tweet first.
+pub async fn get_cached_strato_translation(
+   state: &AppState,
+   id: &str,
+   interactive: bool,
+) -> Result<Translation> {
+   let parsed_id = id.parse::<i64>().unwrap_or(0);
+   let key = cache_keys::translation(parsed_id, "strato");
+   if let Some(translation) = state.cache.get::<Translation>(&key) {
+      return Ok(translation);
+   }
+   let _permit = if interactive {
+      state.translation_limiter.acquire_interactive().await?
+   } else {
+      state.translation_limiter.acquire().await?
+   };
+   let translation = state.api.translate_tweet(id).await?;
    if !translation.text.is_empty() {
       state.cache.set(&key, &translation, ttl::TRANSLATION);
    }

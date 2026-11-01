@@ -47,19 +47,35 @@ async fn show_note_inner(state: AppState, jar: CookieJar, id: String) -> Result<
    let prefs = Prefs::from_cookies(&jar, &state.config);
    let (_tweet, article) = state.api.get_article_tweet(&id).await?;
 
-   // Fetch embedded tweets concurrently with a small bound so a large article
-   // cannot consume the entire upstream session pool.
+   // Hydrate embedded tweets in batches of 20 via `TweetResultsByRestIds`,
+   // falling back to individual fetches only for any IDs not returned.
    let mut seen = HashSet::new();
-   let mut tweet_ids = article
+   let all_ids = article
       .entities
       .iter()
       .filter(|entity| entity.entity_type == ArticleEntityType::Tweet)
       .filter(|entity| !entity.tweet_id.is_empty())
       .filter(|entity| seen.insert(entity.tweet_id.clone()))
       .map(|entity| entity.tweet_id.clone())
-      .collect::<VecDeque<_>>();
+      .collect::<Vec<_>>();
 
    let mut tweets = HashMap::new();
+   for chunk in all_ids.chunks(20) {
+      if let Ok(hydrated) = state.api.tweets_by_ids(chunk).await {
+         for tweet in crate::api::parse_tweets_by_ids(&hydrated, chunk) {
+            tweets.insert(tweet.id, tweet);
+         }
+      }
+   }
+
+   let mut tweet_ids = all_ids
+      .into_iter()
+      .filter(|id| {
+         id.parse::<i64>()
+            .is_ok_and(|numeric| !tweets.contains_key(&numeric))
+      })
+      .collect::<VecDeque<_>>();
+
    let mut tasks = JoinSet::new();
    for _ in 0..8 {
       let Some(tweet_id) = tweet_ids.pop_front() else {

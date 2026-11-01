@@ -42,6 +42,10 @@ static USER_PIC_EXT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\.[A-Za
 /// text). Avoids matching partial domains like `spacex.com` by requiring `://`
 /// or word boundary before the domain.
 pub fn replace_twitter_urls(text: &str, config: &Config) -> String {
+   if !text.contains("x.com") && !text.contains("twitter.com") && !text.contains("t.co") {
+      return text.to_owned();
+   }
+
    let request_host = crate::utils::host::request_origin()
       .map(|origin| crate::utils::host::host_label(&origin).to_owned());
    let replace_with = if let Some(host) = request_host.as_deref() {
@@ -64,6 +68,10 @@ pub fn replace_twitter_urls(text: &str, config: &Config) -> String {
    // Replace cards.twitter.com/cards -> host/cards
    if result.contains("cards.twitter.com/cards") {
       result = result.replace("cards.twitter.com/cards", &format!("{replace_with}/cards"));
+   }
+
+   if !result.contains("x.com") && !result.contains("twitter.com") {
+      return result;
    }
 
    // Handle full <a> tags with x.com/twitter.com

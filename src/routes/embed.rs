@@ -162,21 +162,37 @@ async fn activity_response(state: &AppState, activity: ActivityId) -> Result<Res
       tweet.keep_only_photo(idx);
    }
 
-   if replied_to.is_none() && reply_id > 0 && reply_id != tweet.id {
-      replied_to = cached_conversation(state, &reply_id.to_string())
-         .await
-         .ok()
-         .map(|context| context.tweet);
+   let fetch_reply = replied_to.is_none() && reply_id > 0 && reply_id != tweet.id;
+   let kagi = &state.config.config.kagi_token;
+   let token = (!kagi.is_empty()).then_some(kagi.as_str());
+   let translate_tweet_ref = &tweet;
+   let (fetched_reply, translation_res) = tokio::join!(
+      async {
+         if fetch_reply {
+            cached_conversation(state, &reply_id.to_string())
+               .await
+               .ok()
+               .map(|context| context.tweet)
+         } else {
+            None
+         }
+      },
+      async {
+         if translate_tweet_ref.is_translatable {
+            get_cached_translation(state, translate_tweet_ref, token, false)
+               .await
+               .ok()
+               .filter(|tl| !tl.text.is_empty())
+         } else {
+            None
+         }
+      },
+   );
+   if replied_to.is_none() {
+      replied_to = fetched_reply;
    }
-
-   if tweet.is_translatable {
-      let kagi = &state.config.config.kagi_token;
-      let token = (!kagi.is_empty()).then_some(kagi.as_str());
-      if let Ok(translation) = get_cached_translation(state, &tweet, token, false).await
-         && !translation.text.is_empty()
-      {
-         tweet.translation = Some(translation);
-      }
+   if let Some(translation) = translation_res {
+      tweet.translation = Some(translation);
    }
 
    let mut note = replied_to.as_ref().map_or_else(
@@ -197,11 +213,7 @@ async fn cached_conversation(state: &AppState, id: &str) -> Result<Conversation>
       return Ok(cached);
    }
 
-   let mut conversation = state.api.get_conversation(id, None, "Relevance").await?;
-   state
-      .api
-      .resolve_unavailable_quote(&mut conversation.tweet)
-      .await;
+   let conversation = state.api.get_conversation(id, None, "Relevance").await?;
    state.cache.set(&cache_key, &conversation, ttl::DEFAULT);
    Ok(conversation)
 }

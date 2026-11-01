@@ -285,10 +285,34 @@ async fn filtered_posts(
    sort: &'static str,
    is_scroll: bool,
 ) -> Result<Response> {
+   if is_scroll {
+      let user_id = helpers::user_id(state, username).await?;
+      return match filtered_timeline(state, username, &user_id, cursor, filter, sort).await {
+         Ok(data) => {
+            let (mut tweets, next_cursor) = extract_timeline(data);
+            helpers::enrich_tweet_groups(state, &mut tweets).await;
+            for group in &tweets {
+               helpers::remember_tweets(state, group);
+            }
+            let base_url = timeline::posts_href(username, filter, sort);
+            let content = timeline::render_timeline_with_prefs(
+               &tweets,
+               &state.config,
+               next_cursor.as_deref(),
+               Some(&base_url),
+               prefs,
+               None,
+            );
+            Ok(Html(content.into_string()).into_response())
+         },
+         Err(err) => Ok(helpers::api_error(&state.config, &err)),
+      };
+   }
+
    let (user, (timeline_result, photo_rail)) =
       helpers::with_user(state, username, |user_id| async move {
          let posts = filtered_timeline(state, username, &user_id, cursor, filter, sort);
-         if is_scroll {
+         if cursor.is_some() {
             (posts.await, Vec::new())
          } else {
             helpers::beside_rail(posts, helpers::photo_rail(state, username, &user_id)).await
@@ -431,6 +455,32 @@ async fn user_timeline(
       .await;
    }
 
+   if is_scroll
+      && let Some(cursor) = query.cursor.as_deref()
+   {
+      let user_id = helpers::user_id(&state, &username).await?;
+      return match state.api.get_user_tweets(&user_id, Some(cursor)).await {
+         Ok(data) => {
+            let (mut tweets, next_cursor) = extract_timeline(data);
+            helpers::enrich_tweet_groups(&state, &mut tweets).await;
+            for group in &tweets {
+               helpers::remember_tweets(&state, group);
+            }
+            let base_url = format!("/{username}");
+            let content = timeline::render_timeline_with_prefs(
+               &tweets,
+               &state.config,
+               next_cursor.as_deref(),
+               Some(&base_url),
+               &prefs,
+               None,
+            );
+            Ok(Html(content.into_string()).into_response())
+         },
+         Err(err) => Ok(helpers::api_error_titled(&state.config, &err, "Error")),
+      };
+   }
+
    let profile_result = if let Some(cursor) = query.cursor.as_deref() {
       load_profile_cursor(&state, &username, cursor).await
    } else {
@@ -531,6 +581,10 @@ async fn user_timeline(
 }
 
 /// Shared handler for user sub-tab timelines (replies, media).
+#[expect(
+   clippy::too_many_arguments,
+   reason = "tab handler coordinates route identity, cursor, scroll mode, and media view"
+)]
 async fn user_tab_handler(
    state: &AppState,
    prefs: &Prefs,
@@ -539,6 +593,7 @@ async fn user_tab_handler(
    tab: TimelineKind,
    include_photo_rail: bool,
    view: &str,
+   is_scroll: bool,
 ) -> Result<Response> {
    let (cache_kind, tab_str, title_prefix) = match tab {
       TimelineKind::Replies => ("replies", "with_replies", "Tweets & replies from"),
@@ -547,11 +602,40 @@ async fn user_tab_handler(
       TimelineKind::Media => ("media", "media", "Media from"),
       _ => unreachable!(),
    };
+   let base_url = if tab == TimelineKind::Media && view != "timeline" && !view.is_empty() {
+      format!("/{username}/{tab_str}?view={view}")
+   } else {
+      format!("/{username}/{tab_str}")
+   };
+
+   if is_scroll {
+      let user_id = helpers::user_id(state, username).await?;
+      return match tab_timeline(state, username, &user_id, cursor, tab, cache_kind).await {
+         Ok(data) => {
+            let (mut tweets, next_cursor) = extract_timeline(data);
+            helpers::enrich_tweet_groups(state, &mut tweets).await;
+            for group in &tweets {
+               helpers::remember_tweets(state, group);
+            }
+            let content = timeline::render_timeline_with_view(
+               &tweets,
+               &state.config,
+               next_cursor.as_deref(),
+               Some(&base_url),
+               prefs,
+               None,
+               if tab == TimelineKind::Media { view } else { "" },
+            );
+            Ok(Html(content.into_string()).into_response())
+         },
+         Err(err) => Ok(helpers::api_error(&state.config, &err)),
+      };
+   }
 
    let (user, (timeline_result, photo_rail)) =
       helpers::with_user(state, username, |user_id| async move {
          let timeline = tab_timeline(state, username, &user_id, cursor, tab, cache_kind);
-         if include_photo_rail {
+         if include_photo_rail && cursor.is_none() {
             helpers::beside_rail(timeline, helpers::photo_rail(state, username, &user_id)).await
          } else {
             (timeline.await, Vec::new())
@@ -571,11 +655,6 @@ async fn user_tab_handler(
          if let Some(first) = tweets.first() {
             helpers::prefetch_profiles(state, first);
          }
-         let base_url = if tab == TimelineKind::Media && view != "timeline" && !view.is_empty() {
-            format!("/{username}/{tab_str}?view={view}")
-         } else {
-            format!("/{username}/{tab_str}")
-         };
          let newer = has_request_cursor.then_some(base_url.as_str());
          let media_base = format!("/{username}/{tab_str}");
 
@@ -695,6 +774,7 @@ async fn user_replies(
    Query(query): Query<TimelineQuery>,
 ) -> Result<Response> {
    let prefs = Prefs::from_cookies(&jar, &state.config);
+   let is_scroll = query.scroll.as_deref() == Some("true");
    user_tab_handler(
       &state,
       &prefs,
@@ -703,6 +783,7 @@ async fn user_replies(
       TimelineKind::Replies,
       true,
       "",
+      is_scroll,
    )
    .await
 }
@@ -714,6 +795,7 @@ async fn user_reposts(
    Query(query): Query<TimelineQuery>,
 ) -> Result<Response> {
    let prefs = Prefs::from_cookies(&jar, &state.config);
+   let is_scroll = query.scroll.as_deref() == Some("true");
    user_tab_handler(
       &state,
       &prefs,
@@ -722,6 +804,7 @@ async fn user_reposts(
       TimelineKind::Reposts,
       true,
       "",
+      is_scroll,
    )
    .await
 }
@@ -733,6 +816,7 @@ async fn user_articles(
    Query(query): Query<TimelineQuery>,
 ) -> Result<Response> {
    let prefs = Prefs::from_cookies(&jar, &state.config);
+   let is_scroll = query.scroll.as_deref() == Some("true");
    user_tab_handler(
       &state,
       &prefs,
@@ -741,6 +825,7 @@ async fn user_articles(
       TimelineKind::Articles,
       true,
       "",
+      is_scroll,
    )
    .await
 }
@@ -753,6 +838,7 @@ async fn user_media(
 ) -> Result<Response> {
    let prefs = Prefs::from_cookies(&jar, &state.config);
    let view = prefs.resolved_media_view(query.view.as_deref());
+   let is_scroll = query.scroll.as_deref() == Some("true");
    user_tab_handler(
       &state,
       &prefs,
@@ -761,6 +847,7 @@ async fn user_media(
       TimelineKind::Media,
       false,
       view,
+      is_scroll,
    )
    .await
 }
@@ -770,6 +857,7 @@ pub struct UserSearchQuery {
    #[serde(rename = "q")]
    pub query: Option<String>,
    pub cursor: Option<String>,
+   pub scroll: Option<String>,
    #[serde(rename = "cf-turnstile-response")]
    pub turnstile: Option<String>,
 }
@@ -837,34 +925,88 @@ async fn user_search(
    } else {
       format!("from:{username} {search_query}")
    };
-   // The search names the account, not its id, so it never waits on the user.
-   let (state_ref, name) = (&state, username.as_str());
-   let (fetched, search_result) = tokio::join!(
-      helpers::with_user(state_ref, name, |user_id| async move {
-         helpers::photo_rail(state_ref, name, &user_id).await
-      }),
-      state
+   let base_url = if search_query.is_empty() {
+      format!("/{username}/search")
+   } else {
+      format!(
+         "/{}/search?q={}",
+         username,
+         percent_encoding::utf8_percent_encode(search_query, percent_encoding::NON_ALPHANUMERIC)
+      )
+   };
+
+   if query.scroll.as_deref() == Some("true") {
+      return match state
          .api
-         .search(&api_query, query.cursor.as_deref(), "Latest"),
-   );
-   let (user, photo_rail) = fetched?;
+         .search(&api_query, query.cursor.as_deref(), "Latest")
+         .await
+      {
+         Ok(results) => {
+            let (mut tweets, cursor) = extract_timeline(results);
+            helpers::enrich_tweet_groups(&state, &mut tweets).await;
+            for group in &tweets {
+               helpers::remember_tweets(&state, group);
+            }
+            let content = timeline::render_timeline_with_prefs(
+               &tweets,
+               &state.config,
+               cursor.as_deref(),
+               Some(&base_url),
+               &prefs,
+               None,
+            );
+            Ok(Html(content.into_string()).into_response())
+         },
+         Err(err) => Ok(helpers::api_error_titled(
+            &state.config,
+            &err,
+            "Search Error",
+         )),
+      };
+   }
+
+   // The search names the account, not its id, so it never waits on the user.
+   // The photo rail runs beside the search so a slow `UserMedia` call never
+   // holds up the search results.
+   let (state_ref, name) = (&state, username.as_str());
+   let ((user_res, search_result), photo_rail) = if query.cursor.is_some() {
+      (
+         tokio::join!(
+            helpers::get_cached_user(state_ref, name),
+            state
+               .api
+               .search(&api_query, query.cursor.as_deref(), "Latest"),
+         ),
+         Vec::new(),
+      )
+   } else {
+      helpers::beside_rail(
+         async {
+            tokio::join!(
+               helpers::get_cached_user(state_ref, name),
+               state
+                  .api
+                  .search(&api_query, query.cursor.as_deref(), "Latest"),
+            )
+         },
+         async {
+            match helpers::user_id(state_ref, name).await {
+               Ok(user_id) => helpers::photo_rail(state_ref, name, &user_id).await,
+               Err(_) => Vec::new(),
+            }
+         },
+      )
+      .await
+   };
+   let user = user_res?;
 
    match search_result {
       Ok(results) => {
          let (mut tweets, cursor) = extract_timeline(results);
          helpers::enrich_tweet_groups(&state, &mut tweets).await;
-         let base_url = if search_query.is_empty() {
-            format!("/{username}/search")
-         } else {
-            format!(
-               "/{}/search?q={}",
-               username,
-               percent_encoding::utf8_percent_encode(
-                  search_query,
-                  percent_encoding::NON_ALPHANUMERIC,
-               )
-            )
-         };
+         for group in &tweets {
+            helpers::remember_tweets(&state, group);
+         }
 
          let newer = query.cursor.is_some().then_some(base_url.as_str());
          let timeline_content = html! {

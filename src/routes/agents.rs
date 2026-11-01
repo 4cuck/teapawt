@@ -992,9 +992,13 @@ async fn search_text(state: &AppState, query: &str) -> Result<String, String> {
 }
 
 async fn profile_text(state: &AppState, username: &str) -> Result<String, String> {
-   let profile = state.api.get_profile(username, None).await.map_err(brief)?;
+   let (user, timeline_res) = super::helpers::with_user(state, username, |user_id| async move {
+      state.api.get_user_tweets(&user_id, None).await
+   })
+   .await
+   .map_err(brief)?;
+   let tweets = timeline_res.map_err(brief)?;
    let origin = origin(state);
-   let user = &profile.user;
    let mut out = format!(
       "# @{}\n{}\n\n{}\n\n{} followers, {} following, {} posts\n{}\n\n## Recent posts\n\n",
       user.username,
@@ -1006,7 +1010,7 @@ async fn profile_text(state: &AppState, username: &str) -> Result<String, String
       format!("{origin}/{}", user.username)
    );
    let mut count = 0;
-   for group in profile.tweets.content {
+   for group in tweets.content {
       for tweet in group {
          if count == 8 {
             break;

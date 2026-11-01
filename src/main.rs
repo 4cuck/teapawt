@@ -143,6 +143,7 @@ async fn main() -> eyre::Result<()> {
 
    // Initialize API client
    let api = ApiClient::new(&config, sessions, proxies, fallback_proxies);
+   api.spawn_tid_warmup();
    api.spawn_filter_sync();
    api.spawn_search_check();
    api.spawn_latency_report();

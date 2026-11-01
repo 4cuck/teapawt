@@ -43,7 +43,10 @@ const MEDIA_TIMEOUT: Duration = Duration::from_secs(60);
 const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Idle connections are kept this long. A session's connection to X is
 /// multiplexed HTTP/2 and pinged, so a dead one is noticed rather than hung on.
-const POOL_IDLE: Duration = Duration::from_secs(300);
+/// Matching X's 15-minute window keeps active accounts' connections warm
+/// across an entire window instead of paying a cold TLS/SOCKS handshake after
+/// five minutes.
+const POOL_IDLE: Duration = Duration::from_secs(900);
 /// A few idle sockets per account. Hundreds of them, times every account on
 /// one exit, fills the proxy and every later call waits on headers.
 const POOL_PER_HOST: usize = 8;
@@ -656,14 +659,16 @@ impl HttpClient {
             }
          }
          let pool = Arc::new(pool);
-         let refresh = Arc::clone(&pool);
-         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(30));
-            loop {
-               tick.tick().await;
-               refresh.reload_banned_file();
-            }
-         });
+         if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let refresh = Arc::clone(&pool);
+            handle.spawn(async move {
+               let mut tick = tokio::time::interval(Duration::from_secs(30));
+               loop {
+                  tick.tick().await;
+                  refresh.reload_banned_file();
+               }
+            });
+         }
          self.primary_pool = Some(pool);
       }
       self
@@ -1129,6 +1134,10 @@ impl HttpClient {
                   Ok(Err(err)) => return Err(err),
                   Err(_elapsed) => {
                      self.retire(via);
+                     if let Some(alternate) = via.and_then(|egress| self.alternate_primary(egress))
+                     {
+                        self.retire(Some(&alternate));
+                     }
                      tracing::warn!(uri = loggable(uri), "API headers stalled again");
                      return Err(Error::Internal("API headers stalled".into()));
                   },
@@ -1158,6 +1167,9 @@ impl HttpClient {
    }
 
    /// One more attempt on a connection that is not the one that just failed.
+   /// When the account is pinned to a primary proxy exit, the retry moves to a
+   /// healthy alternate exit so a stalled or dead tunnel does not stall the
+   /// retry for another header deadline.
    async fn fresh_headers(
       &self,
       method: &Method,
@@ -1167,14 +1179,16 @@ impl HttpClient {
       via: Option<&Egress>,
    ) -> Result<primp::Response> {
       self.retire(via);
-      let client = self.client_for(via)?;
+      let alternate = via.and_then(|egress| self.alternate_primary(egress));
+      let retry_via = alternate.as_ref().or(via);
+      let client = self.client_for(retry_via)?;
       let mut request = client
          .request(method.clone(), uri)
          .headers(extra_headers.clone());
       if !body.is_empty() {
          request = request.body(body.clone());
       }
-      let probe = ExitProbe::start(self, via);
+      let probe = ExitProbe::start(self, retry_via);
       match request.send().await {
          Ok(inner) => {
             probe.answered();
@@ -1182,6 +1196,7 @@ impl HttpClient {
          },
          Err(err) => {
             probe.failed();
+            self.retire(retry_via);
             Err(describe(err))
          },
       }
@@ -1343,6 +1358,7 @@ fn build_client(
       .http2_keep_alive_interval(KEEP_ALIVE_INTERVAL)
       .http2_keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
       .http2_keep_alive_while_idle(true)
+      .tcp_keepalive(Duration::from_secs(10))
       .tcp_nodelay(true)
       // Impersonation installs a document-navigation order. x.com's own calls
       // use a different order, captured from Chrome 152, and headers missing
@@ -1351,8 +1367,7 @@ fn build_client(
    if media {
       builder = builder
          .http1_only()
-         .connect_timeout(Duration::from_secs(3))
-         .tcp_keepalive(Duration::from_secs(10));
+         .connect_timeout(Duration::from_secs(3));
    }
    builder =
       match proxy {
@@ -1975,7 +1990,6 @@ mod tests {
          proxies.clone(),
          proxies.iter().map(|proxy| proxy_tag(Some(proxy))).collect(),
       );
-      let now = unix_millis();
       for proxy in &proxies {
          for _ in 0..20 {
             let _ = pool.record(proxy, true);

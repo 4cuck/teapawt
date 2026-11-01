@@ -22,6 +22,7 @@ pub struct ListQuery {
    pub cursor: Option<String>,
    /// Exclude retweets from list timeline (`?no_retweets=true`).
    pub no_retweets: Option<String>,
+   pub scroll: Option<String>,
 }
 
 pub fn router() -> Router<AppState> {
@@ -90,8 +91,15 @@ async fn list_by_slug(
       .await?;
    let exclude_rts = query.no_retweets.as_deref() == Some("true");
    let groups = maybe_filter_retweets(timeline.content, exclude_rts);
+   for group in &groups {
+      helpers::remember_tweets(&state, group);
+   }
    let cursor = timeline.bottom.as_deref();
    let base_url = format!("/{username}/lists/{slug}");
+   if query.scroll.as_deref() == Some("true") {
+      let fragment = timeline_view::render_timeline(&groups, &state.config, cursor, Some(&base_url));
+      return Ok(Html(fragment.into_string()).into_response());
+   }
 
    let content = html! {
        div class="timeline-container" {
@@ -115,6 +123,22 @@ async fn list_by_id(
    Query(query): Query<ListQuery>,
 ) -> Result<Response> {
    let prefs = Prefs::from_cookies(&jar, &state.config);
+   let exclude_rts = query.no_retweets.as_deref() == Some("true");
+   let base_url = format!("/i/lists/{id}");
+
+   if query.scroll.as_deref() == Some("true") {
+      let timeline = state
+         .api
+         .get_list_tweets(&id, query.cursor.as_deref())
+         .await?;
+      let groups = maybe_filter_retweets(timeline.content, exclude_rts);
+      for group in &groups {
+         helpers::remember_tweets(&state, group);
+      }
+      let cursor = timeline.bottom.as_deref();
+      let fragment = timeline_view::render_timeline(&groups, &state.config, cursor, Some(&base_url));
+      return Ok(Html(fragment.into_string()).into_response());
+   }
 
    let (list, timeline) = tokio::join!(
       async {
@@ -133,10 +157,11 @@ async fn list_by_id(
    );
    let list = list?;
    let timeline = timeline?;
-   let exclude_rts = query.no_retweets.as_deref() == Some("true");
    let groups = maybe_filter_retweets(timeline.content, exclude_rts);
+   for group in &groups {
+      helpers::remember_tweets(&state, group);
+   }
    let cursor = timeline.bottom.as_deref();
-   let base_url = format!("/i/lists/{id}");
 
    let content = html! {
        div class="timeline-container" {
@@ -201,8 +226,21 @@ async fn list_members(
 
    match members_result {
       Ok(members) => {
+         for user in &members.content {
+            helpers::remember_user_id(&state, user);
+         }
          let cursor = members.bottom.as_deref();
          let base_url = format!("/i/lists/{id}/members");
+         if query.scroll.as_deref() == Some("true") {
+            let fragment = user_list::render_user_list(
+               &members.content,
+               &state.config,
+               cursor,
+               Some(&base_url),
+               Some(&prefs),
+            );
+            return Ok(Html(fragment.into_string()).into_response());
+         }
 
          let content = html! {
              div class="timeline-container" {

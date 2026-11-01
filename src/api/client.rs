@@ -1,12 +1,13 @@
 use std::{
-   sync::Arc,
+   collections::HashMap,
+   sync::{Arc, Mutex as StdMutex},
    time::{Duration, Instant},
 };
 
 use axum::http::header;
 use serde::{Deserialize, de::DeserializeOwned};
 use tokio::{
-   sync::Semaphore,
+   sync::{Semaphore, watch},
    time::{interval, sleep, timeout},
 };
 
@@ -347,6 +348,40 @@ fn twitter_error_code(body: &str) -> Option<i64> {
       .find(|code| *code != 0)
 }
 
+type InflightMap = StdMutex<HashMap<String, watch::Sender<Option<bytes::Bytes>>>>;
+
+pub(super) enum InflightTicket {
+   Leader(InflightGuard),
+   Follower(watch::Receiver<Option<bytes::Bytes>>),
+}
+
+pub(super) struct InflightGuard {
+   map: Arc<InflightMap>,
+   key: String,
+   tx: Option<watch::Sender<Option<bytes::Bytes>>>,
+}
+
+impl InflightGuard {
+   pub(super) fn complete(mut self, bytes: bytes::Bytes) {
+      if let Ok(mut map) = self.map.lock() {
+         map.remove(&self.key);
+      }
+      if let Some(tx) = self.tx.take() {
+         let _ = tx.send(Some(bytes));
+      }
+   }
+}
+
+impl Drop for InflightGuard {
+   fn drop(&mut self) {
+      if self.tx.is_some()
+         && let Ok(mut map) = self.map.lock()
+      {
+         map.remove(&self.key);
+      }
+   }
+}
+
 /// Twitter/X API client.
 #[derive(Clone)]
 pub struct ApiClient {
@@ -360,6 +395,9 @@ pub struct ApiClient {
    denylist: super::search_denylist::SearchDenylist,
    latency: Arc<Latency>,
    hedges: Arc<Semaphore>,
+   /// Coalesces identical concurrent in-flight GraphQL calls; entries live
+   /// only while the upstream request is in flight and are removed on drop.
+   inflight: Arc<InflightMap>,
 }
 
 impl ApiClient {
@@ -410,7 +448,20 @@ impl ApiClient {
          denylist: super::search_denylist::SearchDenylist::load(denylist_path),
          latency: Arc::new(Latency::default()),
          hedges: Arc::new(Semaphore::new(MAX_HEDGES)),
+         inflight: Arc::new(StdMutex::new(HashMap::new())),
       }
+   }
+
+   /// Warm the transaction ID client and live GraphQL query IDs in the
+   /// background at startup so the first user request does not block on them.
+   pub fn spawn_tid_warmup(&self) {
+      if !self.tid_enabled {
+         return;
+      }
+      let tid = self.tid.clone();
+      tokio::spawn(async move {
+         tid.warmup().await;
+      });
    }
 
    /// Log how long X takes per operation, how often a second copy went out
@@ -434,8 +485,48 @@ impl ApiClient {
    }
 
    /// The proxy port this account is pinned to, when there is a SOCKS pool.
-   fn pinned_port(&self, session_id: i64) -> Option<u16> {
+   pub(super) fn pinned_port(&self, session_id: i64) -> Option<u16> {
       self.proxies.as_ref().map(|pool| pool.port_for(session_id))
+   }
+
+   pub(super) fn inflight_key(
+      endpoint: &str,
+      variables: &str,
+      field_toggles: Option<&str>,
+   ) -> String {
+      format!(
+         "{endpoint}\0{variables}\0{}",
+         field_toggles.unwrap_or_default()
+      )
+   }
+
+   pub(super) fn join_or_lead(&self, key: String) -> InflightTicket {
+      let mut map = self
+         .inflight
+         .lock()
+         .unwrap_or_else(std::sync::PoisonError::into_inner);
+      if let Some(tx) = map.get(&key) {
+         return InflightTicket::Follower(tx.subscribe());
+      }
+      let (tx, _rx) = watch::channel(None);
+      map.insert(key.clone(), tx.clone());
+      drop(map);
+      InflightTicket::Leader(InflightGuard {
+         map: Arc::clone(&self.inflight),
+         key,
+         tx: Some(tx),
+      })
+   }
+
+   pub(super) fn parse_coalesced<T>(bytes: &[u8]) -> Result<T>
+   where
+      T: DeserializeOwned,
+   {
+      let resp = serde_json::from_slice::<GqlResponse<T>>(bytes)
+         .map_err(|err| Error::Internal(format!("Response parse error: {err}")))?;
+      resp
+         .data
+         .ok_or_else(|| Error::Internal("Response parse error: missing data".into()))
    }
 
    /// The browser and proxy a request for this session goes out as.
@@ -543,8 +634,9 @@ impl ApiClient {
 
    /// Make a GraphQL request to the Twitter API.
    ///
-   /// On token-related failures the session is marked as limited and the
-   /// request is retried once with a different session.
+   /// Identical concurrent calls in flight at the same instant share one
+   /// upstream request; the in-flight entry is removed immediately upon
+   /// completion so nothing is stored in memory after the request finishes.
    async fn graphql_request<T>(
       &self,
       endpoint: &str,
@@ -555,10 +647,28 @@ impl ApiClient {
    where
       T: DeserializeOwned,
    {
+      let key = Self::inflight_key(endpoint, variables, field_toggles);
+      let guard = match self.join_or_lead(key) {
+         InflightTicket::Follower(mut rx) => {
+            if rx.changed().await.is_ok()
+               && let Some(bytes) = rx.borrow_and_update().clone()
+               && let Ok(parsed) = Self::parse_coalesced::<T>(&bytes)
+            {
+               return Ok(parsed);
+            }
+            None
+         },
+         InflightTicket::Leader(guard) => Some(guard),
+      };
+
       let session = self.charged_session(endpoint, None).await?;
-      self
+      let (data, bytes) = self
          .graphql_request_with_session(session, endpoint, variables, features, field_toggles, None)
-         .await
+         .await?;
+      if let Some(guard) = guard {
+         guard.complete(bytes);
+      }
+      Ok(data)
    }
 
    /// `retry_kind` pins the replacement when the caller picked the endpoint and
@@ -572,10 +682,12 @@ impl ApiClient {
       features: &str,
       field_toggles: Option<&str>,
       retry_kind: Option<SessionKind>,
-   ) -> Result<T>
+   ) -> Result<(T, bytes::Bytes)>
    where
       T: DeserializeOwned,
    {
+      let mut tried_ids = vec![session.id];
+      let mut bad_ports = Vec::new();
       let (answered_on, mut last) = self
          .hedged_attempt(
             session,
@@ -592,7 +704,19 @@ impl ApiClient {
       // cases stay capped at GRAPHQL_REPLACEMENTS inside the match.
       for replacement in 0..RATE_LIMIT_REPLACEMENTS {
          let session_id = session.id;
+         if !tried_ids.contains(&session_id) {
+            tried_ids.push(session_id);
+         }
          let empty = matches!(last, Err(Error::TransientUpstream));
+         let exit_fault = matches!(&last, Err(Error::IpThrottled))
+            || matches!(&last, Err(Error::TwitterApi(message)) if is_gateway_blip(message))
+            || matches!(&last, Err(Error::Internal(message)) if message == "API headers stalled");
+         if exit_fault
+            && let Some(port) = self.pinned_port(session_id)
+            && !bad_ports.contains(&port)
+         {
+            bad_ports.push(port);
+         }
          let retry = match &last {
             Err(Error::SessionRejected(_)) if replacement < GRAPHQL_REPLACEMENTS => true,
             Err(Error::TransientUpstream) => {
@@ -633,20 +757,51 @@ impl ApiClient {
          }
          drop(session);
          self.charge(endpoint).await?;
-         session = match self
-            .sessions
-            .acquire_excluding(endpoint, retry_kind, Some(session_id))
-            .await
-         {
+         let next_session = if bad_ports.is_empty() {
+            self
+               .sessions
+               .acquire_where(endpoint, retry_kind, |id| !tried_ids.contains(&id))
+               .await
+         } else {
+            match self
+               .sessions
+               .acquire_where(endpoint, retry_kind, |id| {
+                  !tried_ids.contains(&id)
+                     && self
+                        .pinned_port(id)
+                        .is_none_or(|port| !bad_ports.contains(&port))
+               })
+               .await
+            {
+               Ok(next) => Ok(next),
+               Err(Error::NoSessions) => {
+                  self
+                     .sessions
+                     .acquire_where(endpoint, retry_kind, |id| !tried_ids.contains(&id))
+                     .await
+               },
+               Err(err) => Err(err),
+            }
+         };
+         session = match next_session {
             Ok(next) => next,
             Err(err) => {
                self.refund(endpoint).await;
                return Err(err);
             },
          };
-         last = self
-            .graphql_request_inner(&session, endpoint, variables, features, field_toggles)
+         let (answered_on, next_last) = self
+            .hedged_attempt(
+               session,
+               endpoint,
+               variables,
+               features,
+               field_toggles,
+               retry_kind,
+            )
             .await;
+         session = answered_on;
+         last = next_last;
          if empty && last.is_ok() {
             let permanent = endpoint.ends_with("SearchTimeline");
             tracing::info!(
@@ -695,7 +850,7 @@ impl ApiClient {
       features: &str,
       field_toggles: Option<&str>,
       retry_kind: Option<SessionKind>,
-   ) -> (SessionLease, Result<T>)
+   ) -> (SessionLease, Result<(T, bytes::Bytes)>)
    where
       T: DeserializeOwned,
    {
@@ -758,7 +913,7 @@ impl ApiClient {
       variables: &str,
       features: &str,
       field_toggles: Option<&str>,
-   ) -> (SessionLease, Result<T>)
+   ) -> (SessionLease, Result<(T, bytes::Bytes)>)
    where
       T: DeserializeOwned,
    {
@@ -868,7 +1023,7 @@ impl ApiClient {
       variables: &str,
       features: &str,
       field_toggles: Option<&str>,
-   ) -> Result<T>
+   ) -> Result<(T, bytes::Bytes)>
    where
       T: DeserializeOwned,
    {
@@ -932,7 +1087,7 @@ impl ApiClient {
       variables: &str,
       field_toggles: Option<&str>,
       with_tid: bool,
-   ) -> Result<T>
+   ) -> Result<(T, bytes::Bytes)>
    where
       T: DeserializeOwned,
    {
@@ -1010,9 +1165,10 @@ impl ApiClient {
       }
       api_check?;
 
-      resp
+      let data = resp
          .data
-         .ok_or_else(|| Error::Internal("Response parse error: missing data".into()))
+         .ok_or_else(|| Error::Internal("Response parse error: missing data".into()))?;
+      Ok((data, bytes))
    }
 
    /// Every authenticated call to X goes through here, or its 429s and refused
@@ -1493,5 +1649,32 @@ mod tests {
          broadcast_id_from_url("https://x.com/i/broadcasts/1XxyggAaLzvGM?foo=bar"),
          Some("1XxyggAaLzvGM")
       );
+   }
+
+   #[tokio::test]
+   async fn inflight_coalescing_shares_payload_and_leaves_nothing_stored() {
+      let map: Arc<InflightMap> = Arc::new(StdMutex::new(HashMap::new()));
+      let key = ApiClient::inflight_key("x/TweetDetail", r#"{"focalTweetId":"1"}"#, None);
+
+      let (tx, _rx) = watch::channel(None);
+      map.lock().unwrap().insert(key.clone(), tx.clone());
+      let guard = InflightGuard {
+         map: Arc::clone(&map),
+         key: key.clone(),
+         tx: Some(tx),
+      };
+      let mut follower = map.lock().unwrap().get(&key).unwrap().subscribe();
+      assert_eq!(map.lock().unwrap().len(), 1);
+
+      guard.complete(bytes::Bytes::from_static(b"{\"data\":{\"ok\":true}}"));
+      assert!(
+         map.lock().unwrap().is_empty(),
+         "completed request must not stay stored in memory"
+      );
+
+      follower.changed().await.unwrap();
+      let payload = follower.borrow_and_update().clone().unwrap();
+      let parsed: serde_json::Value = ApiClient::parse_coalesced(&payload).unwrap();
+      assert_eq!(parsed["ok"], true);
    }
 }

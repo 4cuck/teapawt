@@ -20,6 +20,7 @@ use crate::{
 #[derive(Debug, Deserialize)]
 struct CommunityQuery {
    cursor: Option<String>,
+   scroll: Option<String>,
 }
 
 pub fn router() -> Router<AppState> {
@@ -41,6 +42,7 @@ async fn community_top(
       &jar,
       &id,
       query.cursor.as_deref(),
+      query.scroll.as_deref() == Some("true"),
       "Relevance",
       "top",
    )
@@ -58,6 +60,7 @@ async fn community_latest(
       &jar,
       &id,
       query.cursor.as_deref(),
+      query.scroll.as_deref() == Some("true"),
       "Recency",
       "latest",
    )
@@ -71,12 +74,34 @@ async fn community_media(
    Query(query): Query<CommunityQuery>,
 ) -> Result<Response> {
    let prefs = Prefs::from_cookies(&jar, &state.config);
-   let info = state.api.get_community(&id).await?;
-   let timeline = state
-      .api
-      .get_community_media(&id, query.cursor.as_deref())
-      .await?;
    let view = prefs.resolved_media_view(None);
+   let base = format!("/i/communities/{id}/media");
+   if query.scroll.as_deref() == Some("true") {
+      let timeline = state
+         .api
+         .get_community_media(&id, query.cursor.as_deref())
+         .await?;
+      for group in &timeline.content {
+         super::helpers::remember_tweets(&state, group);
+      }
+      let fragment = timeline_view::render_timeline_with_view(
+         &timeline.content,
+         &state.config,
+         timeline.bottom.as_deref(),
+         Some(&base),
+         &prefs,
+         None,
+         view,
+      );
+      return Ok(Html(fragment.into_string()).into_response());
+   }
+   let (info, timeline) = tokio::try_join!(
+      state.api.get_community(&id),
+      state.api.get_community_media(&id, query.cursor.as_deref()),
+   )?;
+   for group in &timeline.content {
+      super::helpers::remember_tweets(&state, group);
+   }
    render_community(
       &state,
       &prefs,
@@ -86,10 +111,10 @@ async fn community_media(
          &timeline.content,
          &state.config,
          timeline.bottom.as_deref(),
-         Some(&format!("/i/communities/{id}/media")),
+         Some(&base),
          &prefs,
          None,
-         &view,
+         view,
       )),
    )
 }
@@ -109,17 +134,38 @@ async fn render_posts(
    jar: &CookieJar,
    id: &str,
    cursor: Option<&str>,
+   is_scroll: bool,
    ranking: &str,
    tab: &str,
 ) -> Result<Response> {
    let prefs = Prefs::from_cookies(jar, &state.config);
-   let info = state.api.get_community(id).await?;
-   let timeline = state.api.get_community_tweets(id, cursor, ranking).await?;
    let base = if tab == "latest" {
       format!("/i/communities/{id}/latest")
    } else {
       format!("/i/communities/{id}")
    };
+   if is_scroll {
+      let timeline = state.api.get_community_tweets(id, cursor, ranking).await?;
+      for group in &timeline.content {
+         super::helpers::remember_tweets(state, group);
+      }
+      let fragment = timeline_view::render_timeline_with_prefs(
+         &timeline.content,
+         &state.config,
+         timeline.bottom.as_deref(),
+         Some(&base),
+         &prefs,
+         None,
+      );
+      return Ok(Html(fragment.into_string()).into_response());
+   }
+   let (info, timeline) = tokio::try_join!(
+      state.api.get_community(id),
+      state.api.get_community_tweets(id, cursor, ranking),
+   )?;
+   for group in &timeline.content {
+      super::helpers::remember_tweets(state, group);
+   }
    render_community(
       state,
       &prefs,

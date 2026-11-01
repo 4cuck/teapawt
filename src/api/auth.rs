@@ -7,7 +7,7 @@ use std::{
    result::Result as StdResult,
    sync::{
       Arc,
-      atomic::{AtomicBool, AtomicUsize, Ordering},
+      atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
    },
    time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -93,6 +93,8 @@ struct LimitState {
 }
 
 const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(15);
+/// How long an account's pooled HTTP/2 connection to X stays open while idle.
+const WARM_CONNECTION_SECS: u64 = 900;
 
 /// Why one pass over the pool found no account.
 enum Miss {
@@ -105,18 +107,22 @@ enum Miss {
 }
 
 /// A candidate with known budget. Higher remaining is chosen. At a tie, an
-/// account that has returned results for this call wins.
+/// account that has returned results for this call and already holds a warm
+/// HTTP/2 connection wins.
 #[derive(Clone, Copy)]
 struct Candidate {
    index: usize,
    remaining: i32,
    verified: bool,
+   warm: bool,
 }
 
 struct SessionSlot {
    credentials: Arc<SessionCredentials>,
    permits: Arc<Semaphore>,
    max_concurrency: usize,
+   /// Unix timestamp (seconds) when this session last completed an upstream call.
+   last_active: AtomicU64,
 }
 
 /// A session and the concurrency permit held for its request lifetime.
@@ -186,6 +192,7 @@ impl SessionPool {
             credentials: Arc::new(creds),
             permits: Arc::new(Semaphore::new(max_concurrency)),
             max_concurrency,
+            last_active: AtomicU64::new(0),
          }));
          limits.insert(id, lims);
       }
@@ -363,7 +370,20 @@ impl SessionPool {
       required_kind: Option<SessionKind>,
       excluded_id: Option<i64>,
    ) -> Result<SessionLease> {
-      self.acquire_with(|_| api, required_kind, excluded_id).await
+      self
+         .acquire_with_filter(|_| api, required_kind, |id| excluded_id != Some(id))
+         .await
+   }
+
+   /// Acquire a session matching an arbitrary predicate (e.g. excluding tried
+   /// sessions and stalled proxy ports).
+   pub(crate) async fn acquire_where(
+      &self,
+      api: &str,
+      required_kind: Option<SessionKind>,
+      accept: impl Fn(i64) -> bool + Send,
+   ) -> Result<SessionLease> {
+      self.acquire_with_filter(|_| api, required_kind, accept).await
    }
 
    /// Acquire when the endpoint depends on which kind of session is chosen.
@@ -377,13 +397,13 @@ impl SessionPool {
       oauth_api: &str,
    ) -> Result<SessionLease> {
       self
-         .acquire_with(
+         .acquire_with_filter(
             |kind| match kind {
                SessionKind::OAuth => oauth_api,
                SessionKind::Cookie => cookie_api,
             },
             None,
-            None,
+            |_| true,
          )
          .await
    }
@@ -413,11 +433,11 @@ impl SessionPool {
       })
    }
 
-   async fn acquire_with<'a>(
+   async fn acquire_with_filter<'a>(
       &self,
       api_for: impl Fn(SessionKind) -> &'a str + Send,
       required_kind: Option<SessionKind>,
-      excluded_id: Option<i64>,
+      accept: impl Fn(i64) -> bool + Send,
    ) -> Result<SessionLease> {
       if self.sessions.is_empty() {
          return Err(Error::NoSessions);
@@ -425,9 +445,7 @@ impl SessionPool {
 
       loop {
          let mut limits = self.limits.write().await;
-         match self.scan(&mut limits, &api_for, required_kind, &|id| {
-            excluded_id != Some(id)
-         }) {
+         match self.scan(&mut limits, &api_for, required_kind, &accept, false) {
             Ok(lease) => return Ok(lease),
             Err(Miss::Nobody) => return Err(Error::NoSessions),
             Err(Miss::Spent) => return Err(Error::RateLimited),
@@ -462,7 +480,7 @@ impl SessionPool {
       }
       let mut limits = self.limits.try_write().ok()?;
       self
-         .scan(&mut limits, &|_| api, required_kind, &accept)
+         .scan(&mut limits, &|_| api, required_kind, &accept, true)
          .ok()
    }
 
@@ -475,11 +493,16 @@ impl SessionPool {
       api_for: &impl Fn(SessionKind) -> &'a str,
       required_kind: Option<SessionKind>,
       accept: &impl Fn(i64) -> bool,
+      prefer_warm: bool,
    ) -> StdResult<SessionLease, Miss> {
       let start = self.cursor.fetch_add(1, Ordering::Relaxed);
       let count = self.sessions.len();
+      let now = time::OffsetDateTime::now_utc().unix_timestamp();
+      let now_u64 = u64::try_from(now).unwrap_or(0);
       let mut best: Option<Candidate> = None;
+      let mut known_warm: Option<usize> = None;
       let mut known_account: Option<usize> = None;
+      let mut unknown_warm: Option<usize> = None;
       let mut unknown: Option<usize> = None;
       let mut any = false;
       let mut busy = false;
@@ -492,35 +515,56 @@ impl SessionPool {
             continue;
          }
          any = true;
+         let api = api_for(slot.credentials.kind);
+         let op_name = crate::types::operation_name(api);
+         let session_limits = limits.get(&slot.credentials.id);
+         if session_limits.is_some_and(|lim| lim.rejected) {
+            continue;
+         }
+         let headroom = session_limits.map(|lim| lim.headroom_at(api, op_name, now));
+         if headroom == Some(Headroom::Blocked) {
+            continue;
+         }
          if slot.permits.available_permits() == 0 {
             busy = true;
             continue;
          }
-         let api = api_for(slot.credentials.kind);
-         let session_limits = limits.get(&slot.credentials.id);
-         let rejected = session_limits.is_some_and(|limits| limits.rejected);
-         if rejected {
-            continue;
-         }
-         let verified = session_limits.is_some_and(|limits| limits.verified(api));
-         match session_limits.map(|limits| limits.headroom(api)) {
+         let verified = session_limits.is_some_and(|lim| lim.verified_op(op_name));
+         let last_active = slot.last_active.load(Ordering::Relaxed);
+         let warm =
+            last_active > 0 && now_u64.saturating_sub(last_active) < WARM_CONNECTION_SECS;
+         match headroom {
             Some(Headroom::Blocked) => {},
             Some(Headroom::Safe(remaining)) => {
                let better = best.is_none_or(|chosen: Candidate| {
+                  if prefer_warm && warm != chosen.warm {
+                     return warm;
+                  }
                   remaining > chosen.remaining
                      || (remaining == chosen.remaining && verified && !chosen.verified)
+                     || (remaining == chosen.remaining
+                        && verified == chosen.verified
+                        && warm
+                        && !chosen.warm)
                });
                if better {
                   best = Some(Candidate {
                      index,
                      remaining,
                      verified,
+                     warm,
                   });
                }
             },
             Some(Headroom::Unknown) | None => {
-               if verified && known_account.is_none() {
-                  known_account = Some(index);
+               if verified {
+                  if warm && known_warm.is_none() {
+                     known_warm = Some(index);
+                  } else if known_account.is_none() {
+                     known_account = Some(index);
+                  }
+               } else if warm && unknown_warm.is_none() {
+                  unknown_warm = Some(index);
                } else if unknown.is_none() {
                   unknown = Some(index);
                }
@@ -530,7 +574,9 @@ impl SessionPool {
 
       let index = best
          .map(|chosen| chosen.index)
+         .or(known_warm)
          .or(known_account)
+         .or(unknown_warm)
          .or(unknown)
          .ok_or(if !any {
             Miss::Nobody
@@ -606,6 +652,17 @@ impl SessionPool {
       session.metered.store(false, Ordering::Relaxed);
    }
 
+   fn touch(&self, session_id: i64, now: i64) {
+      let now_u64 = u64::try_from(now).unwrap_or(0);
+      if let Some(slot) = self
+         .sessions
+         .iter()
+         .find(|slot| slot.credentials.id == session_id)
+      {
+         slot.last_active.store(now_u64, Ordering::Relaxed);
+      }
+   }
+
    /// Update rate limit info for a session.
    ///
    /// A successful response with valid rate-limit headers proves the session
@@ -618,6 +675,8 @@ impl SessionPool {
       remaining: i32,
       reset: i64,
    ) {
+      let now = time::OffsetDateTime::now_utc().unix_timestamp();
+      self.touch(session_id, now);
       let mut limits = self.limits.write().await;
 
       if let Some(lim) = limits.get_mut(&session_id) {
@@ -629,7 +688,6 @@ impl SessionPool {
          // A local spend already lowered `remaining`. A late header must not
          // raise it back over calls that are still in flight, and a 429 mark
          // of zero stays zero until its reset.
-         let now = time::OffsetDateTime::now_utc().unix_timestamp();
          let remaining = if let Some(existing) = lim.apis.get(api) {
             if existing.reset > now && existing.remaining == 0 {
                0
@@ -645,7 +703,7 @@ impl SessionPool {
       }
       drop(limits);
 
-      if remaining <= 0 && reset > time::OffsetDateTime::now_utc().unix_timestamp() {
+      if remaining <= 0 && reset > now {
          self.persist_now(session_id).await;
       } else {
          self.mark_dirty(session_id);
@@ -688,6 +746,8 @@ impl SessionPool {
    /// Record that a session got results for `api`, which moves it ahead of
    /// unchecked accounts for that call.
    pub async fn mark_verified(&self, session_id: i64, api: &str) {
+      let now = time::OffsetDateTime::now_utc().unix_timestamp();
+      self.touch(session_id, now);
       if self
          .limits
          .read()
@@ -1363,6 +1423,7 @@ mod tests {
 
    #[tokio::test]
    async fn pool_filters_kinds_rotates_and_enforces_concurrency() {
+      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!("teapot-session-pool-{}.jsonl", process::id()));
       let sessions = concat!(
          r#"{"id":1,"username":"cookie","kind":"cookie","auth_token":"a","ct0":"c"}"#,
@@ -1624,6 +1685,59 @@ mod tests {
       assert_eq!(spare.id, 2);
 
       drop(spare);
+      fs::remove_file(path).await.unwrap();
+   }
+
+   #[tokio::test]
+   async fn a_warm_account_beats_a_cold_one_for_a_new_endpoint_and_hedge() {
+      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
+      let path = env::temp_dir().join(format!(
+         "teapot-session-pool-warm-{}.jsonl",
+         process::id()
+      ));
+      fs::write(
+         &path,
+         concat!(
+            r#"{"id":1,"username":"cold","kind":"cookie","auth_token":"a","ct0":"c"}"#,
+            "\n",
+            r#"{"id":2,"username":"warm","kind":"cookie","auth_token":"b","ct0":"d"}"#,
+            "\n"
+         ),
+      )
+      .await
+      .unwrap();
+      let pool = SessionPool::load(path.to_str().unwrap(), 4).await.unwrap();
+      let reset = time::OffsetDateTime::now_utc().unix_timestamp() + 900;
+      // Session 2 just answered `UserByScreenName`, so its HTTP/2 connection is warm.
+      pool
+         .update_session_limit(2, "UserByScreenName", 95, 94, reset)
+         .await;
+
+      // For `UserTweets` (where both have Unknown headroom), the warm session wins.
+      for _ in 0..4 {
+         let lease = pool
+            .acquire("UserTweets", Some(SessionKind::Cookie))
+            .await
+            .unwrap();
+         assert_eq!(lease.id, 2);
+      }
+
+      // And for a hedge (`try_acquire_where`), a warm Safe session beats a cold Safe session.
+      pool
+         .update_session_limit(1, "TweetDetail", 150, 140, reset)
+         .await;
+      pool.sessions[0]
+         .last_active
+         .store(0, super::Ordering::Relaxed);
+      pool
+         .update_session_limit(2, "TweetDetail", 150, 100, reset)
+         .await;
+      let spare = pool
+         .try_acquire_where("TweetDetail", Some(SessionKind::Cookie), |_| true)
+         .unwrap();
+      assert_eq!(spare.id, 2);
+      drop(spare);
+
       fs::remove_file(path).await.unwrap();
    }
 }
