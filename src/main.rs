@@ -122,9 +122,10 @@ async fn main() -> eyre::Result<()> {
    // second copy: that map served timelines after new posts and, full, made
    // every request wait on the cache lock. Numeric ids are not pages; they
    // live in Postgres so the next view can ask for the header and the posts
-   // at the same time.
+   // at the same time. Reading them takes longer than the rest of startup, so
+   // the server answers meanwhile.
    let cache = Cache::disabled();
-   cache::ids::load().await;
+   tokio::spawn(cache::ids::load());
 
    // Initialize session pool
    let sessions_path =
