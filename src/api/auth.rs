@@ -88,11 +88,17 @@ pub struct SessionPool {
 struct LimitState {
    path: String,
    dirty: Notify,
+   /// A change worth a restart, written within [`URGENT_FLUSH_DELAY`].
+   urgent: Notify,
    writing: Mutex<()>,
    db: Option<limits_db::LimitsDb>,
 }
 
 const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(15);
+/// Changes worth a restart wait this long, so a burst of them is one write.
+/// The whole JSON file is rewritten each time, and a request must not wait
+/// on that.
+const URGENT_FLUSH_DELAY: Duration = Duration::from_secs(1);
 /// How long an account's pooled HTTP/2 connection to X stays open while idle.
 const WARM_CONNECTION_SECS: u64 = 900;
 
@@ -241,6 +247,7 @@ impl SessionPool {
          Arc::new(LimitState {
             path,
             dirty: Notify::new(),
+            urgent: Notify::new(),
             writing: Mutex::new(()),
             db,
          })
@@ -304,9 +311,19 @@ impl SessionPool {
       let limits = Arc::clone(&self.limits);
       tokio::spawn(async move {
          loop {
-            state.dirty.notified().await;
-            // Coalesce, since update_session_limit fires on every response.
-            sleep(STATE_FLUSH_INTERVAL).await;
+            let urgent = tokio::select! {
+               () = state.urgent.notified() => true,
+               () = state.dirty.notified() => false,
+            };
+            if urgent {
+               sleep(URGENT_FLUSH_DELAY).await;
+            } else {
+               // Coalesce, since update_session_limit fires on every response.
+               tokio::select! {
+                  () = sleep(STATE_FLUSH_INTERVAL) => {},
+                  () = state.urgent.notified() => sleep(URGENT_FLUSH_DELAY).await,
+               }
+            }
 
             if let Err(err) = Self::store(&state, &limits).await {
                tracing::warn!("Failed to store session state: {err}");
@@ -339,18 +356,16 @@ impl SessionPool {
       }
    }
 
-   /// Write the one account before returning, for the transitions worth a restart.
-   async fn persist_now(&self, session_id: i64) {
+   /// Write the one account straight away, for the transitions worth a
+   /// restart. The caller is a visitor's request, so it does not wait.
+   fn persist_soon(&self, session_id: i64) {
       let Some(state) = self.state.as_ref() else {
          return;
       };
       if let Some(db) = &state.db {
-         db.save_now(session_id).await;
-         return;
-      }
-      if let Err(err) = Self::store(state, &self.limits).await {
-         tracing::warn!("Failed to store session state: {err}");
-         state.dirty.notify_one();
+         db.save(session_id);
+      } else {
+         state.urgent.notify_one();
       }
    }
 
@@ -704,7 +719,7 @@ impl SessionPool {
       drop(limits);
 
       if remaining <= 0 && reset > now {
-         self.persist_now(session_id).await;
+         self.persist_soon(session_id);
       } else {
          self.mark_dirty(session_id);
       }
@@ -740,7 +755,7 @@ impl SessionPool {
             crate::types::Damage::Window => {},
          }
       }
-      self.persist_now(session_id).await;
+      self.persist_soon(session_id);
    }
 
    /// Record that a session got results for `api`, which moves it ahead of
@@ -806,7 +821,7 @@ impl SessionPool {
             "account cannot search; leaving it out permanently"
          );
       }
-      self.persist_now(session_id).await;
+      self.persist_soon(session_id);
    }
 
    /// Mark a session's credentials as refused, taking it out of rotation until
@@ -828,7 +843,7 @@ impl SessionPool {
          lim.limited_at = time::OffsetDateTime::now_utc().unix_timestamp();
       }
       drop(limits);
-      self.persist_now(session_id).await;
+      self.persist_soon(session_id);
    }
 
    /// Get session count.
@@ -916,7 +931,7 @@ impl SessionPool {
          lim.age_gate_cleared = true;
       }
       drop(limits);
-      self.persist_now(session_id).await;
+      self.persist_soon(session_id);
    }
 
    /// The account refused the settings write (`You may not change this

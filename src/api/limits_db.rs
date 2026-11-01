@@ -5,7 +5,7 @@
 
 use std::{collections::HashMap, env};
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_postgres::NoTls;
 
 use crate::{
@@ -19,15 +19,10 @@ const UPSERT: &str = "\
 INSERT INTO session_limits (id, body) VALUES ($1, $2) \
 ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body";
 
-struct Job {
-   id: i64,
-   done: Option<oneshot::Sender<()>>,
-}
-
 /// Handle for saving one account without rewriting the rest.
 #[derive(Clone)]
 pub struct LimitsDb {
-   tx: mpsc::UnboundedSender<Job>,
+   tx: mpsc::UnboundedSender<i64>,
 }
 
 pub struct Connected {
@@ -106,7 +101,7 @@ impl Connected {
       self,
       limits: std::sync::Arc<tokio::sync::RwLock<HashMap<i64, SessionLimits>>>,
    ) -> LimitsDb {
-      let (tx, mut rx) = mpsc::unbounded_channel::<Job>();
+      let (tx, mut rx) = mpsc::unbounded_channel::<i64>();
       tokio::spawn(async move {
          let client = self.client;
          let statement = match client.prepare(UPSERT).await {
@@ -116,27 +111,29 @@ impl Connected {
                return;
             },
          };
-         while let Some(job) = rx.recv().await {
-            let mut jobs = vec![job];
+         while let Some(first) = rx.recv().await {
+            let mut ids = vec![first];
             while let Ok(extra) = rx.try_recv() {
-               jobs.push(extra);
+               ids.push(extra);
             }
-            for job in jobs {
-               let saved = limits.read().await.get(&job.id).cloned();
-               if let Some(saved) = saved {
-                  match serde_json::to_value(&saved) {
-                     Ok(body) => {
-                        if let Err(err) = client.execute(&statement, &[&job.id, &body]).await {
-                           tracing::warn!(id = job.id, "postgres session update failed: {err}");
-                        }
-                     },
-                     Err(err) => {
-                        tracing::warn!(id = job.id, "session state was not encoded: {err}")
-                     },
-                  }
-               }
-               if let Some(done) = job.done {
-                  let _ = done.send(());
+            // Every response queues its account, so a busy one is queued
+            // many times over. Its row is written once, as it is now.
+            ids.sort_unstable();
+            ids.dedup();
+            let rows = {
+               let limits = limits.read().await;
+               ids.iter()
+                  .filter_map(|id| Some((*id, limits.get(id)?.clone())))
+                  .collect::<Vec<_>>()
+            };
+            for (id, saved) in rows {
+               match serde_json::to_value(&saved) {
+                  Ok(body) => {
+                     if let Err(err) = client.execute(&statement, &[&id, &body]).await {
+                        tracing::warn!(id, "postgres session update failed: {err}");
+                     }
+                  },
+                  Err(err) => tracing::warn!(id, "session state was not encoded: {err}"),
                }
             }
          }
@@ -147,14 +144,6 @@ impl Connected {
 
 impl LimitsDb {
    pub fn save(&self, id: i64) {
-      let _ = self.tx.send(Job { id, done: None });
-   }
-
-   pub async fn save_now(&self, id: i64) {
-      let (done, received) = oneshot::channel();
-      if self.tx.send(Job { id, done: Some(done) }).is_err() {
-         return;
-      }
-      let _ = received.await;
+      let _ = self.tx.send(id);
    }
 }
