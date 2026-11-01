@@ -29,6 +29,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header}
 use bytes::Bytes;
 use futures_core::Stream;
 use http_body::Frame;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::browser::{self, Engine, Identity};
 use crate::error::{Error, Result};
@@ -93,6 +94,9 @@ const SLOW_PARK_MEMORY_MS: u64 = 10 * 60 * 1000;
 const SMALL_POOL: usize = 4;
 /// Exits Cloudflare has blocked by IP. A header stall does not belong here.
 const BANNED_PROXIES_FILE: &str = "disabled-proxies.txt";
+/// How long a Cloudflare block keeps an exit out. Cloudflare lifts these on
+/// its own, and a block page on the first call back writes a new line.
+const CLOUDFLARE_BAN_FOR: Duration = Duration::from_hours(3);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProxyKind {
@@ -229,7 +233,8 @@ struct PrimaryPool {
    samples: Mutex<HashMap<u64, ExitSamples>>,
    /// Slow parkings in a row per exit, and when the last one ends.
    relapses: Mutex<HashMap<u64, (u32, u64)>>,
-   /// Exits whose IP Cloudflare blocked. They stay out across restarts.
+   /// Exits named in the ban file: a Cloudflare block until it lapses, any
+   /// other line until it is deleted. Kept across restarts.
    banned: Mutex<HashSet<u64>>,
    banned_file: Option<PathBuf>,
 }
@@ -248,21 +253,26 @@ impl PrimaryPool {
    }
 
    fn watch_banned_file(&mut self, path: PathBuf) {
-      let loaded = load_banned(&path, &self.proxies);
+      let loaded = load_banned(&path, &self.proxies, unix_millis());
       self.banned = Mutex::new(loaded);
       self.banned_file = Some(path);
    }
 
-   /// Pick up handshake bans written while teapot is running. Deleting a
-   /// line puts that port back without a restart.
+   /// Pick up handshake bans written while teapot is running, and remove the
+   /// lines of Cloudflare bans that have lapsed. Deleting a line puts that
+   /// port back without a restart.
    fn reload_banned_file(&self) {
       let Some(path) = &self.banned_file else {
          return;
       };
-      let loaded = load_banned(path, &self.proxies);
+      // Held across the file so a ban written meanwhile is neither lost from
+      // the file nor dropped from the set.
       let Ok(mut banned) = self.banned.lock() else {
          return;
       };
+      let now = unix_millis();
+      drop_lapsed_bans(path, now);
+      let loaded = load_banned(path, &self.proxies, now);
       if *banned == loaded {
          return;
       }
@@ -304,8 +314,8 @@ impl PrimaryPool {
       ports
    }
 
-   /// Cloudflare blocked this exit's IP. Stays out until its line is removed
-   /// and teapot restarts. A header stall must not call this.
+   /// Cloudflare blocked this exit's IP. It stays out, across restarts, for
+   /// [`CLOUDFLARE_BAN_FOR`]. A header stall must not call this.
    fn ban(&self, proxy: &ProxyConfig) -> bool {
       let tag = proxy_tag(Some(proxy));
       if !self.tags.contains(&tag) {
@@ -323,8 +333,11 @@ impl PrimaryPool {
       let fresh = !path.exists();
       let mut line = String::new();
       if fresh {
-         line.push_str(
-            "# Cloudflare blocked this exit IP. Delete a line and restart teapot to use that port again.\n",
+         let _ = writeln!(
+            line,
+            "# Exits kept out of rotation. A cloudflare line is removed {} hours after its time; \
+             any other line stays until it is deleted.",
+            CLOUDFLARE_BAN_FOR.as_secs() / 3600
          );
       }
       let _ = writeln!(line, "{} {} cloudflare", proxy.port, utc_stamp(unix_millis()));
@@ -1475,9 +1488,45 @@ fn banned_proxies_file() -> Option<PathBuf> {
    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
-/// Ports Cloudflare blocked. Lines written for header timeouts are ignored,
-/// so a leftover false positive cannot take the pool down again.
-fn load_banned(path: &Path, proxies: &[ProxyConfig]) -> HashSet<u64> {
+/// One line of the ban file: `port time reason [detail...]`.
+struct BanLine<'a> {
+   port: u16,
+   /// Unix millis the line was written, when its time parses.
+   written: Option<u64>,
+   reason: &'a str,
+}
+
+impl<'a> BanLine<'a> {
+   fn parse(raw: &'a str) -> Option<Self> {
+      let line = raw.trim();
+      if line.is_empty() || line.starts_with('#') {
+         return None;
+      }
+      let mut fields = line.split_whitespace();
+      let port = fields.next()?.parse().ok()?;
+      let written = fields.next().and_then(parse_utc_stamp);
+      let reason = fields.next().unwrap_or("");
+      Some(Self {
+         port,
+         written,
+         reason,
+      })
+   }
+
+   /// A Cloudflare ban whose time is up. A line without a readable time
+   /// stays, like every line teapot did not write.
+   fn lapsed(&self, now: u64) -> bool {
+      let lasts = u64::try_from(CLOUDFLARE_BAN_FOR.as_millis()).unwrap_or(u64::MAX);
+      self.reason == "cloudflare"
+         && self
+            .written
+            .is_some_and(|at| at.saturating_add(lasts) <= now)
+   }
+}
+
+/// Ports out of rotation at `now`. Lines written for header timeouts are
+/// ignored, so a leftover false positive cannot take the pool down again.
+fn load_banned(path: &Path, proxies: &[ProxyConfig], now: u64) -> HashSet<u64> {
    let text = match fs::read_to_string(path) {
       Ok(text) => text,
       Err(err) if err.kind() == std::io::ErrorKind::NotFound => return HashSet::new(),
@@ -1487,26 +1536,54 @@ fn load_banned(path: &Path, proxies: &[ProxyConfig]) -> HashSet<u64> {
       },
    };
    let mut tags = HashSet::new();
-   for raw in text.lines() {
-      let line = raw.trim();
-      if line.is_empty() || line.starts_with('#') {
+   for line in text.lines().filter_map(BanLine::parse) {
+      if line.reason == "timeouts" || line.lapsed(now) {
          continue;
       }
-      let mut fields = line.split_whitespace();
-      let Some(port) = fields.next().and_then(|field| field.parse::<u16>().ok()) else {
-         continue;
-      };
-      let reason = fields.nth(1).unwrap_or("");
-      if reason == "timeouts" {
-         continue;
-      }
-      let Some(proxy) = proxies.iter().find(|proxy| proxy.port == port) else {
-         tracing::warn!(port, "banned proxy file names a port that is not an exit");
+      let Some(proxy) = proxies.iter().find(|proxy| proxy.port == line.port) else {
+         tracing::warn!(port = line.port, "banned proxy file names a port that is not an exit");
          continue;
       };
       tags.insert(proxy_tag(Some(proxy)));
    }
    tags
+}
+
+/// Remove lapsed Cloudflare lines from the ban file. scrape-handshake-watch.py
+/// counts every port in the file as already out and will not ban it again,
+/// so a lapsed line cannot stay behind.
+fn drop_lapsed_bans(path: &Path, now: u64) {
+   let Ok(text) = fs::read_to_string(path) else {
+      return;
+   };
+   let mut lapsed = Vec::new();
+   let mut kept = String::with_capacity(text.len());
+   for raw in text.lines() {
+      match BanLine::parse(raw) {
+         Some(line) if line.lapsed(now) => lapsed.push(line.port),
+         _ => {
+            kept.push_str(raw);
+            kept.push('\n');
+         },
+      }
+   }
+   if lapsed.is_empty() {
+      return;
+   }
+   lapsed.sort_unstable();
+   lapsed.dedup();
+   let mut temporary = path.as_os_str().to_owned();
+   temporary.push(".tmp");
+   match fs::write(&temporary, kept).and_then(|()| fs::rename(&temporary, path)) {
+      Ok(()) => tracing::info!(ports = ?lapsed, "Cloudflare bans lapsed; removed their lines"),
+      Err(err) => tracing::warn!(%err, ports = ?lapsed, "could not remove lapsed proxy bans"),
+   }
+}
+
+/// Unix millis for a time written by [`utc_stamp`].
+fn parse_utc_stamp(stamp: &str) -> Option<u64> {
+   let at = OffsetDateTime::parse(stamp, &Rfc3339).ok()?;
+   u64::try_from(at.unix_timestamp()).ok()?.checked_mul(1000)
 }
 
 fn utc_stamp(now_ms: u64) -> String {
@@ -1823,9 +1900,10 @@ mod tests {
          "teapot-banned-proxies-{}.txt",
          std::process::id()
       ));
+      let stamp = utc_stamp(unix_millis());
       std::fs::write(
          &path,
-         "10001 2026-10-28T00:00:00Z timeouts\n10002 2026-10-28T00:00:00Z cloudflare\n",
+         format!("10001 {stamp} timeouts\n10002 {stamp} cloudflare\n"),
       )
       .unwrap();
       let proxies = (10001..=10006).map(proxy_on).collect::<Vec<_>>();
@@ -1844,6 +1922,50 @@ mod tests {
       assert!(text.contains("cloudflare"));
       assert!(!pool.is_blocked(&proxies[3]));
       std::fs::remove_file(&path).unwrap();
+   }
+
+   #[test]
+   fn a_lapsed_cloudflare_ban_comes_back_and_leaves_the_file() {
+      let path = env::temp_dir().join(format!(
+         "teapot-lapsed-proxies-{}.txt",
+         std::process::id()
+      ));
+      let now = unix_millis();
+      let lasts = u64::try_from(CLOUDFLARE_BAN_FOR.as_millis()).unwrap();
+      let old = utc_stamp(now - lasts - 60_000);
+      let recent = utc_stamp(now - 60_000);
+      fs::write(
+         &path,
+         format!(
+            "# header\n10001 {old} cloudflare\n10002 {recent} cloudflare\n10003 {old} handshake \
+             scrape1 192.0.2.1:51820\n10004 {old} cloudflare\n10004 {recent} cloudflare\n"
+         ),
+      )
+      .unwrap();
+      let proxies = (10001..=10006).map(proxy_on).collect::<Vec<_>>();
+      let mut pool = PrimaryPool::new(
+         proxies.clone(),
+         proxies.iter().map(|proxy| proxy_tag(Some(proxy))).collect(),
+      );
+      pool.watch_banned_file(path.clone());
+      assert!(!pool.is_blocked(&proxies[0]), "the old Cloudflare ban has lapsed");
+      assert!(pool.is_blocked(&proxies[1]));
+      assert!(pool.is_blocked(&proxies[2]), "a handshake ban waits to be deleted");
+      assert!(pool.is_blocked(&proxies[3]), "a newer block on the same exit holds");
+
+      pool.reload_banned_file();
+      let text = fs::read_to_string(&path).unwrap();
+      assert_eq!(
+         text,
+         format!(
+            "# header\n10002 {recent} cloudflare\n10003 {old} handshake scrape1 \
+             192.0.2.1:51820\n10004 {recent} cloudflare\n"
+         )
+      );
+      assert!(!pool.is_blocked(&proxies[0]));
+      assert!(pool.ban(&proxies[0]), "Cloudflare blocking it again bans it again");
+      assert!(pool.is_blocked(&proxies[0]));
+      fs::remove_file(&path).unwrap();
    }
 
    #[test]
