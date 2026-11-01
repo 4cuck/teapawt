@@ -70,6 +70,8 @@ const RATE_LIMIT_REPLACEMENTS: usize = 5;
 const MAX_HEDGES: usize = 48;
 /// How often the upstream latency summary is logged.
 const LATENCY_REPORT_EVERY: Duration = Duration::from_secs(60);
+/// How often exits are ranked by how far their answers trail the fleet.
+const EXIT_RANK_EVERY: Duration = Duration::from_secs(15);
 
 /// An answer about the thing asked for, which a second account would give
 /// too. Anything else is the account or the path, and the other copy of a
@@ -465,7 +467,8 @@ impl ApiClient {
    }
 
    /// Log how long X takes per operation, how often a second copy went out
-   /// and won, and which exits are parked.
+   /// and won, and which exits are parked. Exits are also ranked by how far
+   /// their answers trail the fleet, and accounts on the slow ones go last.
    pub fn spawn_latency_report(&self) {
       let api = self.clone();
       tokio::spawn(async move {
@@ -480,6 +483,38 @@ impl ApiClient {
             if !parked.is_empty() {
                tracing::info!(?parked, "proxy exits parked (port, seconds left)");
             }
+         }
+      });
+      if self.proxies.is_none() {
+         return;
+      }
+      let ranker = self.clone();
+      tokio::spawn(async move {
+         let mut every = interval(EXIT_RANK_EVERY);
+         let mut going_last = Vec::new();
+         loop {
+            every.tick().await;
+            let slow = ranker.latency.slow_exits();
+            let mut ports = slow.iter().map(|&(port, _)| port).collect::<Vec<_>>();
+            let accounts = ranker.sessions.mark_slow_exits(|id| {
+               ranker
+                  .pinned_port(id)
+                  .is_some_and(|port| ports.contains(&port))
+            });
+            ports.sort_unstable();
+            if ports == going_last {
+               continue;
+            }
+            if slow.is_empty() {
+               tracing::info!("every proxy exit answers in step with the fleet again");
+            } else {
+               tracing::info!(
+                  ?slow,
+                  accounts,
+                  "proxy exits trail the fleet (port, ms behind); their accounts go last"
+               );
+            }
+            going_last = ports;
          }
       });
    }
@@ -922,7 +957,9 @@ impl ApiClient {
          .graphql_request_inner(&session, endpoint, variables, features, field_toggles)
          .await;
       if result.is_ok() {
-         self.latency.record(endpoint, started.elapsed());
+         self
+            .latency
+            .record(endpoint, started.elapsed(), self.pinned_port(session.id));
       }
       (session, result)
    }

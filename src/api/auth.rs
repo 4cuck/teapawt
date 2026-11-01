@@ -101,6 +101,10 @@ const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(15);
 const URGENT_FLUSH_DELAY: Duration = Duration::from_secs(1);
 /// How long an account's pooled HTTP/2 connection to X stays open while idle.
 const WARM_CONNECTION_SECS: u64 = 900;
+/// An account on an exit that trails the fleet ranks as if it had this
+/// fraction of the calls it has left, so the quick exits carry the load until
+/// their accounts are down to half of what the slow ones still hold.
+const SLOW_EXIT_DISCOUNT: i32 = 2;
 
 /// Why one pass over the pool found no account.
 enum Miss {
@@ -112,15 +116,17 @@ enum Miss {
    Busy,
 }
 
-/// A candidate with known budget. Higher remaining is chosen. At a tie, an
-/// account that has returned results for this call and already holds a warm
-/// HTTP/2 connection wins.
+/// A candidate with known budget. Higher remaining is chosen, with an account
+/// on a slow exit ranked at [`SLOW_EXIT_DISCOUNT`]. At a tie, an account that
+/// has returned results for this call and already holds a warm HTTP/2
+/// connection wins.
 #[derive(Clone, Copy)]
 struct Candidate {
    index: usize,
    remaining: i32,
    verified: bool,
    warm: bool,
+   slow_exit: bool,
 }
 
 struct SessionSlot {
@@ -129,6 +135,8 @@ struct SessionSlot {
    max_concurrency: usize,
    /// Unix timestamp (seconds) when this session last completed an upstream call.
    last_active: AtomicU64,
+   /// The exit this account is pinned to answers well behind the rest.
+   slow_exit: AtomicBool,
 }
 
 /// A session and the concurrency permit held for its request lifetime.
@@ -199,6 +207,7 @@ impl SessionPool {
             permits: Arc::new(Semaphore::new(max_concurrency)),
             max_concurrency,
             last_active: AtomicU64::new(0),
+            slow_exit: AtomicBool::new(false),
          }));
          limits.insert(id, lims);
       }
@@ -499,6 +508,20 @@ impl SessionPool {
          .ok()
    }
 
+   /// Flag the accounts pinned to an exit that trails the fleet, so they are
+   /// picked after the others. Returns how many are flagged.
+   pub(crate) fn mark_slow_exits(&self, slow: impl Fn(i64) -> bool) -> usize {
+      self
+         .sessions
+         .iter()
+         .map(|slot| {
+            let flagged = slow(slot.credentials.id);
+            slot.slow_exit.store(flagged, Ordering::Relaxed);
+            usize::from(flagged)
+         })
+         .sum()
+   }
+
    /// The account with the most calls left, starting from the rotation point.
    /// A known window always beats an account we have never measured: that
    /// unknown account is how a 429 still gets through.
@@ -515,10 +538,8 @@ impl SessionPool {
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
       let now_u64 = u64::try_from(now).unwrap_or(0);
       let mut best: Option<Candidate> = None;
-      let mut known_warm: Option<usize> = None;
-      let mut known_account: Option<usize> = None;
-      let mut unknown_warm: Option<usize> = None;
-      let mut unknown: Option<usize> = None;
+      // No known window: lowest rank first, the first one found within a rank.
+      let mut fallback: Option<(u8, usize)> = None;
       let mut any = false;
       let mut busy = false;
       for offset in 0..count {
@@ -548,10 +569,19 @@ impl SessionPool {
          let last_active = slot.last_active.load(Ordering::Relaxed);
          let warm =
             last_active > 0 && now_u64.saturating_sub(last_active) < WARM_CONNECTION_SECS;
+         let slow_exit = slot.slow_exit.load(Ordering::Relaxed);
          match headroom {
             Some(Headroom::Blocked) => {},
             Some(Headroom::Safe(remaining)) => {
+               let remaining = if slow_exit {
+                  remaining / SLOW_EXIT_DISCOUNT
+               } else {
+                  remaining
+               };
                let better = best.is_none_or(|chosen: Candidate| {
+                  if prefer_warm && slow_exit != chosen.slow_exit {
+                     return !slow_exit;
+                  }
                   if prefer_warm && warm != chosen.warm {
                      return warm;
                   }
@@ -568,20 +598,17 @@ impl SessionPool {
                      remaining,
                      verified,
                      warm,
+                     slow_exit,
                   });
                }
             },
             Some(Headroom::Unknown) | None => {
-               if verified {
-                  if warm && known_warm.is_none() {
-                     known_warm = Some(index);
-                  } else if known_account.is_none() {
-                     known_account = Some(index);
-                  }
-               } else if warm && unknown_warm.is_none() {
-                  unknown_warm = Some(index);
-               } else if unknown.is_none() {
-                  unknown = Some(index);
+               // Verified before unverified, then a quick exit, then a warm
+               // connection: a cold handshake on a quick exit still beats the
+               // round trip a slow one adds to every call.
+               let rank = (u8::from(!verified) << 2) | (u8::from(slow_exit) << 1) | u8::from(!warm);
+               if fallback.is_none_or(|(chosen, _)| rank < chosen) {
+                  fallback = Some((rank, index));
                }
             },
          }
@@ -589,10 +616,7 @@ impl SessionPool {
 
       let index = best
          .map(|chosen| chosen.index)
-         .or(known_warm)
-         .or(known_account)
-         .or(unknown_warm)
-         .or(unknown)
+         .or_else(|| fallback.map(|(_, index)| index))
          .ok_or(if !any {
             Miss::Nobody
          } else if busy {
@@ -1700,6 +1724,80 @@ mod tests {
       assert_eq!(spare.id, 2);
 
       drop(spare);
+      fs::remove_file(path).await.unwrap();
+   }
+
+   #[tokio::test]
+   async fn accounts_on_a_slow_exit_go_after_the_quick_ones() {
+      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
+      let path = env::temp_dir().join(format!(
+         "teapot-session-pool-slow-exit-{}.jsonl",
+         process::id()
+      ));
+      fs::write(
+         &path,
+         concat!(
+            r#"{"id":1,"username":"far","kind":"cookie","auth_token":"a","ct0":"c"}"#,
+            "\n",
+            r#"{"id":2,"username":"near","kind":"cookie","auth_token":"b","ct0":"d"}"#,
+            "\n",
+            r#"{"id":3,"username":"near-too","kind":"cookie","auth_token":"e","ct0":"f"}"#,
+            "\n"
+         ),
+      )
+      .await
+      .unwrap();
+      let pool = SessionPool::load(path.to_str().unwrap(), 4).await.unwrap();
+      assert_eq!(pool.mark_slow_exits(|id| id == 1), 1);
+
+      // Known windows: the slow exit's 40 calls rank as 20.
+      let reset = time::OffsetDateTime::now_utc().unix_timestamp() + 900;
+      pool.update_session_limit(1, "UserTweets", 50, 40, reset).await;
+      pool.update_session_limit(2, "UserTweets", 50, 25, reset).await;
+      pool.update_session_limit(3, "UserTweets", 50, 10, reset).await;
+      let fuller_quick = pool
+         .acquire("UserTweets", Some(SessionKind::Cookie))
+         .await
+         .unwrap();
+      assert_eq!(fuller_quick.id, 2);
+      drop(fuller_quick);
+      pool.update_session_limit(2, "UserTweets", 50, 15, reset).await;
+      let slow_fullest = pool
+         .acquire("UserTweets", Some(SessionKind::Cookie))
+         .await
+         .unwrap();
+      assert_eq!(slow_fullest.id, 1, "a slow exit still serves once the quick ones run low");
+      drop(slow_fullest);
+
+      // No window yet: the slow exit's warm connection loses to a quick exit.
+      pool.update_session_limit(1, "Other", 50, 50, 0).await;
+      pool.sessions[1].last_active.store(0, super::Ordering::Relaxed);
+      pool.sessions[2].last_active.store(0, super::Ordering::Relaxed);
+      for _ in 0..4 {
+         let unmeasured = pool
+            .acquire("TweetDetail", Some(SessionKind::Cookie))
+            .await
+            .unwrap();
+         assert_ne!(unmeasured.id, 1);
+      }
+
+      // A hedge wants the quickest path, whatever is left.
+      pool.update_session_limit(1, "TweetDetail", 150, 140, reset).await;
+      pool.update_session_limit(2, "TweetDetail", 150, 30, reset).await;
+      let spare = pool
+         .try_acquire_where("TweetDetail", Some(SessionKind::Cookie), |id| id != 3)
+         .unwrap();
+      assert_eq!(spare.id, 2);
+      drop(spare);
+
+      assert_eq!(pool.mark_slow_exits(|_| false), 0);
+      let caught_up = pool
+         .acquire("UserTweets", Some(SessionKind::Cookie))
+         .await
+         .unwrap();
+      assert_eq!(caught_up.id, 1, "back in step, the fullest account goes first again");
+      drop(caught_up);
+
       fs::remove_file(path).await.unwrap();
    }
 
