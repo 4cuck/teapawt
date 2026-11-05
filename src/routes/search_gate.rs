@@ -65,7 +65,7 @@ pub async fn admit(
    if !state.config.turnstile.configured() {
       return Ok(());
    }
-   if pass_valid(&state.config.config.hmac_key, jar) {
+   if pass_valid(&state.config.config.hmac_key, jar) || state.passes.admits(jar) {
       if token.is_some_and(|token| !token.is_empty()) {
          let origin = crate::utils::host::current_origin(state.config.url_prefix());
          return Err(redirect(None, &absolute(&origin, prompt.resume)));
@@ -92,11 +92,14 @@ pub async fn admit(
    Err(challenge(state, prefs, &prompt, true))
 }
 
-/// Search feeds and machine clients have no checkbox. A pass still lets a
-/// browser's feed through.
+/// Search feeds and machine clients have no checkbox. A checkbox pass still
+/// lets a browser's feed through, and a paid pass lets its signed-in browsers
+/// and whitelisted addresses through.
 #[must_use]
 pub fn cleared(state: &AppState, jar: &CookieJar) -> bool {
-   !state.config.turnstile.configured() || pass_valid(&state.config.config.hmac_key, jar)
+   !state.config.turnstile.configured()
+      || pass_valid(&state.config.config.hmac_key, jar)
+      || state.passes.admits(jar)
 }
 
 fn challenge(state: &AppState, prefs: &Prefs, prompt: &Prompt<'_>, failed: bool) -> Response {

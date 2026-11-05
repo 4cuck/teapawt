@@ -476,6 +476,10 @@ pub fn render_turnstile_prompt(
            noscript {
                p { "This search needs the checkbox. Turn JavaScript on for this page." }
            }
+           p class="turnstile-pass" {
+               "A " a href="/search-pass" { "search pass" } " skips this check, on search and search RSS. "
+               a href="/search-pass/login" { "Log in" } " if you have one."
+           }
            script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer {}
        }
    }

@@ -1599,6 +1599,52 @@ nav.explore-tabbar {
 .donate-note, .donate-status { color: var(--muted); font-size: 13px; }
 .donate-error { color: var(--text); }
 
+.nav-pass {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+  font-weight: 800;
+}
+.turnstile-panel .turnstile-pass { margin: 16px 0 0; color: var(--muted); font-size: 13px; }
+.turnstile-pass a { color: var(--accent); }
+.pass-page h2 { margin: 28px 0 8px; font-size: 18px; }
+.pass-page form { margin: 8px 0; }
+.pass-page .donate-form input[type="email"],
+.pass-page .donate-form input[type="password"],
+.pass-page .donate-form input[type="text"] {
+  position: static;
+  width: min(100%, 320px);
+  max-width: none;
+  height: 36px;
+  margin: 0;
+  padding: 0 8px;
+}
+.pass-page button { min-height: 36px; padding: 8px 14px; }
+.pass-login {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 16px;
+  margin: 16px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+.pass-login dt { color: var(--muted); }
+.pass-login dd { margin: 0; }
+.pass-login code { font-size: 16px; user-select: all; word-break: break-all; }
+.pass-list { margin: 8px 0; padding: 0; list-style: none; }
+.pass-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+.pass-list form { margin: 0; }
+.pass-logout { margin-top: 28px; }
+
 .firefox-warning-ignore { display: none; }
 .firefox-media-warning button {
   min-height: 0;

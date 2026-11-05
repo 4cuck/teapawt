@@ -58,11 +58,17 @@ fn feed_key(key: String, proxy: bool) -> String {
    }
 }
 
-/// A search feed that has not pressed the checkbox.
-fn search_feed_blocked() -> Response {
+/// A search feed with no pass. Not 403: Cloudflare keeps a 403 on search paths
+/// for five minutes, which would hold a reader on a newly whitelisted address
+/// at this refusal.
+fn search_feed_blocked(state: &AppState) -> Response {
+   let origin = crate::utils::host::current_origin(state.config.url_prefix());
    let mut response = (
-      StatusCode::FORBIDDEN,
-      "Search feeds need the checkbox on the search page.",
+      StatusCode::PAYMENT_REQUIRED,
+      format!(
+         "Search feeds need a search pass ({origin}/search-pass). Sign in, or whitelist this \
+          reader's IP address on the pass page."
+      ),
    )
       .into_response();
    response.headers_mut().insert(
@@ -246,7 +252,7 @@ async fn search_rss(
       return Ok(cached);
    }
    if !super::search_gate::cleared(&state, &jar) {
-      return Ok(search_feed_blocked());
+      return Ok(search_feed_blocked(&state));
    }
 
    let timeline = state
@@ -295,7 +301,7 @@ async fn user_search_rss(
       return Ok(cached);
    }
    if !super::search_gate::cleared(&state, &jar) {
-      return Ok(search_feed_blocked());
+      return Ok(search_feed_blocked(&state));
    }
 
    let timeline = state.api.search(&api_query, None, "Latest").await?;

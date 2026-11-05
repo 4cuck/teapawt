@@ -130,6 +130,17 @@ currency = "usd"
 siteKey = ""
 secretKey = ""
 
+# Paid search pass at /search-pass: skips the checkbox for signed-in browsers and
+# whitelisted IP addresses. Paid through the [donations] providers and stored in
+# the Postgres database from TEAPOT_LIMITS_DATABASE_URL.
+[pass]
+priceCents = 1000
+# Node module that mails a buyer their login. Its export is called as
+# send(mailAccounts, { to, subject, text }, log). An empty mailer turns email off.
+mailer = ""
+mailerExport = "sendMail"
+mailAccounts = ""
+
 [preferences]
 # Default theme
 theme = "black"

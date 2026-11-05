@@ -3,6 +3,7 @@ mod cache;
 mod config;
 mod donations;
 mod error;
+mod passes;
 mod routes;
 mod transcode;
 mod translation;
@@ -60,6 +61,7 @@ pub struct AppState {
    /// Peers permitted to name a different caller through forwarding headers.
    pub trusted_proxies: Arc<[IpAddr]>,
    pub donations: Arc<donations::DonationLedger>,
+   pub passes: Arc<passes::PassStore>,
 }
 
 /// Log lines held for stdout before new ones are dropped.
@@ -187,6 +189,9 @@ async fn main() -> eyre::Result<()> {
       tracing::info!("No trustedProxies configured, billing clients by socket address");
    }
 
+   let passes = passes::PassStore::open(Arc::clone(&config)).await;
+   passes.spawn_upkeep();
+
    // Create application state
    let state = AppState {
       config: Arc::clone(&config),
@@ -197,6 +202,7 @@ async fn main() -> eyre::Result<()> {
       translation_limiter: Arc::new(translation::TranslationLimiter::new()),
       trusted_proxies: trusted_proxies.into(),
       donations: donations::DonationLedger::open(&config.donations.ledger_file),
+      passes,
    };
 
    // Build the router with specific routes before static files

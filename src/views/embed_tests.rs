@@ -52,6 +52,7 @@ fn test_config() -> Config {
       gif_transcoding: GifTranscodingConfig::default(),
       donations: crate::config::DonationsConfig::default(),
       turnstile: crate::config::TurnstileConfig::default(),
+      pass: crate::config::PassConfig::default(),
       url_prefix: "https://teapot.test".to_owned(),
    }
 }

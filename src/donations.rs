@@ -22,7 +22,7 @@ use crate::config::DonationsConfig;
 pub const MIN_CENTS: i64 = 100;
 pub const MAX_CENTS: i64 = 1_000_000;
 
-static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
+pub(crate) static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
    reqwest::Client::builder()
       .timeout(Duration::from_secs(20))
       .build()
@@ -504,8 +504,9 @@ pub fn stripe_signature_ok(payload: &[u8], header: &str, secret: &str) -> bool {
 
 pub async fn nowpayments_invoice(
    api_key: &str,
-   donation_id: &str,
+   order_id: &str,
    cents: i64,
+   description: &str,
    ipn_url: &str,
    success_url: &str,
    cancel_url: &str,
@@ -513,8 +514,8 @@ pub async fn nowpayments_invoice(
    let payload = serde_json::json!({
       "price_amount": dollars_string(cents).parse::<f64>().unwrap_or(0.0),
       "price_currency": "usd",
-      "order_id": donation_id,
-      "order_description": "Donation to nitter.cf",
+      "order_id": order_id,
+      "order_description": description,
       "ipn_callback_url": ipn_url,
       "success_url": success_url,
       "cancel_url": cancel_url,
@@ -579,16 +580,17 @@ pub fn nowpayments_received_cents(body: &Value) -> Option<i64> {
 
 pub async fn lzt_invoice(
    config: &crate::config::LztDonationConfig,
-   donation_id: &str,
+   order_id: &str,
    cents: i64,
+   comment: &str,
    success_url: &str,
    callback_url: &str,
 ) -> Result<String, PayError> {
    let payload = serde_json::json!({
       "currency": config.currency,
       "amount": dollars_string(cents).parse::<f64>().unwrap_or(0.0),
-      "payment_id": donation_id,
-      "comment": "Donation to nitter.cf",
+      "payment_id": order_id,
+      "comment": comment,
       "url_success": success_url,
       "url_callback": callback_url,
       "merchant_id": config.merchant_id,
@@ -616,16 +618,15 @@ pub async fn lzt_invoice(
       .ok_or_else(|| PayError::new("lzt did not return an invoice url"))
 }
 
+/// Amount and invoice id of a paid LZT invoice. The caller checks that
+/// `payment_id` is one of its own ids.
 pub async fn lzt_paid_invoice(
    access_token: &str,
-   donation_id: &str,
+   payment_id: &str,
 ) -> Result<Option<(i64, String)>, PayError> {
-   if !valid_donation_id(donation_id) {
-      return Ok(None);
-   }
    let url = format!(
       "https://prod-api.lzt.market/invoice?payment_id={}",
-      urlencoding_path(donation_id)
+      urlencoding_path(payment_id)
    );
    let response = HTTP
       .get(url)
@@ -644,7 +645,7 @@ pub async fn lzt_paid_invoice(
          .as_i64()
          .map(|id| id.to_string())
          .or_else(|| invoice["invoice_id"].as_str().map(str::to_owned))
-         .unwrap_or_else(|| donation_id.to_owned());
+         .unwrap_or_else(|| payment_id.to_owned());
       return Ok(Some((cents, reference)));
    }
    Ok(None)

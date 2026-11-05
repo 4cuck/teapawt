@@ -120,6 +120,7 @@ async fn start_donation(
          &state.config.donations.nowpayments.api_key,
          &id,
          cents,
+         "Donation to nitter.cf",
          &format!("{base}/donate/nowpayments/ipn"),
          &format!("{base}/donate/thanks?provider=nowpayments"),
          &cancel,
@@ -129,6 +130,7 @@ async fn start_donation(
          &state.config.donations.lzt,
          &id,
          cents,
+         "Donation to nitter.cf",
          &format!("{base}/donate/thanks?provider=lzt&payment_id={id}"),
          &format!("{base}/donate/lzt/callback"),
       )
@@ -173,6 +175,7 @@ async fn thanks(
    }
    if provider == "lzt"
       && let Some(payment_id) = query.payment_id.as_deref()
+      && donations::valid_donation_id(payment_id)
       && let Ok(Some((cents, reference))) =
          donations::lzt_paid_invoice(&state.config.donations.lzt.access_token, payment_id).await
       && cents > 0

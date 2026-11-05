@@ -65,6 +65,9 @@ pub struct Config {
    /// Search checkbox. Empty keys leave search open.
    #[serde(default)]
    pub turnstile: TurnstileConfig,
+   /// Paid pass that skips the checkbox. Paid through the donation providers.
+   #[serde(default)]
+   pub pass: PassConfig,
    /// Precomputed `{scheme}://{hostname}` value set in `Config::load`.
    #[serde(skip)]
    pub url_prefix: String,
@@ -201,6 +204,40 @@ impl TurnstileConfig {
    pub fn configured(&self) -> bool {
       !self.site_key.is_empty() && !self.secret_key.is_empty()
    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PassConfig {
+   #[serde(default = "default_pass_cents", rename = "priceCents")]
+   pub price_cents:   i64,
+   /// Node module that mails a buyer their login. Empty leaves email off.
+   #[serde(default)]
+   pub mailer:        String,
+   /// The module's export, called as `send(mailAccounts, message, log)`.
+   #[serde(default = "default_mailer_export", rename = "mailerExport")]
+   pub mailer_export: String,
+   /// Handed to that export as its first argument.
+   #[serde(default, rename = "mailAccounts")]
+   pub mail_accounts: String,
+}
+
+impl Default for PassConfig {
+   fn default() -> Self {
+      Self {
+         price_cents:   default_pass_cents(),
+         mailer:        String::new(),
+         mailer_export: default_mailer_export(),
+         mail_accounts: String::new(),
+      }
+   }
+}
+
+const fn default_pass_cents() -> i64 {
+   1000
+}
+
+fn default_mailer_export() -> String {
+   "sendMail".to_owned()
 }
 
 impl std::fmt::Debug for TurnstileConfig {
@@ -471,6 +508,11 @@ impl Config {
       if config.cache.list_minutes == 0 || config.cache.rss_minutes == 0 {
          return Err(Error::InvalidConfig(
             "cache listMinutes and rssMinutes must be greater than zero".into(),
+         ));
+      }
+      if config.pass.price_cents < crate::donations::MIN_CENTS {
+         return Err(Error::InvalidConfig(
+            "pass.priceCents must be at least 100".into(),
          ));
       }
       // Validate GIF transcoding config

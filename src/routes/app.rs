@@ -12,6 +12,7 @@ pub fn router(indexnow_key: &str) -> Router<AppState> {
       .merge(super::agents::router())
       .merge(super::pages::router())
       .merge(super::donate::router())
+      .merge(super::pass::router())
       .merge(super::unsupported::router())
       .merge(super::debug::router())
       .merge(super::redirect::router())

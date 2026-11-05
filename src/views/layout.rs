@@ -6,7 +6,7 @@ use regex::Regex;
 use crate::{config::Config, types::Prefs};
 
 pub const STYLE_CSS: &str = "/css/style.css?teapawt11";
-pub const CLEAN_CSS: &str = "/css/clean.css?teapawt43";
+pub const CLEAN_CSS: &str = "/css/clean.css?teapawt44";
 pub const FONTELLO_CSS: &str = "/css/fontello.css";
 
 /// Builder for rendering a full page layout.
@@ -336,6 +336,9 @@ pub fn render_navbar_full(config: &Config, rss: &str, canonical: &str, referer: 
                    }
                    a class="nav-icon" title="Preferences" href=(&settings_href) {
                        span class="icon-cog" aria-hidden="true" {}
+                   }
+                   a class="nav-icon nav-pass" title="Search pass: skip the search check" aria-label="Search pass" href="/search-pass" {
+                       "$"
                    }
                }
            }

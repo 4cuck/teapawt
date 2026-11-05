@@ -16,6 +16,7 @@ mod media;
 mod middleware;
 mod notes;
 mod pages;
+mod pass;
 mod preferences;
 mod redirect;
 mod rss;

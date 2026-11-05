@@ -4,6 +4,7 @@ pub mod explore;
 pub mod game;
 pub mod layout;
 pub mod notes;
+pub mod pass;
 pub mod preferences;
 pub mod profile;
 pub mod renderutils;
