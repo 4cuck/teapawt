@@ -13,6 +13,7 @@ use serde::Deserialize;
 use super::{
    helpers,
    helpers::extract_timeline,
+   search::{self, SearchQuery},
 };
 use crate::{
    AppState,
@@ -852,21 +853,11 @@ async fn user_media(
    .await
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct UserSearchQuery {
-   #[serde(rename = "q")]
-   pub query: Option<String>,
-   pub cursor: Option<String>,
-   pub scroll: Option<String>,
-   #[serde(rename = "cf-turnstile-response")]
-   pub turnstile: Option<String>,
-}
-
 async fn user_search_submit(
    State(state): State<AppState>,
    jar: CookieJar,
    Path(username): Path<String>,
-   axum::Form(query): axum::Form<UserSearchQuery>,
+   axum::Form(query): axum::Form<SearchQuery>,
 ) -> Result<Response> {
    user_search(State(state), jar, Path(username), Query(query)).await
 }
@@ -875,34 +866,14 @@ async fn user_search(
    State(state): State<AppState>,
    jar: CookieJar,
    Path(username): Path<String>,
-   Query(query): Query<UserSearchQuery>,
+   Query(query): Query<SearchQuery>,
 ) -> Result<Response> {
    let prefs = Prefs::from_cookies(&jar, &state.config);
 
    let search_query = query.query.as_deref().unwrap_or("");
    let search_action = format!("/{username}/search");
-   let mut fields = Vec::new();
-   if !search_query.is_empty() {
-      fields.push(("q", search_query));
-   }
-   if let Some(cursor) = query.cursor.as_deref().filter(|cursor| !cursor.is_empty()) {
-      fields.push(("cursor", cursor));
-   }
-   let resume = if fields.is_empty() {
-      search_action.clone()
-   } else {
-      format!(
-         "{search_action}?{}",
-         fields
-            .iter()
-            .map(|(name, value)| format!(
-               "{name}={}",
-               percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
-            ))
-            .collect::<Vec<_>>()
-            .join("&")
-      )
-   };
+   let fields = search::search_fields(&query);
+   let resume = search::path_with(&search_action, &fields);
    if let Err(response) = super::search_gate::admit(
       &state,
       &jar,
@@ -919,21 +890,17 @@ async fn user_search(
       return Ok(response);
    }
 
-   // When search query is empty, default to showing the user's recent tweets
-   let api_query = if search_query.is_empty() {
-      format!("from:{username} include:nativeretweets")
-   } else {
-      format!("from:{username} {search_query}")
-   };
-   let base_url = if search_query.is_empty() {
-      format!("/{username}/search")
-   } else {
-      format!(
-         "/{}/search?q={}",
-         username,
-         percent_encoding::utf8_percent_encode(search_query, percent_encoding::NON_ALPHANUMERIC)
-      )
-   };
+   // Empty search shows this account's posts, including retweets, unless the
+   // visitor asked to hide them. Filter fields stay in the page URL so the
+   // next page and the form keep the same selection.
+   let filters = query.to_filters();
+   let api_query = query.profile_api_query(&username);
+   let page_fields = fields
+      .iter()
+      .copied()
+      .filter(|&(name, _)| name != "cursor")
+      .collect::<Vec<_>>();
+   let base_url = search::path_with(&search_action, &page_fields);
 
    if query.scroll.as_deref() == Some("true") {
       return match state
@@ -1011,7 +978,7 @@ async fn user_search(
          let newer = query.cursor.is_some().then_some(base_url.as_str());
          let timeline_content = html! {
              div class="timeline-header" {
-                 (render_search_panel_with_action(search_query, None, &search_action, "tweets", ""))
+                 (render_search_panel_with_action(search_query, Some(&filters), &search_action, "tweets", ""))
              }
              (timeline::render_timeline_with_prefs(&tweets, &state.config, cursor.as_deref(), Some(&base_url), &prefs, newer))
          };

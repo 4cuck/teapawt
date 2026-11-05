@@ -105,8 +105,10 @@ pub struct SearchQuery {
    pub f_verified: Option<String>,
    #[serde(rename = "e-replies")]
    pub e_replies: Option<String>,
-   #[serde(rename = "e-retweets")]
-   pub e_retweets: Option<String>,
+   /// Hide retweets. The form posts `e-nativeretweets`; `e-retweets` is the
+   /// older name and still accepted.
+   #[serde(rename = "e-nativeretweets", alias = "e-retweets")]
+   pub e_nativeretweets: Option<String>,
    /// AJAX infinite-scroll request — return a timeline fragment, not a page.
    pub scroll: Option<String>,
    /// Checkbox token. Stripped before the search runs.
@@ -126,7 +128,7 @@ impl SearchQuery {
          quote: self.f_quote.as_deref() == Some("on"),
          verified: self.f_verified.as_deref() == Some("on"),
          exclude_replies: self.e_replies.as_deref() == Some("on"),
-         exclude_retweets: self.e_retweets.as_deref() == Some("on"),
+         exclude_retweets: self.e_nativeretweets.as_deref() == Some("on"),
          since: self.since.clone().unwrap_or_default(),
          until: self.until.clone().unwrap_or_default(),
          min_faves: self.min_faves.clone().unwrap_or_default(),
@@ -193,9 +195,12 @@ impl SearchQuery {
          }
       }
 
-      // Add exclude toggles
-      let exclude_toggles: &[(&Option<String>, &str)] =
-         &[(&self.e_replies, "replies"), (&self.e_retweets, "retweets")];
+      // Add exclude toggles. Retweets use `nativeretweets` so a profile
+      // search can skip the forced `include:nativeretweets`.
+      let exclude_toggles: &[(&Option<String>, &str)] = &[
+         (&self.e_replies, "replies"),
+         (&self.e_nativeretweets, "nativeretweets"),
+      ];
       for &(param, name) in exclude_toggles {
          if param.as_deref() == Some("on") && !query.excludes.iter().any(|excl| excl == name) {
             query.excludes.push((*name).to_owned());
@@ -203,6 +208,41 @@ impl SearchQuery {
       }
 
       query
+   }
+
+   /// Search string for `/{username}/search`.
+   ///
+   /// An empty box still shows that account's posts and retweets. Checking
+   /// "exclude retweets" drops the forced `include:nativeretweets`. Other
+   /// filter fields are applied on top of the same query.
+   pub fn profile_api_query(&self, username: &str) -> String {
+      let mut query = self.to_query();
+      let exclude_retweets = query
+         .excludes
+         .iter()
+         .any(|name| name == "nativeretweets" || name == "retweets");
+      // `from:` typed in the box stays. The `from` parameter is a global-search
+      // field; profile search is already scoped to the path username.
+      let typed_from = Query::parse(self.query.as_deref().unwrap_or(""), query.kind).from_user;
+      query.from_user.clear();
+      query
+         .excludes
+         .retain(|name| name != "nativeretweets");
+
+      let mut api = format!("from:{username}");
+      if self.query.as_deref().unwrap_or("").is_empty() && !exclude_retweets {
+         api.push_str(" include:nativeretweets");
+      }
+      for user in &typed_from {
+         api.push_str(" from:");
+         api.push_str(user);
+      }
+      let built = query.build();
+      if !built.is_empty() {
+         api.push(' ');
+         api.push_str(&built);
+      }
+      api
    }
 }
 
@@ -220,7 +260,7 @@ fn push_field<'a>(
    }
 }
 
-fn search_fields(params: &SearchQuery) -> Vec<(&'static str, &str)> {
+pub fn search_fields(params: &SearchQuery) -> Vec<(&'static str, &str)> {
    let mut fields = Vec::new();
    push_field(&mut fields, "q", params.query.as_ref());
    push_field(&mut fields, "f", params.filter.as_ref());
@@ -238,13 +278,13 @@ fn search_fields(params: &SearchQuery) -> Vec<(&'static str, &str)> {
    push_field(&mut fields, "f-quote", params.f_quote.as_ref());
    push_field(&mut fields, "f-verified", params.f_verified.as_ref());
    push_field(&mut fields, "e-replies", params.e_replies.as_ref());
-   push_field(&mut fields, "e-retweets", params.e_retweets.as_ref());
+   push_field(&mut fields, "e-nativeretweets", params.e_nativeretweets.as_ref());
    fields
 }
 
-fn search_resume(fields: &[(&str, &str)]) -> String {
+pub fn path_with(action: &str, fields: &[(&str, &str)]) -> String {
    if fields.is_empty() {
-      return "/search".to_owned();
+      return action.to_owned();
    }
    let query = fields
       .iter()
@@ -256,7 +296,11 @@ fn search_resume(fields: &[(&str, &str)]) -> String {
       })
       .collect::<Vec<_>>()
       .join("&");
-   format!("/search?{query}")
+   format!("{action}?{query}")
+}
+
+fn search_resume(fields: &[(&str, &str)]) -> String {
+   path_with("/search", fields)
 }
 
 fn search_tab(params: &SearchQuery) -> &'static str {
@@ -732,4 +776,120 @@ async fn opensearch(State(state): State<AppState>) -> Response {
       xml,
    )
       .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+   use super::{SearchQuery, path_with, search_fields};
+
+   #[test]
+   fn empty_profile_search_includes_retweets() {
+      let query = SearchQuery::default();
+      assert_eq!(
+         query.profile_api_query("alice"),
+         "from:alice include:nativeretweets"
+      );
+   }
+
+   #[test]
+   fn typed_profile_search_does_not_force_retweets() {
+      let query = SearchQuery {
+         query: Some("candy".to_owned()),
+         ..SearchQuery::default()
+      };
+      assert_eq!(query.profile_api_query("alice"), "from:alice candy");
+   }
+
+   #[test]
+   fn exclude_retweets_stays_on_for_a_profile_search() {
+      let query = SearchQuery {
+         e_nativeretweets: Some("on".to_owned()),
+         filter: Some("tweets".to_owned()),
+         query: Some("candy".to_owned()),
+         ..SearchQuery::default()
+      };
+      let filters = query.to_filters();
+      assert!(filters.exclude_retweets);
+      let api = query.profile_api_query("alice");
+      assert_eq!(api, "from:alice candy");
+      assert!(!api.contains("include:nativeretweets"));
+
+      let fields = search_fields(&query);
+      let page = path_with("/alice/search", &fields);
+      assert!(page.contains("e-nativeretweets=on"), "{page}");
+      assert!(page.contains("q=candy"), "{page}");
+      assert!(page.contains("f=tweets"), "{page}");
+   }
+
+   #[test]
+   fn other_profile_filters_keep_the_default_retweets() {
+      let query = SearchQuery {
+         since: Some("2024-01-01".to_owned()),
+         f_images: Some("on".to_owned()),
+         ..SearchQuery::default()
+      };
+      let api = query.profile_api_query("alice");
+      assert!(api.contains("include:nativeretweets"), "{api}");
+      assert!(api.contains("filter:images"), "{api}");
+      assert!(api.contains("since:2024-01-01"), "{api}");
+      let filters = query.to_filters();
+      assert!(filters.images);
+      assert_eq!(filters.since, "2024-01-01");
+      assert!(!filters.exclude_retweets);
+   }
+
+   #[test]
+   fn exclude_retweets_drops_the_default_profile_include() {
+      let query = SearchQuery {
+         e_nativeretweets: Some("on".to_owned()),
+         f_media: Some("on".to_owned()),
+         e_replies: Some("on".to_owned()),
+         since: Some("2024-01-01".to_owned()),
+         ..SearchQuery::default()
+      };
+      let api = query.profile_api_query("alice");
+      assert!(api.starts_with("from:alice "), "{api}");
+      assert!(!api.contains("include:nativeretweets"), "{api}");
+      assert!(api.contains("filter:media"), "{api}");
+      assert!(api.contains("-filter:replies"), "{api}");
+      assert!(api.contains("since:2024-01-01"), "{api}");
+      let filters = query.to_filters();
+      assert!(filters.exclude_retweets);
+      assert!(filters.media);
+      assert!(filters.exclude_replies);
+      assert_eq!(filters.since, "2024-01-01");
+   }
+
+   #[test]
+   fn legacy_retweet_param_is_the_same_switch() {
+      let mut value = serde_json::Map::new();
+      for key in [
+         "q",
+         "f",
+         "cursor",
+         "view",
+         "from",
+         "since",
+         "until",
+         "min_faves",
+         "f-media",
+         "f-images",
+         "f-videos",
+         "f-links",
+         "f-news",
+         "f-quote",
+         "f-verified",
+         "e-replies",
+         "scroll",
+         "cf-turnstile-response",
+      ] {
+         value.insert(key.to_owned(), serde_json::Value::Null);
+      }
+      value.insert("e-retweets".to_owned(), serde_json::json!("on"));
+      let parsed: SearchQuery =
+         serde_json::from_value(serde_json::Value::Object(value)).expect("alias");
+      assert_eq!(parsed.e_nativeretweets.as_deref(), Some("on"));
+      assert!(parsed.to_filters().exclude_retweets);
+      assert_eq!(parsed.profile_api_query("alice"), "from:alice");
+   }
 }

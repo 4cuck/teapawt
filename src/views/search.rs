@@ -403,7 +403,11 @@ pub fn render_search_panel_with_action(
                            p { (if *prefix == "filter" { "Only show posts containing:" } else { "Hide posts containing:" }) }
                            div class="search-toggles" {
                                @let pfx = &prefix[..1];
-                               (gen_search_checkbox(&format!("{pfx}-nativeretweets"), "Retweets", false))
+                               (gen_search_checkbox(
+                                  &format!("{pfx}-nativeretweets"),
+                                  "Retweets",
+                                  *prefix == "exclude" && filt.exclude_retweets,
+                               ))
                                (gen_search_checkbox(&format!("{pfx}-media"), "Media", if *prefix == "filter" { filt.media } else { false }))
                                (gen_search_checkbox(&format!("{pfx}-videos"), "Videos", if *prefix == "filter" { filt.videos } else { false }))
                                (gen_search_checkbox(&format!("{pfx}-news"), "News", if *prefix == "filter" { filt.news } else { false }))
@@ -494,5 +498,46 @@ fn gen_search_checkbox(name: &str, label: &str, checked: bool) -> Markup {
            input id=(id) type="checkbox" name=(name) value="on" checked[checked];
            span class="checkbox" {}
        }
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::{SearchFilters, render_search_panel_with_action};
+
+   fn checkbox_is_checked(html: &str, name: &str) -> bool {
+      let needle = format!("name=\"{name}\"");
+      let Some(pos) = html.find(&needle) else {
+         return false;
+      };
+      let tag_start = html[..pos].rfind("<input").unwrap_or(pos);
+      let tag_end = html[pos..].find('>').map_or(html.len(), |end| pos + end);
+      html[tag_start..=tag_end].contains("checked")
+   }
+
+   #[test]
+   fn exclude_retweets_checkbox_stays_checked() {
+      let filters = SearchFilters {
+         exclude_retweets: true,
+         ..SearchFilters::default()
+      };
+      let html = render_search_panel_with_action("candy", Some(&filters), "/alice/search", "tweets", "")
+         .into_string();
+      assert!(
+         checkbox_is_checked(&html, "e-nativeretweets"),
+         "exclude retweets was reset: {html}"
+      );
+      assert!(
+         !checkbox_is_checked(&html, "f-nativeretweets"),
+         "include retweets was turned on"
+      );
+      assert!(html.contains(r#"name="e-replies""#));
+   }
+
+   #[test]
+   fn exclude_retweets_checkbox_starts_clear() {
+      let html =
+         render_search_panel_with_action("", None, "/alice/search", "tweets", "").into_string();
+      assert!(!checkbox_is_checked(&html, "e-nativeretweets"));
    }
 }

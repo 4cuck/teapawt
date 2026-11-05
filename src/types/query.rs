@@ -344,4 +344,19 @@ mod tests {
       let query = Query::parse("from:alice hello", QueryKind::Posts);
       assert!(query.build().contains("include:nativeretweets"));
    }
+
+   #[test]
+   fn excluding_nativeretweets_drops_the_forced_include() {
+      let mut query = Query::parse("from:alice", QueryKind::Posts);
+      query.excludes.push("nativeretweets".to_owned());
+      let built = query.build();
+      assert!(
+         !built.contains("include:nativeretweets"),
+         "built query was {built}"
+      );
+      assert!(
+         !built.contains("-filter:nativeretweets"),
+         "built query was {built}"
+      );
+   }
 }
