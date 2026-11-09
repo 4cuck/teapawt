@@ -105,6 +105,16 @@ impl Encoder {
         let span = tracing::trace_span!("hpack::encode");
         let _e = span.enter();
 
+        // The table reset itself during an earlier block. Shrinking to 0
+        // and back makes the peer drop the same entries.
+        if self.table.take_resync() {
+            let max = match self.size_update {
+                Some(SizeUpdate::One(max) | SizeUpdate::Two(_, max)) => max,
+                None => self.table.max_size(),
+            };
+            self.size_update = Some(SizeUpdate::Two(0, max));
+        }
+
         self.encode_size_updates(dst);
 
         let mut last_index = None;
@@ -749,6 +759,48 @@ mod test {
     #[ignore]
     fn test_evicted_overflow() {
         // Not sure what the best way to do this is.
+    }
+
+    #[test]
+    fn table_reset_keeps_the_peer_decoding_the_same_headers() {
+        use super::super::Decoder;
+        use std::io::Cursor;
+        use std::ops::ControlFlow;
+
+        let mut encoder = Encoder::default();
+        let mut decoder = Decoder::default();
+        let mut round_trip = |encoder: &mut Encoder, hdrs: Vec<(&str, &str)>| {
+            let sent: Vec<_> = hdrs.iter().map(|(n, v)| header(n, v)).collect();
+            let mut buf = encode(encoder, sent);
+            let wire = buf.clone();
+            let mut got = vec![];
+            decoder
+                .decode(&mut Cursor::new(&mut buf), |h| {
+                    if let Header::Field { name, value } = h {
+                        got.push((name.to_string(), value.to_str().unwrap().to_owned()));
+                    }
+                    ControlFlow::Continue(())
+                })
+                .expect("decode");
+            let want: Vec<_> = hdrs
+                .iter()
+                .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
+                .collect();
+            assert_eq!(got, want);
+            wire
+        };
+
+        round_trip(&mut encoder, vec![("x-a", "1"), ("x-b", "2"), ("accept", "*/*")]);
+        encoder.table.skew_size(10_000);
+        // Literals for the rest of this block, after the table resets.
+        round_trip(&mut encoder, vec![("x-c", "3"), ("x-a", "1")]);
+        assert_eq!(0, encoder.table.len());
+
+        // Opens with a size update to 0 and back, then indexes again.
+        let buf = round_trip(&mut encoder, vec![("x-d", "4"), ("x-d", "4")]);
+        assert_eq!(&buf[..3], &[0x20, 0x3f, 0xe1]);
+        assert_eq!(1, encoder.table.len());
+        round_trip(&mut encoder, vec![("x-d", "4"), ("x-a", "1")]);
     }
 
     fn encode(e: &mut Encoder, hdrs: Vec<Header<Option<HeaderName>>>) -> BytesMut {

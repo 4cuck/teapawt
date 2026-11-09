@@ -180,6 +180,119 @@ impl FuzzHpack {
     }
 }
 
+/// Encoder-only stress at the 64 KiB table limit this fork allows (upstream h2
+/// caps at 4 KiB, which the round-trip fuzz above stays under).
+#[test]
+fn hpack_encoder_large_table_stress() {
+    let seeds: u64 = std::env::var("HPACK_STRESS_SEEDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+    for seed in 0..seeds {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let source: Vec<_> = (0..4000).map(|_| gen_header(&mut rng)).collect();
+        let mut encoder = Encoder::default();
+        for _ in 0..3000 {
+            match rng.random_range(0..12) {
+                0 => encoder.update_max_size(rng.random_range(0..=128 * 1024)),
+                1 => {
+                    let high = rng.random_range(1..=128 * 1024);
+                    encoder.update_max_size(rng.random_range(0..high));
+                    encoder.update_max_size(high);
+                }
+                _ => {}
+            }
+            let mut frame = vec![];
+            let mut named = false;
+            for _ in 0..rng.random_range(1..60) {
+                let header = source[rng.random_range(0..source.len())].clone();
+                match &header {
+                    Header::Field { name: None, .. } if !named => continue,
+                    Header::Field { .. } => named = true,
+                    _ => named = false,
+                }
+                frame.push(header);
+            }
+            if rng.random_ratio(1, 50) {
+                let len = rng.random_range(100..70_000);
+                let big = gen_string(&mut rng, 0, len);
+                frame.push(Header::Field {
+                    name: Some(gen_header_name(&mut rng)),
+                    value: HeaderValue::from_bytes(big.as_bytes()).unwrap(),
+                });
+            }
+            let mut buf = BytesMut::new();
+            encoder.encode(frame, &mut buf);
+        }
+    }
+}
+
+/// Mirrors a long-lived API connection: the same browser header set on every
+/// request plus a few headers whose value is unique per request, so one name
+/// accumulates a long chain of values in a large table.
+#[test]
+fn hpack_encoder_unique_value_chains() {
+    let seeds: u64 = std::env::var("HPACK_STRESS_SEEDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
+    let fixed: Vec<(&str, String)> = vec![
+        ("accept", "*/*".into()),
+        ("accept-language", "en-US,en;q=0.9".into()),
+        ("content-type", "application/json".into()),
+        ("user-agent", "Mozilla/5.0 (X11; Linux x86_64) Chrome/142".into()),
+        ("x-twitter-active-user", "yes".into()),
+        ("x-twitter-auth-type", "OAuth2Session".into()),
+        ("x-twitter-client-language", "en".into()),
+    ];
+    for seed in 0..seeds {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut encoder = Encoder::default();
+        if rng.random_ratio(1, 2) {
+            encoder.update_max_size(64 * 1024);
+        }
+        for request in 0..20_000u32 {
+            if rng.random_ratio(1, 2000) {
+                encoder.update_max_size(rng.random_range(0..=64 * 1024));
+            }
+            let path_len = rng.random_range(40..900);
+            let mut frame = vec![
+                Header::Method(http::Method::GET),
+                Header::Scheme(to_shared("https".into())),
+                Header::Authority(to_shared("x.com".into())),
+                Header::Path(to_shared(format!(
+                    "/i/api/graphql/abc/Op?variables={}",
+                    gen_string(&mut rng, 20, path_len)
+                ))),
+            ];
+            for (name, value) in &fixed {
+                frame.push(Header::Field {
+                    name: Some(HeaderName::from_static(name)),
+                    value: HeaderValue::from_str(value).unwrap(),
+                });
+            }
+            for name in ["x-client-transaction-id", "x-csrf-token", "referer"] {
+                if name == "x-csrf-token" && request % 50 != 0 {
+                    continue;
+                }
+                let len = rng.random_range(60..200);
+                frame.push(Header::Field {
+                    name: Some(HeaderName::from_static(name)),
+                    value: HeaderValue::from_str(&gen_string(&mut rng, 0, len)).unwrap(),
+                });
+            }
+            let mut cookie = HeaderValue::from_str(&gen_string(&mut rng, 0, 400)).unwrap();
+            cookie.set_sensitive(rng.random_ratio(1, 3));
+            frame.push(Header::Field {
+                name: Some(http::header::COOKIE),
+                value: cookie,
+            });
+            let mut buf = BytesMut::new();
+            encoder.encode(frame, &mut buf);
+        }
+    }
+}
+
 impl Arbitrary for FuzzHpack {
     fn arbitrary(_: &mut Gen) -> Self {
         FuzzHpack::new(rng().random())

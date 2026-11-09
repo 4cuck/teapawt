@@ -23,6 +23,13 @@ pub struct Table {
     // learning the seed on one connection must not get collisions for
     // free on all others).
     seed: RandomState,
+    // The table found its entries, index and byte count out of step and
+    // emptied itself. The peer's decoder still holds the dropped entries,
+    // so the encoder clears both sides with a size update to 0 at the start
+    // of the next block. Eviction used to unwrap here, and with
+    // `panic = "abort"` one bad table took down every connection in the
+    // process.
+    resync: bool,
 }
 
 #[derive(Debug)]
@@ -87,6 +94,7 @@ impl Table {
                 size: 0,
                 max_size,
                 seed: RandomState::default(),
+                resync: false,
             }
         } else {
             let capacity = cmp::max(to_raw_capacity(capacity).next_power_of_two(), 8);
@@ -99,6 +107,7 @@ impl Table {
                 size: 0,
                 max_size,
                 seed: RandomState::default(),
+                resync: false,
             }
         }
     }
@@ -110,6 +119,12 @@ impl Table {
 
     pub fn max_size(&self) -> usize {
         self.max_size
+    }
+
+    /// Whether the table reset itself since the last call. The caller owes
+    /// the peer a size update to 0 before the next header block.
+    pub fn take_resync(&mut self) -> bool {
+        mem::take(&mut self.resync)
     }
 
     /// Gets the header stored in the table
@@ -141,6 +156,12 @@ impl Table {
     pub fn index(&mut self, header: Header) -> Index {
         // Check the static table
         let statik = index_static(&header);
+
+        // Out of step with the peer until the next size update: send
+        // literals, which never touch either side's dynamic table.
+        if self.resync {
+            return Index::new(statik, header);
+        }
 
         // Don't index certain headers. This logic is borrowed from nghttp2.
         if header.skip_value_index() {
@@ -242,6 +263,12 @@ impl Table {
             }
 
             self.update_size(header.len(), Some(index));
+            if self.resync {
+                return match statik {
+                    Some(n) => Index::Name(n, header),
+                    None => Index::NotIndexed(header),
+                };
+            }
 
             // Insert the new header
             self.insert(header, hash);
@@ -287,7 +314,11 @@ impl Table {
 
         // Passing in `usize::MAX` for prev_idx since there is no previous
         // header in this case.
-        if self.update_size(header.len(), None) {
+        let evicted = self.update_size(header.len(), None);
+        if self.resync {
+            return Index::new(statik, header);
+        }
+        if evicted {
             while dist != 0 {
                 let back = probe.wrapping_sub(1) & self.mask;
 
@@ -376,39 +407,40 @@ impl Table {
 
         while self.size > self.max_size {
             ret = true;
-            self.evict(prev_idx);
+            if !self.evict(prev_idx) {
+                break;
+            }
         }
 
         ret
     }
 
-    fn evict(&mut self, prev_idx: Option<usize>) {
-        let pos_idx = (self.slots.len() - 1).wrapping_sub(self.inserted);
-
-        debug_assert!(!self.slots.is_empty());
+    /// Drops the oldest entry. False when the entries, the index and the
+    /// byte count disagree about it; the table has then been reset.
+    fn evict(&mut self, prev_idx: Option<usize>) -> bool {
         debug_assert!(self.assert_valid_state("one"));
 
         // Remove the header
-        let slot = self.slots.pop_back().unwrap();
-        let mut probe = desired_pos(self.mask, slot.hash);
+        let Some(slot) = self.slots.pop_back() else {
+            self.reset("byte count over the limit with no entry left to evict");
+            return false;
+        };
+        let pos_idx = self.slots.len().wrapping_sub(self.inserted);
 
         // Update the size
-        self.size -= slot.header.len();
+        let Some(size) = self.size.checked_sub(slot.header.len()) else {
+            self.reset("evicted entry larger than the table's byte count");
+            return false;
+        };
+        self.size = size;
 
-        debug_assert_eq!(
-            self.indices
-                .iter()
-                .filter_map(|p| *p)
-                .filter(|p| p.index == pos_idx)
-                .count(),
-            1
-        );
-
-        // Find the associated position
-        probe_loop!(probe < self.indices.len(), {
-            debug_assert!(self.indices[probe].is_some());
-
-            let mut pos = self.indices[probe].unwrap();
+        // Find the associated position. A consistent table reaches it before
+        // an empty bucket; at most one pass over the index either way.
+        let mut probe = desired_pos(self.mask, slot.hash);
+        for _ in 0..self.indices.len() {
+            let Some(mut pos) = self.indices[probe] else {
+                break;
+            };
 
             if pos.index == pos_idx {
                 if let Some(idx) = slot.next {
@@ -422,11 +454,32 @@ impl Table {
                     self.remove_phase_two(probe);
                 }
 
-                break;
+                debug_assert!(self.assert_valid_state("two"));
+                return true;
             }
-        });
 
-        debug_assert!(self.assert_valid_state("two"));
+            probe = (probe + 1) & self.mask;
+        }
+
+        self.reset("evicted entry missing from the index");
+        false
+    }
+
+    /// Empties the table after it was found inconsistent, and owes the peer
+    /// a size update so its decoder empties too.
+    fn reset(&mut self, why: &'static str) {
+        tracing::warn!(
+            why,
+            entries = self.slots.len(),
+            size = self.size,
+            max_size = self.max_size,
+            "hpack encoder table out of step; resetting it"
+        );
+        self.indices.fill(None);
+        self.slots.clear();
+        self.inserted = 0;
+        self.size = 0;
+        self.resync = true;
     }
 
     // Shifts all indices that were displaced by the header that has just been
@@ -634,6 +687,11 @@ impl Table {
     pub fn size(&self) -> usize {
         self.size
     }
+
+    /// Counts bytes no entry accounts for, as a desynced table would.
+    pub fn skew_size(&mut self, by: usize) {
+        self.size += by;
+    }
 }
 
 impl Index {
@@ -801,5 +859,54 @@ mod tests {
         let table = Table::new(4096, 4096);
         let h = custom_header("x-stable", "v");
         assert_eq!(hash_header(&table.seed, &h), hash_header(&table.seed, &h));
+    }
+
+    #[test]
+    fn byte_count_ahead_of_entries_resets_instead_of_panicking() {
+        let mut table = Table::new(256, 0);
+        table.index(custom_header("x-a", "1"));
+        table.index(custom_header("x-b", "2"));
+        // Bytes no entry accounts for: eviction runs out of entries. This
+        // was `pop_back().unwrap()` on an empty table.
+        table.size += 10_000;
+
+        let next = table.index(custom_header("x-c", "3"));
+        assert!(matches!(next, Index::NotIndexed(..)), "{next:?}");
+        assert_eq!((table.len(), table.size()), (0, 0));
+
+        // Literals only until the encoder has told the peer.
+        let again = table.index(custom_header("x-c", "3"));
+        assert!(matches!(again, Index::NotIndexed(..)), "{again:?}");
+        assert!(table.take_resync());
+        assert!(!table.take_resync());
+        let fresh = table.index(custom_header("x-c", "3"));
+        assert!(matches!(fresh, Index::Inserted(0)), "{fresh:?}");
+    }
+
+    #[test]
+    fn entry_missing_from_index_resets_instead_of_panicking() {
+        let mut table = Table::new(4096, 0);
+        table.index(custom_header("x-a", "1"));
+        table.index(custom_header("x-b", "2"));
+        table.indices.fill(None);
+
+        table.resize(40);
+        assert_eq!((table.len(), table.size()), (0, 0));
+        assert!(table.take_resync());
+    }
+
+    #[test]
+    fn reset_inside_a_chain_of_one_name_keeps_static_name() {
+        let mut table = Table::new(256, 0);
+        let accept = |v: &str| Header::Field {
+            name: header::ACCEPT,
+            value: v.parse().unwrap(),
+        };
+        table.index(accept("a"));
+        table.size += 10_000;
+
+        let next = table.index(accept("b"));
+        assert!(matches!(next, Index::Name(19, _)), "{next:?}");
+        assert!(table.take_resync());
     }
 }
