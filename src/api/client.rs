@@ -1309,7 +1309,18 @@ impl ApiClient {
                   endpoint,
                   "X edge rate-limited this proxy exit"
                );
-               // The edge block is the IP, not this account's window.
+               // The edge block is the IP, not this account's window. Without
+               // parking, every account pinned there kept walking into it.
+               let egress = self.egress_for(session);
+               if let Some(proxy) = egress.proxy.as_ref()
+                  && let Some(cooldown) = self.client.park_throttled_exit(proxy)
+               {
+                  tracing::warn!(
+                     port = proxy.port,
+                     cooldown_secs = cooldown.as_secs(),
+                     "X edge rate-limited proxy exit; parking it"
+                  );
+               }
                self.sessions.refund_if_metered(session, endpoint).await;
                return Err(Error::IpThrottled);
             }

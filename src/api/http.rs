@@ -69,8 +69,15 @@ const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// request through the fallback exits.
 const DIRECT_BLOCK_FOR: Duration = Duration::from_secs(5 * 60);
 /// An X/Cloudflare HTML 429 is tied to the public IP, not the account. Park
-/// that SOCKS exit long enough for the edge window to clear.
-const EXIT_BLOCK_FOR: Duration = Duration::from_secs(5 * 60);
+/// that SOCKS exit long enough for the edge window to clear, longer each time
+/// it is throttled again soon after coming back: a flat five minutes put
+/// 1101 and 1103 back in rotation to be throttled about 1,100 times each in
+/// one evening.
+const EDGE_PARKING: Parking = Parking {
+   first: Duration::from_mins(5),
+   max: Duration::from_hours(2),
+   memory: Duration::from_mins(30),
+};
 /// Headers later than this count against the exit that carried the call.
 const SLOW_HEADERS: Duration = Duration::from_secs(1);
 /// A call dropped unanswered this late, because another copy answered
@@ -86,12 +93,40 @@ const SLOW_EXIT_SHARE: f64 = 0.25;
 /// And that share against the fleet's median. When X is slow for every exit,
 /// none of them is the problem.
 const SLOW_EXIT_VS_FLEET: f64 = 3.0;
-/// First parking for slowness. It doubles while the exit keeps relapsing.
-const SLOW_PARK_FIRST: Duration = Duration::from_mins(2);
-const SLOW_PARK_MAX: Duration = Duration::from_mins(30);
-/// An exit that stays healthy this long after its parking ends starts over
-/// at [`SLOW_PARK_FIRST`].
-const SLOW_PARK_MEMORY_MS: u64 = 10 * 60 * 1000;
+/// Parking for slowness, doubling while the exit keeps relapsing.
+const SLOW_PARKING: Parking = Parking {
+   first: Duration::from_mins(2),
+   max: Duration::from_mins(30),
+   memory: Duration::from_mins(10),
+};
+
+/// How long an exit stays out, by how often it has come back and failed
+/// again: `first`, doubling per relapse up to `max`. A relapse is a new
+/// parking within `memory` of the last one ending.
+#[derive(Clone, Copy, Debug)]
+struct Parking {
+   first: Duration,
+   max: Duration,
+   memory: Duration,
+}
+
+impl Parking {
+   /// Relapse count and parking length for a new parking at `now`, given the
+   /// last parking's count and end.
+   fn next(&self, (count, last_until): (u32, u64), now: u64) -> (u32, Duration) {
+      let memory = u64::try_from(self.memory.as_millis()).unwrap_or(u64::MAX);
+      let count = if last_until.saturating_add(memory) > now {
+         count.saturating_add(1)
+      } else {
+         0
+      };
+      let park = self
+         .first
+         .saturating_mul(1_u32 << count.min(8))
+         .min(self.max);
+      (count, park)
+   }
+}
 /// Exits that stay in rotation on a pool this size or smaller. The tests use
 /// a handful of ports and still park one.
 const SMALL_POOL: usize = 4;
@@ -234,8 +269,11 @@ struct PrimaryPool {
    tags: HashSet<u64>,
    blocked_until: Mutex<HashMap<u64, u64>>,
    samples: Mutex<HashMap<u64, ExitSamples>>,
-   /// Slow parkings in a row per exit, and when the last one ends.
+   /// Parkings in a row per exit, and when the last one ends: for slowness,
+   /// and for X's edge throttling its IP. Kept apart so a slow spell does not
+   /// lengthen the next throttle parking or the other way round.
    relapses: Mutex<HashMap<u64, (u32, u64)>>,
+   edge_relapses: Mutex<HashMap<u64, (u32, u64)>>,
    /// Exits named in the ban file: a Cloudflare block until it lapses, any
    /// other line until it is deleted. Kept across restarts.
    banned: Mutex<HashSet<u64>>,
@@ -250,6 +288,7 @@ impl PrimaryPool {
          blocked_until: Mutex::new(HashMap::new()),
          samples: Mutex::new(HashMap::new()),
          relapses: Mutex::new(HashMap::new()),
+         edge_relapses: Mutex::new(HashMap::new()),
          banned: Mutex::new(HashSet::new()),
          banned_file: None,
       }
@@ -422,24 +461,22 @@ impl PrimaryPool {
       if blocked.contains_key(&tag) || blocked.len() + banned >= self.out_cap() {
          return None;
       }
-      let (park, until) = self.next_parking(tag, now)?;
+      let (park, until) = Self::next_parking(&self.relapses, &SLOW_PARKING, tag, now)?;
       blocked.insert(tag, until);
       Some(park)
    }
 
-   /// How long to park this exit, doubled when it relapsed soon after its
-   /// last parking ended, and the moment that ends.
-   fn next_parking(&self, tag: u64, now: u64) -> Option<(Duration, u64)> {
-      let mut relapses = self.relapses.lock().ok()?;
-      let (count, last_until) = relapses.get(&tag).copied().unwrap_or((0, 0));
-      let count = if last_until.saturating_add(SLOW_PARK_MEMORY_MS) > now {
-         count.saturating_add(1)
-      } else {
-         0
-      };
-      let park = SLOW_PARK_FIRST
-         .saturating_mul(1_u32 << count.min(8))
-         .min(SLOW_PARK_MAX);
+   /// How long to park this exit under `parking`, given its `history` of
+   /// parkings of the same kind, and the moment that ends.
+   fn next_parking(
+      history: &Mutex<HashMap<u64, (u32, u64)>>,
+      parking: &Parking,
+      tag: u64,
+      now: u64,
+   ) -> Option<(Duration, u64)> {
+      let mut relapses = history.lock().ok()?;
+      let last = relapses.get(&tag).copied().unwrap_or((0, 0));
+      let (count, park) = parking.next(last, now);
       let until = now.saturating_add(u64::try_from(park.as_millis()).unwrap_or(u64::MAX));
       relapses.insert(tag, (count, until));
       drop(relapses);
@@ -482,29 +519,25 @@ impl PrimaryPool {
          .is_some_and(|until| until > unix_millis())
    }
 
-   /// Returns true only for the first report in a cooldown window, so a burst
-   /// of in-flight responses produces one useful warning rather than hundreds.
-   /// Refuses a new block once too few exits would remain.
-   fn block(&self, proxy: &ProxyConfig) -> bool {
+   /// Parks the exit after X's edge throttled its IP. Returns how long only
+   /// for the report that opened the parking, so a burst of in-flight
+   /// responses produces one warning rather than hundreds and counts as one
+   /// relapse. Refuses a new parking once too few exits would remain.
+   fn block(&self, proxy: &ProxyConfig) -> Option<Duration> {
       let tag = proxy_tag(Some(proxy));
       if !self.tags.contains(&tag) {
-         return false;
+         return None;
       }
       let now = unix_millis();
-      let until = now.saturating_add(EXIT_BLOCK_FOR.as_millis() as u64);
       let banned = self.banned_tags().len();
-      let Ok(mut blocked) = self.blocked_until.lock() else {
-         return false;
-      };
+      let mut blocked = self.blocked_until.lock().ok()?;
       blocked.retain(|_, ends| *ends > now);
-      let already = blocked.contains_key(&tag);
-      if !already && blocked.len() + banned >= self.out_cap() {
-         return false;
+      if blocked.contains_key(&tag) || blocked.len() + banned >= self.out_cap() {
+         return None;
       }
-      let previous = blocked.entry(tag).or_insert(0);
-      let newly_blocked = *previous <= now;
-      *previous = (*previous).max(until);
-      newly_blocked
+      let (park, until) = Self::next_parking(&self.edge_relapses, &EDGE_PARKING, tag, now)?;
+      blocked.insert(tag, until);
+      Some(park)
    }
 
    /// Pick a deterministic healthy failover for this account. Stability keeps
@@ -643,7 +676,8 @@ impl HttpClient {
       if !proxies.is_empty() {
          tracing::info!(
             exits = proxies.len(),
-            cooldown_secs = EXIT_BLOCK_FOR.as_secs(),
+            first_cooldown_secs = EDGE_PARKING.first.as_secs(),
+            max_cooldown_secs = EDGE_PARKING.max.as_secs(),
             "proxy exit circuit breaker ready"
          );
          let mut pool = PrimaryPool::new(proxies, tags);
@@ -687,6 +721,13 @@ impl HttpClient {
       self.primary_pool
          .as_ref()
          .is_some_and(|pool| pool.ban(proxy))
+   }
+
+   /// X's edge throttled this exit's IP: a 429 with no account window that
+   /// reached the caller. Parks it like an edge block seen here, and returns
+   /// the cooldown when this call started one.
+   pub fn park_throttled_exit(&self, proxy: &ProxyConfig) -> Option<Duration> {
+      self.primary_pool.as_ref()?.block(proxy)
    }
 
    fn note_exit(&self, via: Option<&Egress>, slow: bool) {
@@ -855,16 +896,11 @@ impl HttpClient {
       })
    }
 
-   /// Park a primary exit after an HTML 429. Returns true when this call
-   /// opened a new cooldown window.
-   fn block_primary(&self, egress: &Egress) -> bool {
-      let Some(proxy) = egress.proxy.as_ref() else {
-         return false;
-      };
-      self
-         .primary_pool
-         .as_ref()
-         .is_some_and(|pool| pool.block(proxy))
+   /// Park a primary exit after an HTML 429. Returns the cooldown when this
+   /// call opened a new one.
+   fn block_primary(&self, egress: &Egress) -> Option<Duration> {
+      let proxy = egress.proxy.as_ref()?;
+      self.primary_pool.as_ref()?.block(proxy)
    }
 
    fn is_primary(&self, egress: &Egress) -> bool {
@@ -990,10 +1026,10 @@ impl HttpClient {
             .as_ref()
             .map(|proxy| proxy.port)
             .unwrap_or(0);
-         if self.block_primary(blocked_via) {
+         if let Some(cooldown) = self.block_primary(blocked_via) {
             tracing::warn!(
                port,
-               cooldown_secs = EXIT_BLOCK_FOR.as_secs(),
+               cooldown_secs = cooldown.as_secs(),
                "X edge rate-limited proxy exit; parking it"
             );
          }
@@ -1017,10 +1053,10 @@ impl HttpClient {
             if matches!(&retry, Ok(response) if is_edge_block(response.status(), response.headers()))
             {
                let retry_port = alternate_port;
-               if self.block_primary(&alternate) {
+               if let Some(cooldown) = self.block_primary(&alternate) {
                   tracing::warn!(
                      port = retry_port,
-                     cooldown_secs = EXIT_BLOCK_FOR.as_secs(),
+                     cooldown_secs = cooldown.as_secs(),
                      "X edge rate-limited replacement proxy exit; parking it"
                   );
                }
@@ -1900,8 +1936,8 @@ mod tests {
          proxy: Some(proxy_on(10001)),
       };
       assert!(!client.primary_is_blocked(&pinned));
-      assert!(client.block_primary(&pinned));
-      assert!(!client.block_primary(&pinned));
+      assert_eq!(client.block_primary(&pinned), Some(EDGE_PARKING.first));
+      assert_eq!(client.block_primary(&pinned), None);
       assert!(client.primary_is_blocked(&pinned));
 
       let alternate = client.alternate_primary(&pinned).unwrap();
@@ -1913,7 +1949,7 @@ mod tests {
       );
 
       // If the replacement is blocked too, the remaining healthy exit wins.
-      assert!(client.block_primary(&alternate));
+      assert!(client.block_primary(&alternate).is_some());
       let next = client.alternate_primary(&pinned).unwrap();
       assert_ne!(
          next.proxy.as_ref().unwrap().port,
@@ -1947,7 +1983,7 @@ mod tests {
       }
       let slow = &proxies[1];
       let parked = (0..30).find_map(|_| pool.record(slow, true));
-      assert_eq!(parked, Some(SLOW_PARK_FIRST));
+      assert_eq!(parked, Some(SLOW_PARKING.first));
       assert_eq!(client.parked_exits().len(), 1);
 
       let pinned = Egress {
@@ -1987,12 +2023,52 @@ mod tests {
       );
       let tag = proxy_tag(Some(&proxies[0]));
       let now = unix_millis();
-      assert_eq!(pool.park_slow(tag, now), Some(SLOW_PARK_FIRST));
+      let first = SLOW_PARKING.first;
+      assert_eq!(pool.park_slow(tag, now), Some(first));
       assert_eq!(pool.park_slow(tag, now), None, "already parked");
-      let after = now + SLOW_PARK_FIRST.as_millis() as u64 + 1;
-      assert_eq!(pool.park_slow(tag, after), Some(SLOW_PARK_FIRST * 2));
-      let healed = after + (SLOW_PARK_FIRST * 2).as_millis() as u64 + SLOW_PARK_MEMORY_MS + 1;
-      assert_eq!(pool.park_slow(tag, healed), Some(SLOW_PARK_FIRST));
+      let after = now + first.as_millis() as u64 + 1;
+      assert_eq!(pool.park_slow(tag, after), Some(first * 2));
+      let healed =
+         after + (first * 2).as_millis() as u64 + SLOW_PARKING.memory.as_millis() as u64 + 1;
+      assert_eq!(pool.park_slow(tag, healed), Some(first));
+   }
+
+   #[test]
+   fn an_exit_the_edge_keeps_throttling_stays_out_longer_each_time() {
+      let parking = EDGE_PARKING;
+      let mins = |n| Duration::from_mins(n);
+      let at = |park: Duration| u64::try_from(park.as_millis()).unwrap();
+      let mut history = (0, 0);
+      let mut now = unix_millis();
+      let mut parked = Vec::new();
+      for _ in 0..7 {
+         let (count, park) = parking.next(history, now);
+         parked.push(park);
+         history = (count, now + at(park));
+         // Throttled again a minute after coming back.
+         now += at(park) + at(mins(1));
+      }
+      assert_eq!(
+         parked,
+         [mins(5), mins(10), mins(20), mins(40), mins(80), mins(120), mins(120)]
+      );
+      // Half an hour clean starts it over.
+      now += at(parking.memory);
+      assert_eq!(parking.next(history, now).1, mins(5));
+   }
+
+   #[test]
+   fn edge_and_slow_parkings_keep_separate_histories() {
+      let proxies = (10001..=10003).map(proxy_on).collect::<Vec<_>>();
+      let pool = PrimaryPool::new(
+         proxies.clone(),
+         proxies.iter().map(|proxy| proxy_tag(Some(proxy))).collect(),
+      );
+      let tag = proxy_tag(Some(&proxies[0]));
+      assert_eq!(pool.park_slow(tag, unix_millis()), Some(SLOW_PARKING.first));
+      // Out early by hand: a slow spell just before must not double this.
+      pool.blocked_until.lock().unwrap().clear();
+      assert_eq!(pool.block(&proxies[0]), Some(EDGE_PARKING.first));
    }
 
    #[test]
@@ -2095,7 +2171,7 @@ mod tests {
       assert!(pool
          .parked()
          .iter()
-         .all(|(_, secs)| *secs <= SLOW_PARK_MAX.as_secs()));
+         .all(|(_, secs)| *secs <= EDGE_PARKING.first.max(SLOW_PARKING.first).as_secs()));
       assert_ne!(pool.alternate(7, slow).unwrap().port, slow.port);
    }
 
