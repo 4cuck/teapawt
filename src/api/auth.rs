@@ -9,7 +9,7 @@ use std::{
       Arc,
       atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
    },
-   time::{Duration, SystemTime, UNIX_EPOCH},
+   time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use data_encoding::BASE64;
@@ -27,7 +27,10 @@ use crate::{
    types::{Headroom, RateLimit, Session, SessionCredentials, SessionKind, SessionLimits, Spend},
 };
 
-use super::limits_db;
+use super::{
+   limits_db,
+   queue::{AccountQueue, Outcome},
+};
 
 #[derive(Serialize)]
 pub struct HealthResponse {
@@ -81,6 +84,8 @@ pub struct SessionPool {
    /// Signaled after a lease returns its permit, so a caller blocked on a full
    /// pool can take whichever account freed rather than one chosen up front.
    freed: Arc<Notify>,
+   /// Time each call spent getting an account, reported every minute.
+   queue: Arc<AccountQueue>,
 }
 
 /// Writes one account at a time. The JSON path remains only for a deployment
@@ -269,6 +274,7 @@ impl SessionPool {
          state,
          source_path: path.to_owned(),
          freed: Arc::new(Notify::new()),
+         queue: Arc::default(),
       };
       pool.spawn_flusher();
 
@@ -467,12 +473,27 @@ impl SessionPool {
          return Err(Error::NoSessions);
       }
 
+      let started = Instant::now();
+      let label = api_for(required_kind.unwrap_or(SessionKind::Cookie));
+      let note = |outcome| self.queue.record(label, started.elapsed(), outcome);
       loop {
          let mut limits = self.limits.write().await;
          match self.scan(&mut limits, &api_for, required_kind, &accept, false) {
-            Ok(lease) => return Ok(lease),
-            Err(Miss::Nobody) => return Err(Error::NoSessions),
-            Err(Miss::Spent) => return Err(Error::RateLimited),
+            Ok(lease) => {
+               drop(limits);
+               note(Outcome::Leased);
+               return Ok(lease);
+            },
+            Err(Miss::Nobody) => {
+               drop(limits);
+               note(Outcome::Nobody);
+               return Err(Error::NoSessions);
+            },
+            Err(Miss::Spent) => {
+               drop(limits);
+               note(Outcome::Spent);
+               return Err(Error::RateLimited);
+            },
             Err(Miss::Busy) => {},
          }
          let waiter = self.freed.notified();
@@ -506,6 +527,12 @@ impl SessionPool {
       self
          .scan(&mut limits, &|_| api, required_kind, &accept, true)
          .ok()
+   }
+
+   /// One line per operation that asked for an account since the last call:
+   /// how many got one, how long that took, and how many were turned away.
+   pub(crate) fn queue_report(&self) -> Vec<String> {
+      self.queue.report()
    }
 
    /// Flag the accounts pinned to an exit that trails the fleet, so they are

@@ -479,6 +479,9 @@ impl ApiClient {
             for line in api.latency.report() {
                tracing::info!("upstream {line}");
             }
+            for line in api.sessions.queue_report() {
+               tracing::info!("account queue {line}");
+            }
             let parked = api.client.parked_exits();
             if !parked.is_empty() {
                tracing::info!(?parked, "proxy exits parked (port, seconds left)");
