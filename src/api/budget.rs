@@ -23,7 +23,10 @@ pub struct Tier {
 }
 
 /// Widening horizons. The tightest tier decides.
-const TIERS: [Tier; 3] = [
+pub type Tiers = [Tier; 3];
+
+/// Every upstream call, when `clientBudget` is on.
+pub const READER_TIERS: Tiers = [
    Tier {
       refill_per_sec: 5.0,
       capacity: 100.0,
@@ -38,6 +41,25 @@ const TIERS: [Tier; 3] = [
    },
 ];
 
+/// Retweeter lists, always on. Every post page links one, and a crawler
+/// that follows them all spent more of X's quota than any page readers
+/// open: `Retweeters` peaked at 8,000 calls a minute. A reader paging
+/// through a few lists stays well inside this.
+pub const LIST_PAGE_TIERS: Tiers = [
+   Tier {
+      refill_per_sec: 0.5,
+      capacity: 20.0,
+   },
+   Tier {
+      refill_per_sec: 0.1,
+      capacity: 60.0,
+   },
+   Tier {
+      refill_per_sec: 0.02,
+      capacity: 150.0,
+   },
+];
+
 const IDLE_EVICTION: Duration = Duration::from_secs(600);
 
 /// Reaching this evicts the coldest entries, so a caller cycling through
@@ -49,29 +71,29 @@ const MAX_CLIENTS: usize = 0x8000;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 struct Buckets {
-   tokens: [f64; TIERS.len()],
+   tokens: [f64; 3],
    seen: Instant,
 }
 
 impl Buckets {
-   fn new() -> Self {
+   fn new(tiers: &Tiers) -> Self {
       Self {
-         tokens: [TIERS[0].capacity, TIERS[1].capacity, TIERS[2].capacity],
+         tokens: tiers.map(|tier| tier.capacity),
          seen: Instant::now(),
       }
    }
 
-   fn refund(&mut self, cost: f64) {
-      for (tokens, tier) in self.tokens.iter_mut().zip(TIERS) {
+   fn refund(&mut self, cost: f64, tiers: &Tiers) {
+      for (tokens, tier) in self.tokens.iter_mut().zip(tiers) {
          *tokens = (*tokens + cost).min(tier.capacity);
       }
    }
 
-   fn try_spend(&mut self, cost: f64, now: Instant) -> bool {
+   fn try_spend(&mut self, cost: f64, now: Instant, tiers: &Tiers) -> bool {
       let elapsed = now.duration_since(self.seen).as_secs_f64();
       self.seen = now;
 
-      for (tokens, tier) in self.tokens.iter_mut().zip(TIERS) {
+      for (tokens, tier) in self.tokens.iter_mut().zip(tiers) {
          *tokens = tier
             .refill_per_sec
             .mul_add(elapsed, *tokens)
@@ -97,6 +119,7 @@ impl Buckets {
 pub struct ClientBudget {
    clients: Arc<Mutex<Clients>>,
    enabled: bool,
+   tiers: &'static Tiers,
 }
 
 struct Clients {
@@ -207,12 +230,18 @@ pub fn client_from(peer: IpAddr, headers: &HeaderMap, trusted: &[IpAddr]) -> Cli
 impl ClientBudget {
    #[must_use]
    pub fn new(enabled: bool) -> Self {
+      Self::with_tiers(enabled, &READER_TIERS)
+   }
+
+   #[must_use]
+   pub fn with_tiers(enabled: bool, tiers: &'static Tiers) -> Self {
       Self {
          clients: Arc::new(Mutex::new(Clients {
             buckets: HashMap::new(),
             last_sweep: Instant::now(),
          })),
          enabled,
+         tiers,
       }
    }
 
@@ -225,7 +254,7 @@ impl ClientBudget {
 
       let mut clients = self.clients.lock().await;
       if let Some(buckets) = clients.buckets.get_mut(client) {
-         buckets.refund(cost);
+         buckets.refund(cost, self.tiers);
       }
    }
 
@@ -238,14 +267,40 @@ impl ClientBudget {
       let mut clients = self.clients.lock().await;
 
       if let Some(buckets) = clients.buckets.get_mut(client) {
-         return buckets.try_spend(cost, now);
+         return buckets.try_spend(cost, now, self.tiers);
       }
 
       clients.evict(now);
       clients
          .buckets
          .entry(client.clone())
-         .or_insert_with(Buckets::new)
-         .try_spend(cost, now)
+         .or_insert_with(|| Buckets::new(self.tiers))
+         .try_spend(cost, now, self.tiers)
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[tokio::test]
+   async fn list_pages_run_dry_long_before_reader_pages() {
+      let reader = ClientBudget::new(true);
+      let lists = ClientBudget::with_tiers(true, &LIST_PAGE_TIERS);
+      let client = ClientKey::from_ip("203.0.113.9".parse().unwrap());
+
+      let mut listed = 0;
+      while lists.try_spend(&client, 1.0).await {
+         listed += 1;
+      }
+      assert_eq!(listed, 20);
+      assert!(reader.try_spend(&client, 1.0).await);
+
+      lists.refund(&client, 1.0).await;
+      assert!(lists.try_spend(&client, 1.0).await);
+      assert!(!lists.try_spend(&client, 1.0).await);
+
+      let other = ClientKey::from_ip("198.51.100.4".parse().unwrap());
+      assert!(lists.try_spend(&other, 1.0).await);
    }
 }

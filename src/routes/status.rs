@@ -710,8 +710,8 @@ fn engagement_tabs(username: &str, id: &str, active: &str) -> maud::Markup {
        div class="engagement-header" {
            a class="back-arrow" href=(format!("{base}#m")) { "\u{2190}" }
            ul class="tab" {
-               li class=(rt_class) { a href=(format!("{base}/retweets")) { "Retweets" } }
-               li class=(qt_class) { a href=(format!("{base}/quotes")) { "Quotes" } }
+               li class=(rt_class) { a rel="nofollow" href=(format!("{base}/retweets")) { "Retweets" } }
+               li class=(qt_class) { a rel="nofollow" href=(format!("{base}/quotes")) { "Quotes" } }
            }
        }
    }

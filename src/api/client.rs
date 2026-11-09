@@ -1,5 +1,6 @@
 use std::{
    collections::HashMap,
+   iter,
    sync::{Arc, Mutex as StdMutex},
    time::{Duration, Instant},
 };
@@ -393,6 +394,8 @@ pub struct ApiClient {
    tid: TidClient,
    operations: Operations,
    budget: ClientBudget,
+   /// Retweeter lists per caller, on whatever `clientBudget` says.
+   list_budget: ClientBudget,
    tid_enabled: bool,
    denylist: super::search_denylist::SearchDenylist,
    latency: Arc<Latency>,
@@ -446,6 +449,7 @@ impl ApiClient {
          tid,
          operations,
          budget: ClientBudget::new(config.config.client_budget),
+         list_budget: ClientBudget::with_tiers(true, &budget::LIST_PAGE_TIERS),
          tid_enabled: !config.config.disable_tid,
          denylist: super::search_denylist::SearchDenylist::load(denylist_path),
          latency: Arc::new(Latency::default()),
@@ -1008,8 +1012,17 @@ impl ApiClient {
    /// Give back what [`charge`](Self::charge) took for a call that never ran.
    async fn refund(&self, endpoint: &str) {
       if let Some(client) = budget::current_client() {
-         self.budget.refund(&client, Self::cost_of(endpoint)).await;
+         let cost = Self::cost_of(endpoint);
+         for budget in self.budgets_for(endpoint) {
+            budget.refund(&client, cost).await;
+         }
       }
+   }
+
+   /// Every budget a call to `endpoint` is charged against.
+   fn budgets_for(&self, endpoint: &str) -> impl Iterator<Item = &ClientBudget> {
+      let list_page = endpoint == endpoints::GRAPH_RETWEETERS;
+      iter::once(&self.budget).chain(list_page.then_some(&self.list_budget))
    }
 
    /// Sessions that can still open a profile timeline (`UserTweets`).
@@ -1036,12 +1049,20 @@ impl ApiClient {
    /// lease nor waits on a permit, and once per attempt so a retry costs what
    /// it spends.
    async fn charge(&self, endpoint: &str) -> Result<()> {
+      let Some(client) = budget::current_client() else {
+         return Ok(());
+      };
       let cost = Self::cost_of(endpoint);
-      if let Some(client) = budget::current_client()
-         && !self.budget.try_spend(&client, cost).await
-      {
-         tracing::debug!(?client, endpoint, "client budget exhausted");
-         return Err(Error::ClientBudgetExhausted);
+      let mut charged = Vec::new();
+      for budget in self.budgets_for(endpoint) {
+         if !budget.try_spend(&client, cost).await {
+            for paid in charged {
+               ClientBudget::refund(paid, &client, cost).await;
+            }
+            tracing::debug!(?client, endpoint, "client budget exhausted");
+            return Err(Error::ClientBudgetExhausted);
+         }
+         charged.push(budget);
       }
 
       Ok(())

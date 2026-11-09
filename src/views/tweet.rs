@@ -993,7 +993,10 @@ fn render_video(video: &Video, config: &Config, prefs: Option<&Prefs>, big_thumb
 }
 
 /// Render tweet stats using `icon()` helper from renderutils.
-/// Retweet counts link to the retweeters page. Quote counts link to search.
+/// Retweet counts link to the retweeters page and quote counts to search,
+/// only when there is something to list. Both are `nofollow`: each costs an
+/// upstream call, and crawlers following them from every post were the
+/// largest single source of calls to X.
 /// Optional `extra` markup is appended after the stat icons (used for the
 /// reply-sort toggle on the main tweet).
 fn render_stats(stats: &TweetStats, username: &str, id: i64, extra: Option<&Markup>) -> Markup {
@@ -1007,11 +1010,15 @@ fn render_stats(stats: &TweetStats, username: &str, id: i64, extra: Option<&Mark
    html! {
        div class="tweet-stats" {
            span class="tweet-stat" { (icon("comment", &fmt(stats.replies), "", "", "")) }
-           a class="tweet-stat" href=(format!("/{username}/status/{id}/retweets")) title="Retweets" {
-               (icon("retweet", &fmt(stats.retweets), "", "", ""))
+           @if stats.retweets > 0 {
+               a class="tweet-stat" rel="nofollow" href=(format!("/{username}/status/{id}/retweets")) title="Retweets" {
+                   (icon("retweet", &fmt(stats.retweets), "", "", ""))
+               }
+           } @else {
+               span class="tweet-stat" { (icon("retweet", "", "", "", "")) }
            }
            @if stats.quotes > 0 {
-               a class="tweet-stat" href=(format!("/{username}/status/{id}/quotes")) title="Quotes" {
+               a class="tweet-stat" rel="nofollow" href=(format!("/{username}/status/{id}/quotes")) title="Quotes" {
                    (icon("quote", &fmt(stats.quotes), "", "", ""))
                }
            }
