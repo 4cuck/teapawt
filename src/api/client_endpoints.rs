@@ -1561,8 +1561,15 @@ impl ApiClient {
             endpoints::LIVE_VIDEO_STREAM_PATH,
             metadata.media_key
          );
+         // Budgeted per endpoint, as X limits it. Keyed by the full path,
+         // every stream got its own fresh, unknown budget and its own entry
+         // in the saved limits.
          self
-            .cookie_json_request::<LiveStreamStatus>(&path, &path, &stream_url)
+            .cookie_json_request::<LiveStreamStatus>(
+               endpoints::LIVE_VIDEO_STREAM_PATH,
+               &path,
+               &stream_url,
+            )
             .await
             .ok()
             .and_then(|status| status.source)
