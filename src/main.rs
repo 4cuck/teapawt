@@ -49,6 +49,9 @@ use crate::{
    transcode::GifTranscoder,
 };
 
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 /// Application state shared across all routes.
 #[derive(Clone)]
 pub struct AppState {

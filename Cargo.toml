@@ -42,6 +42,13 @@ ring = "0.17.14"
 serde = { features = [ "derive" ], version = "1.0.228" }
 serde_json = "1.0.150"
 thiserror = "2.0.18"
+# glibc malloc kept ~6 GB in per-thread arenas it never handed back, and
+# spent ~12% of CPU in malloc/free. Unprefixed so BoringSSL's allocations
+# land in the same heap; background threads return dirty pages on a timer.
+tikv-jemallocator = {
+  features = [ "background_threads", "unprefixed_malloc_on_supported_platforms" ],
+  version  = "0.7.0",
+}
 time = { features = [ "formatting", "parsing", "macros", "serde" ], version = "0.3.53" }
 tokio = {
   features = [
