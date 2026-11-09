@@ -352,7 +352,7 @@ impl std::fmt::Debug for LztDonationConfig {
 }
 
 fn default_goal_cents() -> i64 {
-   12_900
+   30_000
 }
 
 fn default_goal_deadline() -> String {

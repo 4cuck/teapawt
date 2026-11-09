@@ -108,7 +108,7 @@ externalDomain = ""
 [donations]
 ledgerFile = "donations.json"
 # Shown on the homepage and /donate. The counter resets at 00:00 UTC on the 23rd.
-goalCents = 12900
+goalCents = 30000
 
 [donations.stripe]
 secretKey = ""
