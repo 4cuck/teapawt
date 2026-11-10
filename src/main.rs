@@ -232,6 +232,8 @@ async fn main() -> eyre::Result<()> {
         .route_service("/opensearch.xml", ServeFile::new(format!("{static_dir}/opensearch.xml")))
         .layer(middleware::from_fn(routes::prefs_middleware))
         .layer(middleware::from_fn(routes::snowflake_guard))
+        // Inside the client layer: the gate keys its pass on the caller.
+        .layer(middleware::from_fn_with_state(state.clone(), routes::scrape_gate))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             routes::client_middleware,

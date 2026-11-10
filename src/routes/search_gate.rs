@@ -126,7 +126,7 @@ fn challenge(state: &AppState, prefs: &Prefs, prompt: &Prompt<'_>, failed: bool)
       .into_response()
 }
 
-fn absolute(origin: &str, url: &str) -> String {
+pub(super) fn absolute(origin: &str, url: &str) -> String {
    if url.starts_with("http://") || url.starts_with("https://") {
       url.to_owned()
    } else {
@@ -212,7 +212,7 @@ fn already_accepted(token: &str) -> bool {
       .is_some_and(|at| now - *at < 120)
 }
 
-async fn verify(secret: &str, token: &str) -> Result<(), Vec<String>> {
+pub(super) async fn verify(secret: &str, token: &str) -> Result<(), Vec<String>> {
    let remoteip = crate::api::budget::current_client().and_then(|client| {
       client
          .as_str()

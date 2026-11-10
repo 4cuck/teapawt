@@ -215,6 +215,15 @@ pub enum Listing {
    AlreadyListed,
 }
 
+/// A pass the operator issued. `password` is `None` when an existing
+/// account on that email was extended instead, which keeps its login.
+pub struct Granted {
+   pub username:   String,
+   pub password:   Option<String>,
+   pub paid_until: i64,
+   pub extended:   bool,
+}
+
 #[derive(Default)]
 struct Index {
    paid_until: HashMap<i64, i64>,
@@ -1082,6 +1091,63 @@ impl PassStore {
       tokio::task::spawn_blocking(move || secret::hash_password(&password))
          .await
          .map_err(|err| PassError(err.to_string()))
+   }
+
+   /// A pass the operator hands out by hand, for a donation made before
+   /// passes existed. A new account with its own login, `days` long, or
+   /// that many days added to the account already on this email.
+   pub async fn grant(&self, email: &str, days: i64) -> Result<Granted, PassError> {
+      let email = email.trim().to_owned();
+      let now = now();
+      let length = days * DAY;
+      let existing = if email.is_empty() {
+         None
+      } else {
+         self
+            .with(async |db| {
+               Ok(db
+                  .query_opt(
+                     "UPDATE pass_accounts SET paid_until = GREATEST(paid_until, $2) + $3 WHERE \
+                      id = (SELECT id FROM pass_accounts WHERE lower(email) = lower($1) ORDER BY \
+                      id LIMIT 1) RETURNING username, paid_until",
+                     &[&email, &now, &length],
+                  )
+                  .await?)
+            })
+            .await?
+      };
+      if let Some(row) = existing {
+         self.reload().await;
+         return Ok(Granted {
+            username:   row.get(0),
+            password:   None,
+            paid_until: row.get(1),
+            extended:   true,
+         });
+      }
+      let username = secret::username();
+      let password = secret::password();
+      let hash = self.hash(password.clone()).await?;
+      let paid_until = now + length;
+      self
+         .with(async |db| {
+            db.execute(
+               "INSERT INTO pass_accounts (username, password_hash, email, paid_until, \
+                created_at) VALUES ($1, $2, $3, $4, $5)",
+               &[&username, &hash, &email, &paid_until, &now],
+            )
+            .await?;
+            Ok(())
+         })
+         .await?;
+      self.reload().await;
+      tracing::info!(days, "search pass granted by hand");
+      Ok(Granted {
+         username,
+         password: Some(password),
+         paid_until,
+         extended: false,
+      })
    }
 
    async fn verify(&self, password: String, stored: String) -> bool {

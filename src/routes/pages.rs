@@ -113,7 +113,24 @@ pub fn router() -> Router<AppState> {
    Router::new()
       .route("/", get(home))
       .route("/about", get(about))
+      .route("/contact", get(contact))
+      .route("/support", get(|| async { Redirect::to("/contact") }))
       .route("/help", get(|| async { Redirect::to("/about") }))
+}
+
+async fn contact(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
+   let prefs = Prefs::from_cookies(&jar, &state.config);
+   let (_, host) = request_host(&state.config);
+   let title = format!("Contact {host}");
+   let description = format!("Support and contact details for {host}, and how donors get a search pass.");
+   let price = crate::donations::format_usd(state.passes.price_cents());
+   let content = crate::views::scrape::render_contact(&state.config.contact, &price);
+   let markup = PageLayout::new(&state.config, &title, content)
+      .description(&description)
+      .prefs(&prefs)
+      .referer("/contact")
+      .render();
+   Html(markup.into_string())
 }
 
 async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap) -> Response {
@@ -141,6 +158,8 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
                " · "
                a href="/about" { "About this instance" }
                " · "
+               a href="/contact" { "Contact" }
+               " · "
                a href="/search" { "Search posts" }
                " · "
                a href="/sitemap.xml" { "Sitemap" }
@@ -161,10 +180,18 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
       .turnstile
       .configured()
       .then(search_turnstile_warning);
-   let notice = if drive.is_none() && firefox_note.is_none() && search_note.is_none() {
+   let scrape_note = state.config.scrape.enabled.then(|| {
+      crate::views::scrape::scrape_notice(&crate::donations::format_usd(state.passes.price_cents()))
+   });
+   let notice = if drive.is_none()
+      && firefox_note.is_none()
+      && search_note.is_none()
+      && scrape_note.is_none()
+   {
       None
    } else {
       Some(html! {
+          @if let Some(scrape_note) = scrape_note { (scrape_note) }
           @if let Some(search_note) = search_note { (search_note) }
           @if let Some(drive) = drive { (drive) }
           @if let Some(firefox_note) = firefox_note { (firefox_note) }
@@ -327,6 +354,12 @@ async fn about(State(state): State<AppState>, jar: CookieJar) -> impl IntoRespon
                        code { (address) }
                    }
                }
+           }
+
+           h2 { "Contact" }
+           p {
+               "Support, broken pages, or a search pass for a past donation: see the "
+               a href="/contact" { "contact page" } "."
            }
 
            h2 { "Instance info" }

@@ -34,6 +34,7 @@ fn test_config() -> Config {
          internal_error_message: Vec::new(),
          enable_debug: false,
          debug_token: String::new(),
+         admin_token: String::new(),
          proxy: String::new(),
          proxy_auth: String::new(),
          api_proxy: String::new(),
@@ -53,6 +54,8 @@ fn test_config() -> Config {
       donations: crate::config::DonationsConfig::default(),
       turnstile: crate::config::TurnstileConfig::default(),
       pass: crate::config::PassConfig::default(),
+      scrape: crate::config::ScrapeConfig::default(),
+      contact: crate::config::ContactConfig::default(),
       url_prefix: "https://teapot.test".to_owned(),
    }
 }

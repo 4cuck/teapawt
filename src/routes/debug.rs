@@ -48,7 +48,7 @@ fn debug_authorized(state: &AppState, headers: &HeaderMap) -> bool {
    constant_time_eq(token.as_bytes(), state.config.config.debug_token.as_bytes())
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub(super) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
    if left.len() != right.len() {
       return false;
    }

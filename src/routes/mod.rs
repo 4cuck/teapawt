@@ -1,5 +1,6 @@
 //! HTTP routes.
 
+mod admin;
 pub(crate) mod agents;
 mod app;
 mod broadcast;
@@ -20,6 +21,7 @@ mod pass;
 mod preferences;
 mod redirect;
 mod rss;
+mod scrape_gate;
 mod search;
 mod search_gate;
 mod seo;
@@ -31,3 +33,4 @@ mod unsupported;
 pub use agents::negotiate;
 pub use app::router;
 pub use middleware::{client_middleware, prefs_middleware, snowflake_guard};
+pub use scrape_gate::scrape_gate;

@@ -68,6 +68,12 @@ pub struct Config {
    /// Paid pass that skips the checkbox. Paid through the donation providers.
    #[serde(default)]
    pub pass: PassConfig,
+   /// Turnstile in front of scrapers that eat the account pool.
+   #[serde(default)]
+   pub scrape: ScrapeConfig,
+   /// Where people reach the operator. Shown on `/contact`.
+   #[serde(default)]
+   pub contact: ContactConfig,
    /// Precomputed `{scheme}://{hostname}` value set in `Config::load`.
    #[serde(skip)]
    pub url_prefix: String,
@@ -137,6 +143,9 @@ pub struct AppConfig {
    pub enable_debug: bool,
    #[serde(default, rename = "debugToken")]
    pub debug_token: String,
+   /// Bearer token for `/.admin/*`. Empty turns those routes off.
+   #[serde(default, rename = "adminToken")]
+   pub admin_token: String,
    #[serde(default)]
    pub proxy: String,
    #[serde(default, rename = "proxyAuth")]
@@ -233,7 +242,82 @@ impl Default for PassConfig {
 }
 
 const fn default_pass_cents() -> i64 {
-   1000
+   1500
+}
+
+/// Who gets the scrape Turnstile. Read from headers Cloudflare sets, and only
+/// when the request came through a trusted proxy.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ScrapeConfig {
+   #[serde(default = "default_true")]
+   pub enabled:            bool,
+   /// Networks challenged on every page, from the `asn-num` header.
+   #[serde(default = "default_blocked_asns", rename = "blockedAsns")]
+   pub blocked_asns:       Vec<u32>,
+   /// Countries challenged while their page rate is above
+   /// `surgePerMinute`, from `cf-ipcountry`.
+   #[serde(default = "default_watched_countries", rename = "watchedCountries")]
+   pub watched_countries:  Vec<String>,
+   #[serde(default = "default_surge_per_minute", rename = "surgePerMinute")]
+   pub surge_per_minute:   u32,
+   /// How long one solved check lets a visitor's address through.
+   #[serde(default = "default_gate_pass_minutes", rename = "passMinutes")]
+   pub pass_minutes:       i64,
+}
+
+impl Default for ScrapeConfig {
+   fn default() -> Self {
+      Self {
+         enabled:           true,
+         blocked_asns:      default_blocked_asns(),
+         watched_countries: default_watched_countries(),
+         surge_per_minute:  default_surge_per_minute(),
+         pass_minutes:      default_gate_pass_minutes(),
+      }
+   }
+}
+
+/// Tencent Cloud's international network, where the Singapore scraper runs.
+fn default_blocked_asns() -> Vec<u32> {
+   vec![132_203]
+}
+
+fn default_watched_countries() -> Vec<String> {
+   vec!["SG".to_owned()]
+}
+
+/// Singapore readers outside Tencent ask for well under this.
+const fn default_surge_per_minute() -> u32 {
+   300
+}
+
+const fn default_gate_pass_minutes() -> i64 {
+   60
+}
+
+/// Operator contacts. Each one left empty is left off the page.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ContactConfig {
+   /// `https://t.me/...`
+   #[serde(default)]
+   pub telegram: String,
+   /// `@user:server`
+   #[serde(default)]
+   pub matrix:   String,
+   /// Session account ID, 66 hex characters.
+   #[serde(default)]
+   pub session:  String,
+   #[serde(default)]
+   pub email:    String,
+}
+
+impl ContactConfig {
+   #[must_use]
+   pub fn any(&self) -> bool {
+      [&self.telegram, &self.matrix, &self.session, &self.email]
+         .iter()
+         .any(|value| !value.is_empty())
+   }
 }
 
 fn default_mailer_export() -> String {
@@ -513,6 +597,11 @@ impl Config {
       if config.pass.price_cents < crate::donations::MIN_CENTS {
          return Err(Error::InvalidConfig(
             "pass.priceCents must be at least 100".into(),
+         ));
+      }
+      if !config.config.admin_token.is_empty() && config.config.admin_token.len() < 32 {
+         return Err(Error::InvalidConfig(
+            "config.adminToken must be at least 32 characters, or empty to turn /.admin off".into(),
          ));
       }
       // Validate GIF transcoding config

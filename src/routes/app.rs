@@ -15,6 +15,8 @@ pub fn router(indexnow_key: &str) -> Router<AppState> {
       .merge(super::pass::router())
       .merge(super::unsupported::router())
       .merge(super::debug::router())
+      .merge(super::admin::router())
+      .merge(super::scrape_gate::router())
       .merge(super::redirect::router())
       .merge(super::intent::router())
       .merge(super::search::router())

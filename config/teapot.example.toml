@@ -58,6 +58,10 @@ enableDebug = false
 # Generate a unique value with at least 32 characters.
 debugToken = ""
 
+# Token for /.admin/pass, where the operator issues a search pass by hand (for
+# donors). At least 32 characters. Empty turns /.admin off.
+adminToken = ""
+
 # HTTP/HTTPS proxy for media fetches. X API calls use socksProxiesFile when set.
 proxy     = ""
 proxyAuth = ""
@@ -134,12 +138,30 @@ secretKey = ""
 # whitelisted IP addresses. Paid through the [donations] providers and stored in
 # the Postgres database from TEAPOT_LIMITS_DATABASE_URL.
 [pass]
-priceCents = 1000
+priceCents = 1500
 # Node module that mails a buyer their login. Its export is called as
 # send(mailAccounts, { to, subject, text }, log). An empty mailer turns email off.
 mailer = ""
 mailerExport = "sendMail"
 mailAccounts = ""
+
+# Turnstile in front of scrapers. Read from Cloudflare's asn-num and
+# cf-ipcountry headers, only on requests from trustedProxies. Networks in
+# blockedAsns are checked on every page; a watched country only while it loads
+# more than surgePerMinute pages a minute. Needs [turnstile] keys.
+[scrape]
+enabled = true
+blockedAsns = [ ]
+watchedCountries = [ ]
+surgePerMinute = 300
+passMinutes = 60
+
+# Shown on /contact. Anything left empty is left off the page.
+[contact]
+telegram = ""
+matrix = ""
+session = ""
+email = ""
 
 [preferences]
 # Default theme
