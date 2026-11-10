@@ -143,9 +143,6 @@ pub struct AppConfig {
    pub enable_debug: bool,
    #[serde(default, rename = "debugToken")]
    pub debug_token: String,
-   /// Bearer token for `/.admin/*`. Empty turns those routes off.
-   #[serde(default, rename = "adminToken")]
-   pub admin_token: String,
    #[serde(default)]
    pub proxy: String,
    #[serde(default, rename = "proxyAuth")]
@@ -597,11 +594,6 @@ impl Config {
       if config.pass.price_cents < crate::donations::MIN_CENTS {
          return Err(Error::InvalidConfig(
             "pass.priceCents must be at least 100".into(),
-         ));
-      }
-      if !config.config.admin_token.is_empty() && config.config.admin_token.len() < 32 {
-         return Err(Error::InvalidConfig(
-            "config.adminToken must be at least 32 characters, or empty to turn /.admin off".into(),
          ));
       }
       // Validate GIF transcoding config

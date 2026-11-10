@@ -59,7 +59,11 @@ use crate::{
    utils::host::current_origin,
    views::{
       layout::PageLayout,
-      pass as view,
+      pass::{
+         self as view,
+         Notice,
+         Tone,
+      },
    },
 };
 
@@ -75,6 +79,7 @@ pub fn router() -> Router<AppState> {
       .route("/search-pass/email", guarded(email))
       .route("/search-pass/password", guarded(new_password))
       .route("/search-pass/renewal", guarded(stop_renewal))
+      .route("/search-pass/grant", guarded(grant))
       .route("/search-pass/nowpayments/ipn", post(nowpayments_ipn))
       .route("/search-pass/lzt/callback", post(lzt_callback))
 }
@@ -116,32 +121,48 @@ fn see_note(key: &str) -> Response {
    see(&format!("/search-pass?note={key}"))
 }
 
-fn note(key: &str) -> Option<&'static str> {
-   Some(match key {
-      "canceled" => "The payment was canceled. Nothing was charged.",
-      "method" => "That payment method is not available.",
+const fn bad(text: &'static str) -> Notice {
+   Notice { tone: Tone::Bad, text }
+}
+
+fn note(key: &str) -> Option<Notice> {
+   use Tone::{
+      Bad,
+      Good,
+      Info,
+   };
+   let (tone, text) = match key {
+      "canceled" => (Info, "The payment was canceled. Nothing was charged."),
+      "method" => (Bad, "That payment method is not available."),
       "cookies" => {
-         "This browser is blocking cookies. An anonymous pass lives in this browser's cookies, so \
-          allow cookies for this site or enter an email."
+         (
+            Bad,
+            "This browser is blocking cookies. An anonymous pass lives in this browser's cookies, \
+             so allow cookies for this site or enter an email.",
+         )
       },
       "checkout" => {
-         "The payment service did not start a checkout. Try again, or use another method."
+         (
+            Bad,
+            "The payment service did not start a checkout. Try again, or use another method.",
+         )
       },
-      "busy" => "Too many checkouts from this address. Try again in a few minutes.",
-      "renews" => "This pass already renews by card.",
-      "added" => "Address added.",
-      "removed" => "Address removed.",
-      "listed" => "That address is already on the list.",
-      "full" => "This pass has as many addresses as it can hold. Remove one first.",
-      "bad-ip" => "That is not a public IPv4 or IPv6 address.",
-      "email" => "Recovery email saved.",
-      "no-email" => "Recovery email removed.",
-      "bad-email" => "That email address does not look right.",
-      "stopped" => "Card renewal stopped. The pass runs until the date above.",
-      "stop-failed" => "Stripe did not stop the renewal. Try again in a minute.",
-      "unavailable" => "Something went wrong on our side. Try again in a minute.",
+      "busy" => (Bad, "Too many checkouts from this address. Try again in a few minutes."),
+      "renews" => (Info, "This pass already renews by card."),
+      "added" => (Good, "Address added."),
+      "removed" => (Good, "Address removed."),
+      "listed" => (Info, "That address is already on the list."),
+      "full" => (Bad, "This pass has as many addresses as it can hold. Remove one first."),
+      "bad-ip" => (Bad, "That is not a public IPv4 or IPv6 address."),
+      "email" => (Good, "Recovery email saved."),
+      "no-email" => (Good, "Recovery email removed."),
+      "bad-email" => (Bad, "That email address does not look right."),
+      "stopped" => (Good, "Card renewal stopped. The pass runs until the date above."),
+      "stop-failed" => (Bad, "Stripe did not stop the renewal. Try again in a minute."),
+      "unavailable" => (Bad, "Something went wrong on our side. Try again in a minute."),
       _ => return None,
-   })
+   };
+   Some(Notice { tone, text })
 }
 
 fn cookie(
@@ -207,7 +228,7 @@ async fn page(
    let message = query.note.as_deref().and_then(note);
    if let Some(account_id) = state.passes.signed_in(&jar) {
       match state.passes.account(account_id).await {
-         Ok(Some(account)) => return account_page(&state, &jar, &account, message),
+         Ok(Some(account)) => return account_page(&state, &jar, &account, message, None),
          Ok(None) => {},
          Err(err) => {
             tracing::warn!("search pass account not read: {err}");
@@ -227,14 +248,15 @@ async fn page(
    buy_page(&state, jar, message)
 }
 
-fn buy_page(state: &AppState, jar: CookieJar, message: Option<&str>) -> Response {
+fn buy_page(state: &AppState, jar: CookieJar, notice: Option<Notice>) -> Response {
    let price = donations::format_usd(state.passes.price_cents());
    let methods = methods(state);
    let content = view::render_buy(&view::BuyPage {
       price: &price,
       methods: &methods,
       mail: state.passes.mail_enabled(),
-      message,
+      max_addresses: passes::MAX_ADDRESSES,
+      notice,
    });
    let jar = jar.add(cookie(
       state,
@@ -247,16 +269,23 @@ fn buy_page(state: &AppState, jar: CookieJar, message: Option<&str>) -> Response
    private((jar, response).into_response())
 }
 
+/// `issued` is the pass the admin just handed out, shown once.
 fn account_page(
    state: &AppState,
    jar: &CookieJar,
    account: &Account,
-   message: Option<&str>,
+   notice: Option<Notice>,
+   issued: Option<&view::Issued<'_>>,
 ) -> Response {
    let price = donations::format_usd(state.passes.price_cents());
    let methods = methods(state);
    let paid_until = passes::date(account.paid_until);
    let current = passes::current_address();
+   let admin = account.is_admin().then_some(view::Admin {
+      default_days: passes::PASS_DAYS,
+      max_days: passes::MAX_GRANT_DAYS,
+      issued,
+   });
    let content = view::render_account(&view::AccountPage {
       username: &account.username,
       email: &account.email,
@@ -270,7 +299,8 @@ fn account_page(
       price: &price,
       methods: &methods,
       mail: state.passes.mail_enabled(),
-      message,
+      notice,
+      admin,
    });
    render(state, jar, "Your search pass", content)
 }
@@ -493,7 +523,7 @@ async fn login(
             &state,
             &jar,
             "Log in",
-            view::render_login(Some("That username and password do not match.")),
+            view::render_login(Some(bad("That username and password do not match."))),
          )
       },
       Err(err) => {
@@ -661,6 +691,74 @@ async fn stop_renewal(State(state): State<AppState>, jar: CookieJar) -> Response
       Err(err) => {
          tracing::warn!("card renewal not stopped: {err}");
          see_note("stop-failed")
+      },
+   }
+}
+
+#[derive(Deserialize)]
+struct GrantForm {
+   #[serde(default)]
+   email: String,
+   #[serde(default)]
+   days:  String,
+}
+
+fn grant_days(raw: &str) -> Option<i64> {
+   let raw = raw.trim();
+   if raw.is_empty() {
+      return Some(passes::PASS_DAYS);
+   }
+   raw.parse()
+      .ok()
+      .filter(|days| (1..=passes::MAX_GRANT_DAYS).contains(days))
+}
+
+/// Issues a pass by hand. Only the admin account's session may use it.
+async fn grant(
+   State(state): State<AppState>,
+   jar: CookieJar,
+   Form(form): Form<GrantForm>,
+) -> Response {
+   let Some(account_id) = state.passes.signed_in(&jar) else {
+      return see("/search-pass/login");
+   };
+   let admin = match state.passes.account(account_id).await {
+      Ok(Some(account)) if account.is_admin() => account,
+      Ok(Some(_)) => return private(StatusCode::NOT_FOUND.into_response()),
+      Ok(None) => return see("/search-pass/login"),
+      Err(err) => {
+         tracing::warn!("search pass account not read: {err}");
+         return see_note("unavailable");
+      },
+   };
+   let refuse = |text| account_page(&state, &jar, &admin, Some(bad(text)), None);
+   let Some(days) = grant_days(&form.days) else {
+      return refuse("Days must be a whole number from 1 to 366.");
+   };
+   let email = form.email.trim();
+   if !email.is_empty() && !passes::plausible_email(email) {
+      return refuse("That donor email does not look right.");
+   }
+   match state.passes.grant(email, days).await {
+      Ok(granted) => {
+         let origin = current_origin(state.config.url_prefix());
+         let paid_until = passes::date(granted.paid_until);
+         let issued = view::Issued {
+            username: &granted.username,
+            password: granted.password.as_deref(),
+            paid_until: &paid_until,
+            days,
+            origin: &origin,
+         };
+         let notice = Notice {
+            tone: Tone::Good,
+            text: if granted.extended { "Pass extended." } else { "Pass issued." },
+         };
+         account_page(&state, &jar, &admin, Some(notice), Some(&issued))
+      },
+      Err(err) => {
+         tracing::warn!("admin pass not issued: {err}");
+         refuse("The pass was not saved. Check the logs.")
       },
    }
 }

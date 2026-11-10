@@ -1608,42 +1608,303 @@ nav.explore-tabbar {
 }
 .turnstile-panel .turnstile-pass { margin: 16px 0 0; color: var(--muted); font-size: 13px; }
 .turnstile-pass a { color: var(--accent); }
-.pass-page h2 { margin: 28px 0 8px; font-size: 18px; }
-.pass-page form { margin: 8px 0; }
-.pass-page .donate-form input[type="email"],
-.pass-page .donate-form input[type="password"],
-.pass-page .donate-form input[type="text"] {
-  position: static;
-  width: min(100%, 320px);
-  max-width: none;
-  height: 36px;
-  margin: 0;
-  padding: 0 8px;
+/* Search pass: a column of cards. */
+.pass-page {
+  --pass-radius: 12px;
+  --pass-good: #3fb27f;
+  --pass-bad: #e5534b;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 680px;
+  margin: 24px auto;
+  padding: 0 16px 48px;
+  color: var(--text);
 }
-.pass-page button { min-height: 36px; padding: 8px 14px; }
-.pass-login {
+.pass-page.is-narrow { max-width: 440px; margin-top: 48px; }
+.pass-page h1 { margin: 0; font-size: 26px; font-weight: 750; letter-spacing: -0.01em; line-height: 1.2; }
+.pass-page h2 { margin: 0; font-size: 16px; font-weight: 700; }
+.pass-page p { margin: 0; }
+.pass-page form { margin: 0; }
+.pass-page a { color: var(--accent); }
+.pass-page code, .pass-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
+.pass-card, .pass-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--pass-radius);
+  background: var(--bg_overlays);
+}
+.pass-hero {
+  gap: 10px;
+  padding: 26px 24px;
+  background:
+    radial-gradient(120% 140% at 100% 0%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 60%),
+    var(--bg_overlays);
+}
+.pass-hero-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.pass-eyebrow {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.pass-lede { color: var(--muted); font-size: 15px; }
+.pass-lede strong { color: var(--text); }
+.pass-price { display: flex; align-items: baseline; gap: 6px; margin-top: 6px !important; }
+.pass-price strong { font-size: 34px; font-weight: 800; letter-spacing: -0.02em; }
+.pass-price span { color: var(--muted); }
+
+.pass-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.pass-card-head > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.pass-hint { color: var(--muted); font-size: 13px; line-height: 1.45; }
+.pass-hint strong { color: var(--text); }
+.pass-empty {
+  padding: 14px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+.pass-foot { color: var(--muted); font-size: 13px; text-align: center; }
+.pass-link { align-self: flex-start; font-weight: 650; text-decoration: none; }
+.pass-link:hover { text-decoration: underline; }
+.pass-center { align-items: center; text-align: center; }
+.pass-center .pass-link { align-self: center; }
+
+/* Facts under the account heading. */
+.pass-facts {
   display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 8px 16px;
-  margin: 16px 0;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin: 8px 0 0;
+}
+.pass-facts > div {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg_color);
+}
+.pass-facts dt { color: var(--muted); font-size: 12px; }
+.pass-facts dd { margin: 4px 0 0; font-size: 15px; font-weight: 700; }
+
+/* Perks on the purchase page. */
+.pass-perks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.pass-perks li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   padding: 14px 16px;
   border: 1px solid var(--line);
-  background: var(--surface);
+  border-radius: 10px;
+  background: var(--bg_overlays);
 }
-.pass-login dt { color: var(--muted); }
-.pass-login dd { margin: 0; }
-.pass-login code { font-size: 16px; user-select: all; word-break: break-all; }
-.pass-list { margin: 8px 0; padding: 0; list-style: none; }
-.pass-list li {
+.pass-perks span { color: var(--muted); font-size: 13px; line-height: 1.4; }
+
+/* Badges, tags, counts. */
+.pass-badge, .pass-tag, .pass-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.pass-badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.pass-badge.is-good { color: var(--pass-good); background: color-mix(in srgb, var(--pass-good) 14%, transparent); }
+.pass-badge.is-bad { color: var(--pass-bad); background: color-mix(in srgb, var(--pass-bad) 14%, transparent); }
+.pass-center .pass-badge { align-self: center; }
+.pass-tag { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.pass-count { color: var(--muted); border: 1px solid var(--line); }
+
+/* Notices. */
+.pass-notice {
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: var(--bg_overlays);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.pass-notice.is-good { border-left-color: var(--pass-good); }
+.pass-notice.is-bad { border-left-color: var(--pass-bad); }
+.pass-notice.is-info { border-left-color: var(--accent); }
+.pass-center .pass-notice { align-self: stretch; text-align: left; }
+
+/* Fields. */
+.pass-stack { display: flex; flex-direction: column; gap: 14px; }
+.pass-field { display: flex; flex-direction: column; gap: 6px; }
+.pass-field label { font-size: 13px; font-weight: 650; }
+.pass-optional { color: var(--muted); font-weight: 400; }
+.pass-page input[type="text"],
+.pass-page input[type="email"],
+.pass-page input[type="password"],
+.pass-page input[type="number"] {
+  position: static;
+  width: 100%;
+  max-width: none;
+  height: 40px;
+  margin: 0;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg_color);
+  color: var(--text);
+  font: inherit;
+  box-shadow: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.pass-page input:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.pass-page input::placeholder { color: var(--muted); }
+.pass-inline { display: flex; gap: 8px; }
+.pass-inline input { flex: 1 1 auto; min-width: 0; }
+.pass-grid { display: grid; grid-template-columns: 1fr 110px auto; align-items: end; gap: 10px; }
+.pass-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+
+/* Buttons. */
+.pass-page button {
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.pass-page .pass-btn.is-block { width: 100%; }
+.pass-page .pass-btn.is-ghost { background: transparent; border-color: var(--line); color: var(--text); }
+.pass-page .pass-btn.is-ghost:hover { border-color: var(--accent); color: var(--accent); background: transparent; }
+.pass-page .pass-btn.is-danger:hover { border-color: var(--pass-bad); color: var(--pass-bad); }
+.pass-page .pass-btn.is-small { min-height: 32px; padding: 0 12px; font-size: 13px; }
+.pass-btn .pass-mono { margin-left: 4px; color: var(--muted); }
+
+/* Payment method tiles. */
+.pass-methods { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.pass-page .pass-method {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-height: 64px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg_color);
+  color: var(--text);
+  text-align: left;
+  white-space: normal;
+}
+.pass-page .pass-method:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg_color));
+  color: var(--text);
+}
+.pass-method strong { font-size: 15px; }
+.pass-method span { color: var(--muted); font-size: 12px; font-weight: 500; }
+
+/* Whitelisted addresses. */
+.pass-ips {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.pass-ips li {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--line);
+  padding: 8px 8px 8px 14px;
+  background: var(--bg_color);
 }
-.pass-list form { margin: 0; }
-.pass-logout { margin-top: 28px; }
+.pass-ips li + li { border-top: 1px solid var(--line); }
+.pass-ips code { overflow-wrap: anywhere; }
+
+/* Logins shown once. */
+.pass-login {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 16px;
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg_color);
+  text-align: left;
+}
+.pass-center .pass-login { align-self: stretch; }
+.pass-login dt { color: var(--muted); }
+.pass-login dd { margin: 0; }
+.pass-login code { font-size: 15px; user-select: all; word-break: break-all; }
+
+/* Admin issuing card. */
+.pass-card.is-admin { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.pass-issued {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--pass-good) 40%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--pass-good) 7%, var(--bg_color));
+}
+.pass-copy {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--bg_color);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}
+
+.pass-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: pass-spin 0.9s linear infinite;
+}
+@keyframes pass-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pass-spinner { animation: none; } }
+
+@media (max-width: 560px) {
+  .pass-page { margin-top: 12px; padding: 0 10px 32px; }
+  .pass-card, .pass-hero { padding: 16px; }
+  .pass-grid { grid-template-columns: 1fr 1fr; }
+  .pass-grid button { grid-column: 1 / -1; }
+  .pass-card-head { flex-direction: column; }
+}
 
 .firefox-warning-ignore { display: none; }
 .firefox-media-warning button {

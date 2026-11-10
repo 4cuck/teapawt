@@ -58,10 +58,6 @@ enableDebug = false
 # Generate a unique value with at least 32 characters.
 debugToken = ""
 
-# Token for /.admin/pass, where the operator issues a search pass by hand (for
-# donors). At least 32 characters. Empty turns /.admin off.
-adminToken = ""
-
 # HTTP/HTTPS proxy for media fetches. X API calls use socksProxiesFile when set.
 proxy     = ""
 proxyAuth = ""

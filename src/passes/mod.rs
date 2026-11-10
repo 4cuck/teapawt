@@ -60,6 +60,11 @@ pub const SESSION_DAYS: i64 = 180;
 pub const PASS_DAYS: i64 = 31;
 pub const MAX_ADDRESSES: usize = 5;
 pub const DAY: i64 = 86_400;
+/// The pass account that issues passes by hand from its own pass page.
+/// Bought logins are always `pass-…`, so no checkout can make this name.
+pub const ADMIN_USERNAME: &str = "admin";
+/// Longest pass one hand-issued grant can add.
+pub const MAX_GRANT_DAYS: i64 = 366;
 const HOUR: i64 = 3600;
 /// Card and LZT orders are read back from the provider this long.
 const PENDING_WINDOW: i64 = 2 * DAY;
@@ -189,6 +194,12 @@ pub struct Account {
    pub renews:     bool,
    pub card:       bool,
    pub addresses:  Vec<String>,
+}
+
+impl Account {
+   pub fn is_admin(&self) -> bool {
+      self.username == ADMIN_USERNAME
+   }
 }
 
 pub enum Claim {
