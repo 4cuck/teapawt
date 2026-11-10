@@ -254,9 +254,7 @@ async fn main() -> eyre::Result<()> {
                  connect-src 'self' https://challenges.cloudflare.com https://*.twimg.com https://video.pscp.tv https://*.video.pscp.tv; \
                  frame-src https://challenges.cloudflare.com; \
                  manifest-src 'self'; \
-                 form-action 'self' https://nitter.cf https://www.nitter.cf https://xitter.cf https://www.xitter.cf \
-                 https://checkout.stripe.com https://nowpayments.io https://*.nowpayments.io \
-                 https://lzt.market https://*.lzt.market; \
+                 form-action 'self' https://nitter.cf https://www.nitter.cf https://xitter.cf https://www.xitter.cf; \
                  base-uri 'self'; \
                  frame-ancestors 'none'"
             ),

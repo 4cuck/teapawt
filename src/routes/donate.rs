@@ -5,7 +5,7 @@ use axum::{
    body::Bytes,
    extract::State,
    http::{HeaderMap, StatusCode, header},
-   response::{Html, IntoResponse, Redirect, Response},
+   response::{Html, IntoResponse, Response},
    routing::{get, post},
 };
 use axum_extra::extract::CookieJar;
@@ -140,7 +140,7 @@ async fn start_donation(
    match result {
       Ok(url) => {
          state.donations.remember_pending(&id, provider, cents).await;
-         Redirect::to(&url).into_response()
+         checkout_handoff(&state, &jar, &url)
       },
       Err(err) => {
          tracing::warn!(provider, "donation checkout failed: {}", err.0);
@@ -153,6 +153,21 @@ async fn start_donation(
          .await
       },
    }
+}
+
+fn checkout_handoff(state: &AppState, jar: &CookieJar, url: &str) -> Response {
+   let prefs = Prefs::from_cookies(jar, &state.config);
+   let markup = PageLayout::new(&state.config, "Checkout", donate_view::render_checkout_handoff(url))
+      .prefs(&prefs)
+      .referer("/donate")
+      .render();
+   let mut response = Html(markup.into_string()).into_response();
+   let headers = response.headers_mut();
+   headers.insert(header::CACHE_CONTROL, header::HeaderValue::from_static("private, no-store"));
+   if let Ok(refresh) = header::HeaderValue::from_str(&format!("0; url={url}")) {
+      headers.insert(header::REFRESH, refresh);
+   }
+   response
 }
 
 async fn thanks(

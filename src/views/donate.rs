@@ -72,6 +72,19 @@ pub fn render_donate_page(
    }
 }
 
+/// Landing page between the donate form and the provider. The form posts here
+/// and this page navigates on, so CSP `form-action` never sees the provider's
+/// redirect chain (Chromium/Brave block cross-origin form redirects to unlisted hosts).
+pub fn render_checkout_handoff(checkout_url: &str) -> Markup {
+   html! {
+       div class="overlay-panel donate-page" {
+           h1 { "Opening checkout" }
+           p { "You are being sent to the payment page." }
+           p { a class="donate-meter-button" href=(checkout_url) rel="noreferrer" { "Continue to checkout" } }
+       }
+   }
+}
+
 pub fn render_thanks(confirmed: bool, provider: &str) -> Markup {
    html! {
        div class="overlay-panel donate-page" {
