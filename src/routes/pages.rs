@@ -181,7 +181,10 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
       .configured()
       .then(search_turnstile_warning);
    let scrape_note = state.config.scrape.enabled.then(|| {
-      crate::views::scrape::scrape_notice(&crate::donations::format_usd(state.passes.price_cents()))
+      crate::views::scrape::scrape_notice(
+         &crate::donations::format_usd(state.passes.price_cents()),
+         &crate::donations::format_usd(progress.goal_cents),
+      )
    });
    let notice = if drive.is_none()
       && firefox_note.is_none()

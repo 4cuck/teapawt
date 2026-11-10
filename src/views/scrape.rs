@@ -93,21 +93,24 @@ pub fn render_gate(page: &GatePage<'_>) -> Markup {
    }
 }
 
-/// The home page notice while scraping is slowing the site.
-pub fn scrape_notice(price: &str) -> Markup {
+/// The home page notice about the Tencent Cloud scraper, now that it is gated.
+pub fn scrape_notice(price: &str, goal: &str) -> Markup {
    html! {
        aside class="home-announce scrape-announce" {
-           strong { "Profiles and RSS are slow because of a scraper on Tencent Cloud" }
+           strong { "Profiles and RSS are fast again" }
            p {
-               "Someone is scraping this site from Tencent Cloud's network in Singapore (AS132203): "
-               "over 6,000 pages a minute, from more than a thousand rotating addresses. "
-               "Every page costs a request on a limited pool of X accounts, so their traffic uses up "
-               "what readers need, and profiles and feeds wait 10 to 40 seconds."
+               "A scraper on Tencent Cloud's network in Singapore (AS132203) was loading "
+               "over 6,000 pages a minute from more than a thousand rotating addresses. "
+               "Every page costs a request on a limited pool of X accounts, so profiles and feeds "
+               "were waiting 10 to 40 seconds. That network now has to pass a Cloudflare check "
+               "on every address, and pages load at normal speed again."
            }
            p {
-               "Tencent Cloud, and whoever runs it: pay to scrape at this volume. A "
-               a href="/search-pass" { "search pass" } " is " (price) " a month, and that money buys more accounts. "
-               "Until then that network has to solve a Cloudflare check on every address."
+               "Tencent Cloud, and whoever owns those addresses: buy a "
+               a href="/search-pass" { "search pass" } " (" (price) " a month) and "
+               a href="/donate" { "donate" } " so this site reaches its " (goal) " monthly goal. "
+               "That money pays for more X accounts, keeps the site up, "
+               "and then you can scrape as much as you want."
            }
            p {
                a href="/donate" { "Donations" } " buy accounts for everyone. Donated already and want a search pass? "
