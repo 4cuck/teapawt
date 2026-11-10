@@ -53,6 +53,14 @@ pub struct Conversation {
 pub type Timeline = PaginatedResult<Tweets>;
 
 impl Timeline {
+   /// Whether the page holds a post other than the pin.
+   ///
+   /// X answers some accounts a profile's first page with only the pin, or
+   /// with nothing at all, for a profile with thousands of posts.
+   pub fn has_posts(&self) -> bool {
+      self.content.iter().flatten().any(|tweet| !tweet.pinned)
+   }
+
    /// Drop groups whose first post is a reply to someone else.
    ///
    /// Used when the profile timeline is served from `UserTweetsAndReplies`,

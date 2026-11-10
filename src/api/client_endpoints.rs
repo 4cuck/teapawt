@@ -33,6 +33,64 @@ fn without_cursors(mut timeline: Timeline) -> Timeline {
    timeline
 }
 
+/// The answers a profile's first page has had so far, across routes.
+///
+/// X answers some accounts with an empty timeline, or only the pin, while it
+/// serves the same page to the rest. One empty answer is therefore a miss to
+/// route around, not an empty profile: it is believed once a second route
+/// also comes back empty.
+#[derive(Default)]
+struct FirstPage {
+   empty: Option<Timeline>,
+}
+
+impl FirstPage {
+   /// The page, once this answer settles it.
+   fn hear(&mut self, answer: Result<Timeline>) -> Option<Result<Timeline>> {
+      match answer {
+         Ok(timeline) if timeline.has_posts() || self.empty.is_some() => Some(Ok(timeline)),
+         Ok(timeline) => {
+            self.empty = Some(timeline);
+            None
+         },
+         Err(err) if another_route_may_answer(&err) => None,
+         Err(err) => Some(Err(err)),
+      }
+   }
+
+   /// No route settled it: X sent nothing it could be checked against, or
+   /// every route was out of quota.
+   const fn unsettled(&self) -> Error {
+      if self.empty.is_some() {
+         Error::TransientUpstream
+      } else {
+         Error::RateLimited
+      }
+   }
+}
+
+/// A profile tab's first page, which the profile's counts say holds posts.
+///
+/// An empty one, or the pin alone, is asked for once more by `again`, and
+/// believed if that comes back empty too (see [`FirstPage`]). Errors pass
+/// through: the request layer has already retried those.
+pub async fn recheck_empty<F, Fut>(first: Result<Timeline>, again: F) -> Result<Timeline>
+where
+   F: FnOnce() -> Fut,
+   Fut: Future<Output = Result<Timeline>>,
+{
+   match first {
+      Ok(timeline) if !timeline.has_posts() => {
+         let mut page = FirstPage::default();
+         let _ = page.hear(Ok(timeline));
+         page
+            .hear(again().await)
+            .unwrap_or_else(|| Err(page.unsettled()))
+      },
+      other => other,
+   }
+}
+
 /// Entry ids only, so an empty Explore tab can be diagnosed without logging posts.
 fn explore_shape(value: &serde_json::Value) -> String {
    let mut ids = Vec::new();
@@ -589,9 +647,10 @@ impl ApiClient {
    ///
    /// A first page goes to `UserTweets` only on an account free to answer
    /// it now. When every account with quota is mid-call, or none has quota,
-   /// the page comes from [`first_page_fallback`](Self::first_page_fallback)
-   /// instead of queueing seconds behind the calls holding them. Only when
-   /// both fallbacks fail on a busy pool does it wait for `UserTweets`.
+   /// the page comes from `UserOriginalsTimeline`, then from the replies
+   /// timeline, instead of queueing seconds behind the calls holding them.
+   /// Only when both fail on a busy pool does it wait for `UserTweets`.
+   /// An empty page moves down the same ladder; see [`FirstPage`].
    pub async fn get_user_tweets(&self, user_id: &str, cursor: Option<&str>) -> Result<Timeline> {
       if cursor.is_some() {
          return self.fetch_user_tweets(user_id, cursor).await;
@@ -608,24 +667,30 @@ impl ApiClient {
             if rx.changed().await.is_ok()
                && let Some(bytes) = rx.borrow_and_update().clone()
                && let Ok(parsed) = Self::parse_coalesced::<UserTimelineData>(&bytes)
+               && let Ok(timeline) = parser::parse_timeline(&parsed)
+               && timeline.has_posts()
             {
-               return parser::parse_timeline(&parsed);
+               return Ok(timeline);
             }
             None
          },
          super::InflightTicket::Leader(guard) => Some(guard),
       };
 
+      let mut page = FirstPage::default();
+
       // The guard is released before any other route: the wait below sends
       // this same call, which would otherwise queue behind itself.
       let busy = match self.charged_free_session(endpoints::GRAPH_USER_TWEETS).await {
          Ok(Some(session)) => match self.user_tweets_on(session, &variables, guard).await {
-            Ok(timeline) => {
-               self.timeline_routes.count(Route::Primary);
-               return Ok(timeline);
-            },
             Err(Error::RateLimited) => false,
             Err(err) => return Err(err),
+            answer => {
+               if let Some(settled) = self.settle(&mut page, Route::Primary, answer) {
+                  return settled;
+               }
+               false
+            },
          },
          Ok(None) => {
             drop(guard);
@@ -638,18 +703,40 @@ impl ApiClient {
          Err(err) => return Err(err),
       };
 
-      match self.first_page_fallback(user_id).await {
-         Ok((route, timeline)) => {
-            self.timeline_routes.count(route);
-            Ok(timeline)
-         },
-         Err(err) if busy && another_route_may_answer(&err) => {
-            self.timeline_routes.count(Route::Waited);
-            self.fetch_user_tweets(user_id, None).await
-         },
-         Err(err) if another_route_may_answer(&err) => Err(Error::RateLimited),
-         Err(err) => Err(err),
+      // Without `UserTweets`, so without reposts: original posts, which have
+      // about five times its quota per account, else the replies timeline
+      // with replies removed.
+      let originals = self.originals_first_page(user_id).await;
+      if let Some(settled) = self.settle(&mut page, Route::Originals, originals) {
+         return settled;
       }
+      let replies = self.posts_from_replies(user_id).await;
+      if let Some(settled) = self.settle(&mut page, Route::Replies, replies) {
+         return settled;
+      }
+
+      if !busy {
+         return Err(page.unsettled());
+      }
+      self.timeline_routes.count(Route::Waited);
+      match self.fetch_user_tweets(user_id, None).await {
+         Err(err) => Err(err),
+         answer => page.hear(answer).unwrap_or_else(|| Err(page.unsettled())),
+      }
+   }
+
+   /// Hand one route's answer to `page`, counting the route that served it.
+   fn settle(
+      &self,
+      page: &mut FirstPage,
+      route: Route,
+      answer: Result<Timeline>,
+   ) -> Option<Result<Timeline>> {
+      let settled = page.hear(answer)?;
+      if settled.is_ok() {
+         self.timeline_routes.count(route);
+      }
+      Some(settled)
    }
 
    /// The first page on a lease already taken, shared with identical calls
@@ -677,19 +764,7 @@ impl ApiClient {
    }
 
    /// A first page without `UserTweets`: original posts, which have about
-   /// five times its quota per account, else the replies timeline with
-   /// replies removed. Either way it has no reposts.
-   async fn first_page_fallback(&self, user_id: &str) -> Result<(Route, Timeline)> {
-      match self.originals_first_page(user_id).await {
-         Ok(timeline) => Ok((Route::Originals, timeline)),
-         Err(err) if another_route_may_answer(&err) => self
-            .posts_from_replies(user_id)
-            .await
-            .map(|timeline| (Route::Replies, timeline)),
-         Err(err) => Err(err),
-      }
-   }
-
+   /// five times its quota per account. It has no reposts.
    async fn originals_first_page(&self, user_id: &str) -> Result<Timeline> {
       let data = self
          .graphql_request::<UserTimelineData>(
@@ -1780,4 +1855,109 @@ pub struct WatchedBroadcast {
    pub replay: bool,
    pub status_line: String,
    pub m3u8: String,
+}
+
+#[cfg(test)]
+mod first_page_tests {
+   use super::{Error, FirstPage, Timeline, Tweet, recheck_empty};
+
+   fn page(pinned: &[bool]) -> Timeline {
+      Timeline {
+         content: pinned
+            .iter()
+            .map(|&pinned| {
+               vec![Tweet {
+                  pinned,
+                  ..Tweet::default()
+               }]
+            })
+            .collect(),
+         ..Timeline::default()
+      }
+   }
+
+   #[test]
+   fn a_page_with_posts_settles_at_once() {
+      let mut first = FirstPage::default();
+      assert!(matches!(first.hear(Ok(page(&[true, false]))), Some(Ok(_))));
+   }
+
+   #[test]
+   fn one_empty_answer_asks_the_next_route() {
+      let mut first = FirstPage::default();
+      assert!(first.hear(Ok(page(&[]))).is_none());
+      assert!(matches!(first.hear(Ok(page(&[false]))), Some(Ok(tl)) if tl.has_posts()));
+   }
+
+   #[test]
+   fn a_pin_alone_is_an_empty_answer() {
+      let mut first = FirstPage::default();
+      assert!(first.hear(Ok(page(&[true]))).is_none());
+   }
+
+   #[test]
+   fn two_empty_answers_are_believed() {
+      let mut first = FirstPage::default();
+      assert!(first.hear(Ok(page(&[true]))).is_none());
+      assert!(matches!(first.hear(Ok(page(&[]))), Some(Ok(tl)) if !tl.has_posts()));
+   }
+
+   #[test]
+   fn an_unconfirmed_empty_answer_is_not_shown() {
+      let mut first = FirstPage::default();
+      assert!(first.hear(Ok(page(&[]))).is_none());
+      assert!(first.hear(Err(Error::RateLimited)).is_none());
+      assert!(matches!(first.unsettled(), Error::TransientUpstream));
+   }
+
+   #[test]
+   fn quota_everywhere_is_still_a_rate_limit() {
+      let mut first = FirstPage::default();
+      assert!(first.hear(Err(Error::RateLimited)).is_none());
+      assert!(matches!(first.unsettled(), Error::RateLimited));
+   }
+
+   #[test]
+   fn an_answer_about_the_account_ends_the_ladder() {
+      let mut first = FirstPage::default();
+      assert!(first.hear(Ok(page(&[]))).is_none());
+      let settled = first.hear(Err(Error::UserSuspended("x".into())));
+      assert!(matches!(settled, Some(Err(Error::UserSuspended(_)))));
+   }
+
+   #[tokio::test]
+   async fn a_tab_with_posts_is_not_asked_again() {
+      let shown = recheck_empty(Ok(page(&[false])), || async {
+         panic!("asked X again for a page that had posts")
+      })
+      .await;
+      assert!(matches!(shown, Ok(tl) if tl.has_posts()));
+   }
+
+   #[tokio::test]
+   async fn an_error_is_not_asked_again() {
+      let shown = recheck_empty(Err(Error::RateLimited), || async {
+         panic!("asked X again after the request layer gave up")
+      })
+      .await;
+      assert!(matches!(shown, Err(Error::RateLimited)));
+   }
+
+   #[tokio::test]
+   async fn a_pin_only_tab_is_asked_again() {
+      let shown = recheck_empty(Ok(page(&[true])), || async { Ok(page(&[true, false])) }).await;
+      assert!(matches!(shown, Ok(tl) if tl.has_posts()));
+   }
+
+   #[tokio::test]
+   async fn a_tab_empty_twice_is_believed() {
+      let shown = recheck_empty(Ok(page(&[])), || async { Ok(page(&[])) }).await;
+      assert!(matches!(shown, Ok(tl) if !tl.has_posts()));
+   }
+
+   #[tokio::test]
+   async fn an_empty_tab_whose_recheck_fails_asks_for_a_refresh() {
+      let shown = recheck_empty(Ok(page(&[])), || async { Err(Error::RateLimited) }).await;
+      assert!(matches!(shown, Err(Error::TransientUpstream)));
+   }
 }

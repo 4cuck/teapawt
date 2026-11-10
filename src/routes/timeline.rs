@@ -17,10 +17,10 @@ use super::{
 };
 use crate::{
    AppState,
-   api::budget,
+   api::{budget, recheck_empty},
    cache::{Hit, keys as cache_keys, ttl},
    error::{Error, Result},
-   types::{Prefs, Profile, Timeline, TimelineKind},
+   types::{Prefs, Profile, Timeline, TimelineKind, User},
    utils::formatters,
    views::{layout, profile, search::render_search_panel_with_action, timeline},
 };
@@ -320,6 +320,15 @@ async fn filtered_posts(
          }
       })
       .await?;
+   let promised = counts_promise_posts(&user, TimelineKind::Tweets, filter);
+   let timeline_result = if cursor.is_none() && promised {
+      recheck_empty(timeline_result, || {
+         fetch_filtered(state, username, &user.id, None, filter, sort)
+      })
+      .await
+   } else {
+      timeline_result
+   };
 
    match timeline_result {
       Ok(data) => {
@@ -396,16 +405,46 @@ async fn filtered_timeline(
    if let Some(Hit::Fresh(hit) | Hit::Stale(hit)) = state.cache.lookup::<Timeline>(&cache_key) {
       return Ok(hit);
    }
+   fetch_filtered(state, username, user_id, cursor, filter, sort).await
+}
+
+/// One page of the posts menu from X, stored for the next view.
+async fn fetch_filtered(
+   state: &AppState,
+   username: &str,
+   user_id: &str,
+   cursor: Option<&str>,
+   filter: &'static str,
+   sort: &'static str,
+) -> Result<Timeline> {
    let result = state
       .api
       .get_filtered_posts(user_id, cursor, filter, sort == "popular")
       .await;
    if let Ok(ref data) = result {
-      state
-         .cache
-         .set_swr(&cache_key, data, ttl::DEFAULT, ttl::DEFAULT_STALE);
+      state.cache.set_swr(
+         &cache_keys::filtered_posts(username, filter, sort, cursor),
+         data,
+         ttl::DEFAULT,
+         ttl::DEFAULT_STALE,
+      );
    }
    result
+}
+
+/// Whether the profile's counts say this first page holds posts, so an
+/// empty one is X's miss rather than the answer. Highlights, reposts and
+/// articles have no count to go on, and an empty one is common.
+fn counts_promise_posts(user: &User, tab: TimelineKind, filter: &str) -> bool {
+   if user.protected || user.suspended {
+      return false;
+   }
+   match tab {
+      TimelineKind::Tweets => filter != "highlights" && user.tweets > 0,
+      TimelineKind::Replies => user.tweets > 0,
+      TimelineKind::Media => user.media > 0,
+      TimelineKind::Reposts | TimelineKind::Articles | TimelineKind::Search => false,
+   }
 }
 
 async fn user_timeline(
@@ -643,6 +682,14 @@ async fn user_tab_handler(
          }
       })
       .await?;
+   let timeline_result = if cursor.is_none() && counts_promise_posts(&user, tab, "") {
+      recheck_empty(timeline_result, || {
+         refresh_tab(state, username, &user.id, tab, cache_kind)
+      })
+      .await
+   } else {
+      timeline_result
+   };
 
    let has_request_cursor = cursor.is_some();
 
@@ -733,22 +780,33 @@ async fn tab_timeline(
    let cache_key = cache_keys::timeline(username, cache_kind);
    if let Some(cached) = helpers::swr_take::<Timeline, _, _>(state, &cache_key, {
       let user_id = user_id.to_owned();
-      let cache_key = cache_key.clone();
+      let username = username.to_owned();
+      let cache_kind = cache_kind.to_owned();
       move |state| async move {
-         if let Ok(data) = fetch_tab(&state, &user_id, None, tab).await {
-            state
-               .cache
-               .set_swr(&cache_key, &data, ttl::DEFAULT, ttl::DEFAULT_STALE);
-         }
+         let _ = refresh_tab(&state, &username, &user_id, tab, &cache_kind).await;
       }
    }) {
       return Ok(cached);
    }
+   refresh_tab(state, username, user_id, tab, cache_kind).await
+}
+
+/// A tab's first page from X, stored for the next view.
+async fn refresh_tab(
+   state: &AppState,
+   username: &str,
+   user_id: &str,
+   tab: TimelineKind,
+   cache_kind: &str,
+) -> Result<Timeline> {
    let result = fetch_tab(state, user_id, None, tab).await;
    if let Ok(ref data) = result {
-      state
-         .cache
-         .set_swr(&cache_key, data, ttl::DEFAULT, ttl::DEFAULT_STALE);
+      state.cache.set_swr(
+         &cache_keys::timeline(username, cache_kind),
+         data,
+         ttl::DEFAULT,
+         ttl::DEFAULT_STALE,
+      );
    }
    result
 }
@@ -1121,4 +1179,47 @@ async fn multi_user_timeline(
       .prefs(&prefs)
       .render();
    Ok(Html(markup.into_string()).into_response())
+}
+
+#[cfg(test)]
+mod counts_tests {
+   use super::{TimelineKind, User, counts_promise_posts};
+
+   fn user(tweets: i64, media: i64) -> User {
+      User {
+         tweets,
+         media,
+         ..User::default()
+      }
+   }
+
+   #[test]
+   fn tabs_with_a_count_expect_posts() {
+      let busy = user(2_236, 765);
+      assert!(counts_promise_posts(&busy, TimelineKind::Replies, ""));
+      assert!(counts_promise_posts(&busy, TimelineKind::Media, ""));
+      assert!(counts_promise_posts(&busy, TimelineKind::Tweets, "posts"));
+      assert!(counts_promise_posts(&busy, TimelineKind::Tweets, "all"));
+   }
+
+   #[test]
+   fn tabs_without_a_count_believe_x() {
+      let busy = user(2_236, 765);
+      assert!(!counts_promise_posts(&busy, TimelineKind::Tweets, "highlights"));
+      assert!(!counts_promise_posts(&busy, TimelineKind::Reposts, ""));
+      assert!(!counts_promise_posts(&busy, TimelineKind::Articles, ""));
+   }
+
+   #[test]
+   fn a_zero_count_believes_x() {
+      assert!(!counts_promise_posts(&user(0, 0), TimelineKind::Replies, ""));
+      assert!(!counts_promise_posts(&user(40, 0), TimelineKind::Media, ""));
+   }
+
+   #[test]
+   fn a_closed_account_believes_x() {
+      let mut closed = user(500, 50);
+      closed.protected = true;
+      assert!(!counts_promise_posts(&closed, TimelineKind::Replies, ""));
+   }
 }
