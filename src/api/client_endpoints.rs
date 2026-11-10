@@ -25,11 +25,37 @@ const fn another_route_may_answer(err: &Error) -> bool {
    !settles_the_call(err) && !matches!(err, Error::ClientBudgetExhausted)
 }
 
-/// A first page served off `UserTweets` carries no cursors, so "load more"
-/// never sends another timeline's cursor to `UserTweets`.
-fn without_cursors(mut timeline: Timeline) -> Timeline {
+/// The timeline a profile's "load more" cursor belongs to.
+///
+/// A first page served off `UserTweets` hands out its own timeline's cursor
+/// with that timeline's tag, so the next page is asked of the same one: a
+/// cursor sent to another timeline is refused, and dropping it ended a
+/// profile with half a million posts after twenty. An untagged cursor is
+/// `UserTweets`'.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PostsCursor<'a> {
+   Tweets(&'a str),
+   Originals(&'a str),
+   Replies(&'a str),
+}
+
+impl<'a> PostsCursor<'a> {
+   const ORIGINALS: &'static str = "originals:";
+   const REPLIES: &'static str = "replies:";
+
+   fn parse(raw: &'a str) -> Self {
+      raw.strip_prefix(Self::ORIGINALS)
+         .map(Self::Originals)
+         .or_else(|| raw.strip_prefix(Self::REPLIES).map(Self::Replies))
+         .unwrap_or(Self::Tweets(raw))
+   }
+}
+
+/// Tag a fallback page's next cursor with its timeline. The top cursor is
+/// dropped: nothing asks for newer posts through it.
+fn tag_cursor(mut timeline: Timeline, tag: &str) -> Timeline {
    timeline.top = None;
-   timeline.bottom = None;
+   timeline.bottom = timeline.bottom.take().map(|cursor| format!("{tag}{cursor}"));
    timeline
 }
 
@@ -652,8 +678,12 @@ impl ApiClient {
    /// Only when both fail on a busy pool does it wait for `UserTweets`.
    /// An empty page moves down the same ladder; see [`FirstPage`].
    pub async fn get_user_tweets(&self, user_id: &str, cursor: Option<&str>) -> Result<Timeline> {
-      if cursor.is_some() {
-         return self.fetch_user_tweets(user_id, cursor).await;
+      if let Some(cursor) = cursor {
+         return match PostsCursor::parse(cursor) {
+            PostsCursor::Tweets(cursor) => self.fetch_user_tweets(user_id, Some(cursor)).await,
+            PostsCursor::Originals(cursor) => self.originals_page(user_id, Some(cursor)).await,
+            PostsCursor::Replies(cursor) => self.posts_from_replies(user_id, Some(cursor)).await,
+         };
       }
 
       let variables = endpoints::user_tweets_vars(user_id, None);
@@ -705,12 +735,12 @@ impl ApiClient {
 
       // Without `UserTweets`, so without reposts: original posts, which have
       // about five times its quota per account, else the replies timeline
-      // with replies removed.
-      let originals = self.originals_first_page(user_id).await;
+      // with replies removed. Either one's cursor stays on its own timeline.
+      let originals = self.originals_page(user_id, None).await;
       if let Some(settled) = self.settle(&mut page, Route::Originals, originals) {
          return settled;
       }
-      let replies = self.posts_from_replies(user_id).await;
+      let replies = self.posts_from_replies(user_id, None).await;
       if let Some(settled) = self.settle(&mut page, Route::Replies, replies) {
          return settled;
       }
@@ -763,18 +793,18 @@ impl ApiClient {
       parser::parse_timeline(&data)
    }
 
-   /// A first page without `UserTweets`: original posts, which have about
-   /// five times its quota per account. It has no reposts.
-   async fn originals_first_page(&self, user_id: &str) -> Result<Timeline> {
+   /// A page without `UserTweets`: original posts, which have about five
+   /// times its quota per account. It has no reposts.
+   async fn originals_page(&self, user_id: &str, cursor: Option<&str>) -> Result<Timeline> {
       let data = self
          .graphql_request::<UserTimelineData>(
             endpoints::GRAPH_USER_ORIGINALS,
-            &endpoints::user_originals_vars(user_id, None, false),
+            &endpoints::user_originals_vars(user_id, cursor, false),
             endpoints::USER_REPOSTS_FEATURES,
             Some(endpoints::USER_REPOSTS_FIELD_TOGGLES),
          )
          .await?;
-      parser::parse_timeline(&data).map(without_cursors)
+      parser::parse_timeline(&data).map(|timeline| tag_cursor(timeline, PostsCursor::ORIGINALS))
    }
 
    async fn fetch_user_tweets(&self, user_id: &str, cursor: Option<&str>) -> Result<Timeline> {
@@ -850,10 +880,12 @@ impl ApiClient {
       parser::parse_timeline(&data)
    }
 
-   async fn posts_from_replies(&self, user_id: &str) -> Result<Timeline> {
-      let mut timeline = self.get_user_tweets_and_replies(user_id, None).await?;
+   /// The replies timeline with replies removed. A page may come back empty
+   /// with a cursor when every post on it was a reply.
+   async fn posts_from_replies(&self, user_id: &str, cursor: Option<&str>) -> Result<Timeline> {
+      let mut timeline = self.get_user_tweets_and_replies(user_id, cursor).await?;
       timeline.keep_posts();
-      Ok(without_cursors(timeline))
+      Ok(tag_cursor(timeline, PostsCursor::REPLIES))
    }
 
    /// Get user's media timeline.
@@ -1859,7 +1891,45 @@ pub struct WatchedBroadcast {
 
 #[cfg(test)]
 mod first_page_tests {
-   use super::{Error, FirstPage, Timeline, Tweet, recheck_empty};
+   use super::{Error, FirstPage, PostsCursor, Timeline, Tweet, recheck_empty, tag_cursor};
+
+   #[test]
+   fn a_fallback_cursor_comes_back_to_its_own_timeline() {
+      let originals = tag_cursor(
+         Timeline {
+            top: Some("top".into()),
+            bottom: Some("DAABCgAB".into()),
+            ..Timeline::default()
+         },
+         PostsCursor::ORIGINALS,
+      );
+      assert_eq!(originals.top, None);
+      let next = originals.bottom.as_deref().unwrap();
+      assert_eq!(PostsCursor::parse(next), PostsCursor::Originals("DAABCgAB"));
+
+      let replies = tag_cursor(
+         Timeline {
+            bottom: Some("HBaAgL".into()),
+            ..Timeline::default()
+         },
+         PostsCursor::REPLIES,
+      );
+      assert_eq!(
+         PostsCursor::parse(replies.bottom.as_deref().unwrap()),
+         PostsCursor::Replies("HBaAgL")
+      );
+   }
+
+   #[test]
+   fn an_untagged_cursor_is_user_tweets() {
+      assert_eq!(PostsCursor::parse("DAABCgAB"), PostsCursor::Tweets("DAABCgAB"));
+   }
+
+   #[test]
+   fn the_last_page_of_a_fallback_stays_the_last() {
+      let last = tag_cursor(Timeline::default(), PostsCursor::ORIGINALS);
+      assert_eq!(last.bottom, None);
+   }
 
    fn page(pinned: &[bool]) -> Timeline {
       Timeline {
