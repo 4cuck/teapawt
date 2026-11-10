@@ -1335,7 +1335,7 @@ impl ApiClient {
                      session_id = session.id,
                      session_user = %session.username,
                      endpoint,
-                     "X refused this account the call with a bare 429; resting it for the window"
+                     "X refused this account the call with a bare 429; resting it briefly"
                   );
                   self.sessions.disarm_meter(session);
                   self.sessions.rest_endpoint(session.id, endpoint).await;

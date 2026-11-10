@@ -62,7 +62,16 @@ pub struct SessionLimits {
    /// Kept out of profile pages. Search is tracked separately in `refused_ops`.
    #[serde(default)]
    pub profile_banned: bool,
+   /// Calls X refused this account with a bare 429, by endpoint, with when
+   /// it may try again. Kept apart from `apis`, which holds X's real window.
+   #[serde(skip)]
+   pub resting: HashMap<String, i64>,
 }
+
+/// How long an account sits out a call X refused it with a bare 429. Half of
+/// those refusals cleared within 36 s and nine in ten within 150 s; sitting
+/// out the whole 15-minute window took 1,130 accounts off profile lookups.
+const BARE_429_REST_SECS: i64 = 120;
 
 /// How long a globally-limited session stays limited before auto-recovery (15
 /// min).
@@ -130,7 +139,11 @@ pub(crate) enum Headroom {
 impl SessionLimits {
    /// Room for another call to `api` that will not be the one X rejects.
    pub(crate) fn headroom_at(&self, api: &str, op_name: &str, now: i64) -> Headroom {
-      if self.rejected || self.is_globally_limited_at(now) || self.refuses_at(op_name, now) {
+      if self.rejected
+         || self.is_globally_limited_at(now)
+         || self.refuses_at(op_name, now)
+         || self.resting_at(api, now)
+      {
          return Headroom::Blocked;
       }
       let Some(rate) = self.apis.get(api) else {
@@ -149,13 +162,28 @@ impl SessionLimits {
       if self.is_globally_limited() {
          return true;
       }
+      let now = time::OffsetDateTime::now_utc().unix_timestamp();
+      if self.resting_at(api, now) {
+         return true;
+      }
       if let Some(limit) = self.apis.get(api) {
-         let now = time::OffsetDateTime::now_utc().unix_timestamp();
          if limit.remaining == 0 && limit.reset > now {
             return true;
          }
       }
       false
+   }
+
+   /// Sit this account out of `api` for [`BARE_429_REST_SECS`], leaving its
+   /// recorded window as X last reported it.
+   pub fn rest(&mut self, api: &str) {
+      let now = time::OffsetDateTime::now_utc().unix_timestamp();
+      self.resting.retain(|_, until| *until > now);
+      self.resting.insert(api.to_owned(), now + BARE_429_REST_SECS);
+   }
+
+   pub(crate) fn resting_at(&self, api: &str, now: i64) -> bool {
+      self.resting.get(api).is_some_and(|until| *until > now)
    }
 
    /// Whether X refuses this account `api`. A search refusal is permanent.
@@ -225,6 +253,9 @@ impl SessionLimits {
          return Spend::Denied;
       }
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
+      if self.resting_at(api, now) {
+         return Spend::Denied;
+      }
       let Some(rate) = self.apis.get_mut(api) else {
          return Spend::Unmetered;
       };
@@ -351,6 +382,7 @@ impl Session {
             verified_ops: HashMap::new(),
             profile_strikes: 0,
             profile_banned: false,
+            resting: HashMap::new(),
          },
       )
    }
@@ -359,6 +391,26 @@ impl Session {
 #[cfg(test)]
 mod tests {
    use super::*;
+
+   #[test]
+   fn a_bare_429_rests_the_call_briefly_and_keeps_the_window() {
+      let mut limits = SessionLimits::default();
+      let now = time::OffsetDateTime::now_utc().unix_timestamp();
+      limits.update_limit("x/UserByScreenName", 150, 90, now + 600);
+      limits.rest("x/UserByScreenName");
+
+      assert_eq!(limits.try_spend("x/UserByScreenName"), super::Spend::Denied);
+      assert!(limits.is_limited("x/UserByScreenName"));
+      assert_eq!(limits.apis["x/UserByScreenName"].remaining, 90);
+      assert_eq!(limits.profile_strikes, 0);
+      assert_eq!(limits.try_spend("x/TweetDetail"), super::Spend::Unmetered);
+
+      let later = now + BARE_429_REST_SECS + 1;
+      assert_eq!(
+         limits.headroom_at("x/UserByScreenName", "UserByScreenName", later),
+         Headroom::Safe(90)
+      );
+   }
 
    #[test]
    fn a_search_refusal_is_kept() {
