@@ -20,6 +20,7 @@ use super::{
    latency::Latency,
    operations::Operations,
    parser,
+   timeline_route::TimelineRoutes,
 };
 use crate::{
    api::schema::{
@@ -400,6 +401,8 @@ pub struct ApiClient {
    denylist: super::search_denylist::SearchDenylist,
    latency: Arc<Latency>,
    hedges: Arc<Semaphore>,
+   /// Which call served each first profile page, reported every minute.
+   timeline_routes: Arc<TimelineRoutes>,
    /// Coalesces identical concurrent in-flight GraphQL calls; entries live
    /// only while the upstream request is in flight and are removed on drop.
    inflight: Arc<InflightMap>,
@@ -454,6 +457,7 @@ impl ApiClient {
          denylist: super::search_denylist::SearchDenylist::load(denylist_path),
          latency: Arc::new(Latency::default()),
          hedges: Arc::new(Semaphore::new(MAX_HEDGES)),
+         timeline_routes: Arc::new(TimelineRoutes::default()),
          inflight: Arc::new(StdMutex::new(HashMap::new())),
       }
    }
@@ -485,6 +489,13 @@ impl ApiClient {
             }
             for line in api.sessions.queue_report() {
                tracing::info!("account queue {line}");
+            }
+            if let Some(report) = api.timeline_routes.report(api.sessions.len()) {
+               if report.fallback_needed {
+                  tracing::warn!("profile timelines {}", report.line);
+               } else {
+                  tracing::info!("profile timelines {}", report.line);
+               }
             }
             let parked = api.client.parked_exits();
             if !parked.is_empty() {
@@ -992,6 +1003,18 @@ impl ApiClient {
       }
    }
 
+   /// [`charged_session`](Self::charged_session) that never queues: `None`
+   /// when every account with quota is mid-call, so the caller can take a
+   /// route with spare quota instead. Nothing stays billed without a lease.
+   pub(crate) async fn charged_free_session(&self, endpoint: &str) -> Result<Option<SessionLease>> {
+      self.charge(endpoint).await?;
+      let free = self.sessions.acquire_free(endpoint, None).await;
+      if !matches!(free, Ok(Some(_))) {
+         self.refund(endpoint).await;
+      }
+      free
+   }
+
    /// [`charged_session`](Self::charged_session) where the endpoint depends on
    /// which kind of session is chosen.
    pub(crate) async fn charged_session_by_kind(
@@ -1303,24 +1326,28 @@ impl ApiClient {
 
          if status.as_u16() == 429 {
             if ip_throttle(&body, account_window) {
+               // A bare 429 while the exit is still being served is X
+               // refusing this account the call. Refunded, it stayed the
+               // fullest account and was picked again about a thousand
+               // times a minute, each pick a visitor's retry and often a 503.
+               if self.client.exit_still_served(&self.egress_for(session)) {
+                  tracing::warn!(
+                     session_id = session.id,
+                     session_user = %session.username,
+                     endpoint,
+                     "X refused this account the call with a bare 429; resting it for the window"
+                  );
+                  self.sessions.disarm_meter(session);
+                  self.sessions.rest_endpoint(session.id, endpoint).await;
+                  return Err(Error::RateLimited);
+               }
+               // The HTTP layer has parked the exit and tried another.
                tracing::warn!(
                   session_id = session.id,
                   session_user = %session.username,
                   endpoint,
                   "X edge rate-limited this proxy exit"
                );
-               // The edge block is the IP, not this account's window. Without
-               // parking, every account pinned there kept walking into it.
-               let egress = self.egress_for(session);
-               if let Some(proxy) = egress.proxy.as_ref()
-                  && let Some(cooldown) = self.client.park_throttled_exit(proxy)
-               {
-                  tracing::warn!(
-                     port = proxy.port,
-                     cooldown_secs = cooldown.as_secs(),
-                     "X edge rate-limited proxy exit; parking it"
-                  );
-               }
                self.sessions.refund_if_metered(session, endpoint).await;
                return Err(Error::IpThrottled);
             }

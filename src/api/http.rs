@@ -78,6 +78,10 @@ const EDGE_PARKING: Parking = Parking {
    max: Duration::from_hours(2),
    memory: Duration::from_mins(30),
 };
+/// An exit X answered a call through this recently is not IP-blocked, so a
+/// bare 429 on it is about the account. Without this, one refused account
+/// parked an exit 53 other accounts were still being served through.
+const EXIT_PROOF: Duration = Duration::from_secs(5);
 /// Headers later than this count against the exit that carried the call.
 const SLOW_HEADERS: Duration = Duration::from_secs(1);
 /// A call dropped unanswered this late, because another copy answered
@@ -274,6 +278,8 @@ struct PrimaryPool {
    /// lengthen the next throttle parking or the other way round.
    relapses: Mutex<HashMap<u64, (u32, u64)>>,
    edge_relapses: Mutex<HashMap<u64, (u32, u64)>>,
+   /// When X last answered a call through each exit with a success.
+   served: Mutex<HashMap<u64, u64>>,
    /// Exits named in the ban file: a Cloudflare block until it lapses, any
    /// other line until it is deleted. Kept across restarts.
    banned: Mutex<HashSet<u64>>,
@@ -289,6 +295,7 @@ impl PrimaryPool {
          samples: Mutex::new(HashMap::new()),
          relapses: Mutex::new(HashMap::new()),
          edge_relapses: Mutex::new(HashMap::new()),
+         served: Mutex::new(HashMap::new()),
          banned: Mutex::new(HashSet::new()),
          banned_file: None,
       }
@@ -540,6 +547,30 @@ impl PrimaryPool {
       Some(park)
    }
 
+   /// X answered a call through this exit with a success.
+   fn note_served(&self, proxy: &ProxyConfig) {
+      let tag = proxy_tag(Some(proxy));
+      if !self.tags.contains(&tag) {
+         return;
+      }
+      if let Ok(mut served) = self.served.lock() {
+         served.insert(tag, unix_millis());
+      }
+   }
+
+   /// Whether X served a call through this exit within [`EXIT_PROOF`]. Its IP
+   /// is then not what X is refusing.
+   fn recently_served(&self, proxy: &ProxyConfig) -> bool {
+      let proof = u64::try_from(EXIT_PROOF.as_millis()).unwrap_or(u64::MAX);
+      let since = unix_millis().saturating_sub(proof);
+      self
+         .served
+         .lock()
+         .ok()
+         .and_then(|served| served.get(&proxy_tag(Some(proxy))).copied())
+         .is_some_and(|at| at >= since)
+   }
+
    /// Pick a deterministic healthy failover for this account. Stability keeps
    /// one temporary IP per account and avoids building clients for every exit.
    fn alternate(&self, session: i64, current: &ProxyConfig) -> Option<ProxyConfig> {
@@ -723,11 +754,31 @@ impl HttpClient {
          .is_some_and(|pool| pool.ban(proxy))
    }
 
-   /// X's edge throttled this exit's IP: a 429 with no account window that
-   /// reached the caller. Parks it like an edge block seen here, and returns
-   /// the cooldown when this call started one.
-   pub fn park_throttled_exit(&self, proxy: &ProxyConfig) -> Option<Duration> {
-      self.primary_pool.as_ref()?.block(proxy)
+   /// Whether X served a call through this exit within [`EXIT_PROOF`]. A bare
+   /// 429 on such an exit is the account's, and the exit stays in rotation.
+   /// A parked exit is judged by the failover its account is sent through.
+   pub fn exit_still_served(&self, egress: &Egress) -> bool {
+      let failover = self
+         .primary_is_blocked(egress)
+         .then(|| self.alternate_primary(egress))
+         .flatten();
+      let Some(proxy) = failover.as_ref().unwrap_or(egress).proxy.as_ref() else {
+         return false;
+      };
+      self
+         .primary_pool
+         .as_ref()
+         .is_some_and(|pool| pool.recently_served(proxy))
+   }
+
+   fn note_answer(&self, via: Option<&Egress>, answer: &Result<Response>) {
+      if let Ok(response) = answer
+         && response.status().is_success()
+         && let Some(proxy) = via.and_then(|egress| egress.proxy.as_ref())
+         && let Some(pool) = self.primary_pool.as_ref()
+      {
+         pool.note_served(proxy);
+      }
    }
 
    fn note_exit(&self, via: Option<&Egress>, slow: bool) {
@@ -1010,6 +1061,7 @@ impl HttpClient {
       let first = self
          .dispatch(&method, uri, extra_headers, &body, first_via)
          .await;
+      self.note_answer(first_via, &first);
 
       // An HTML 429 is a per-IP Cloudflare block. Park this exact proxy port
       // for every account and retry safe calls once through another healthy
@@ -1021,6 +1073,12 @@ impl HttpClient {
          && let Some(blocked_via) = first_via
          && self.is_primary(blocked_via)
       {
+         // X is still serving other accounts through this IP, so it refused
+         // the account. The caller rests the account; parking the exit and
+         // resending the account elsewhere only spread its 429 to more exits.
+         if self.exit_still_served(blocked_via) {
+            return first;
+         }
          let port = blocked_via
             .proxy
             .as_ref()
@@ -1050,6 +1108,7 @@ impl HttpClient {
             let retry = self
                .dispatch(&method, uri, extra_headers, &body, Some(&alternate))
                .await;
+            self.note_answer(Some(&alternate), &retry);
             if matches!(&retry, Ok(response) if is_edge_block(response.status(), response.headers()))
             {
                let retry_port = alternate_port;
@@ -1955,6 +2014,35 @@ mod tests {
          next.proxy.as_ref().unwrap().port,
          alternate.proxy.as_ref().unwrap().port
       );
+   }
+
+   #[test]
+   fn a_bare_429_on_an_exit_still_served_is_the_accounts() {
+      let client = HttpClient::new("", "", Purpose::Api).with_primary_proxies(vec![
+         proxy_on(10001),
+         proxy_on(10002),
+         proxy_on(10003),
+      ]);
+      let pinned = Egress {
+         session: 42,
+         proxy: Some(proxy_on(10001)),
+      };
+      assert!(!client.exit_still_served(&pinned), "nothing has been served yet");
+
+      client.primary_pool.as_ref().unwrap().note_served(&proxy_on(10001));
+      assert!(client.exit_still_served(&pinned));
+      assert!(!client.primary_is_blocked(&pinned), "judging an exit does not park it");
+
+      // Parked, the account goes out through its failover and is judged there.
+      assert!(client.block_primary(&pinned).is_some());
+      assert!(!client.exit_still_served(&pinned));
+      let failover = client.alternate_primary(&pinned).unwrap();
+      client
+         .primary_pool
+         .as_ref()
+         .unwrap()
+         .note_served(failover.proxy.as_ref().unwrap());
+      assert!(client.exit_still_served(&pinned));
    }
 
    #[test]

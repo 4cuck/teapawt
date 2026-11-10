@@ -6,6 +6,7 @@ use std::{
 };
 
 use super::super::search_denylist::bypass_denylist;
+use super::super::timeline_route::Route;
 use super::{
    AboutAccountData, AccountContext, ApiClient, Article, AudioSpaceData, BroadcastsData, CardKind,
    Conversation, ConversationData, Deserialize, EditHistory, EditHistoryData, Error, List,
@@ -13,9 +14,24 @@ use super::{
    PaginatedResult, PhotoRail, Profile, Result, RetweetersData, SearchTimelineData, SessionKind,
    SessionLease, Timeline, Translation, Tweet, User, UserResultData, UserTimelineData, article_tweet_data,
    audio_space_host, audio_space_status, broadcast_id_from_url, broadcast_status,
-   clamp_community_value, endpoints, header, hosted_by, parser, space_id_from_url, timeout,
+   clamp_community_value, endpoints, header, hosted_by, parser, settles_the_call,
+   space_id_from_url, timeout,
 };
 use crate::types::ExploreFeed;
+
+/// A failure another timeline could get past: quota, a busy pool, X's edge.
+/// Not one about the account itself, nor the caller's own budget.
+const fn another_route_may_answer(err: &Error) -> bool {
+   !settles_the_call(err) && !matches!(err, Error::ClientBudgetExhausted)
+}
+
+/// A first page served off `UserTweets` carries no cursors, so "load more"
+/// never sends another timeline's cursor to `UserTweets`.
+fn without_cursors(mut timeline: Timeline) -> Timeline {
+   timeline.top = None;
+   timeline.bottom = None;
+   timeline
+}
 
 /// Entry ids only, so an empty Explore tab can be diagnosed without logging posts.
 fn explore_shape(value: &serde_json::Value) -> String {
@@ -571,14 +587,119 @@ impl ApiClient {
 
    /// Get user's tweets timeline.
    ///
-   /// When every account is out of `UserTweets`, the replies endpoint still
-   /// has its own budget. Reply-only posts are removed and its cursor is
-   /// dropped so "load more" does not send a replies cursor to `UserTweets`.
+   /// A first page goes to `UserTweets` only on an account free to answer
+   /// it now. When every account with quota is mid-call, or none has quota,
+   /// the page comes from [`first_page_fallback`](Self::first_page_fallback)
+   /// instead of queueing seconds behind the calls holding them. Only when
+   /// both fallbacks fail on a busy pool does it wait for `UserTweets`.
    pub async fn get_user_tweets(&self, user_id: &str, cursor: Option<&str>) -> Result<Timeline> {
-      match self.fetch_user_tweets(user_id, cursor).await {
-         Err(Error::RateLimited) if cursor.is_none() => self.posts_from_replies(user_id).await,
-         other => other,
+      if cursor.is_some() {
+         return self.fetch_user_tweets(user_id, cursor).await;
       }
+
+      let variables = endpoints::user_tweets_vars(user_id, None);
+      let key = Self::inflight_key(
+         endpoints::GRAPH_USER_TWEETS,
+         &variables,
+         Some(endpoints::USER_TWEETS_FIELD_TOGGLES),
+      );
+      let guard = match self.join_or_lead(key) {
+         super::InflightTicket::Follower(mut rx) => {
+            if rx.changed().await.is_ok()
+               && let Some(bytes) = rx.borrow_and_update().clone()
+               && let Ok(parsed) = Self::parse_coalesced::<UserTimelineData>(&bytes)
+            {
+               return parser::parse_timeline(&parsed);
+            }
+            None
+         },
+         super::InflightTicket::Leader(guard) => Some(guard),
+      };
+
+      // The guard is released before any other route: the wait below sends
+      // this same call, which would otherwise queue behind itself.
+      let busy = match self.charged_free_session(endpoints::GRAPH_USER_TWEETS).await {
+         Ok(Some(session)) => match self.user_tweets_on(session, &variables, guard).await {
+            Ok(timeline) => {
+               self.timeline_routes.count(Route::Primary);
+               return Ok(timeline);
+            },
+            Err(Error::RateLimited) => false,
+            Err(err) => return Err(err),
+         },
+         Ok(None) => {
+            drop(guard);
+            true
+         },
+         Err(Error::RateLimited) => {
+            drop(guard);
+            false
+         },
+         Err(err) => return Err(err),
+      };
+
+      match self.first_page_fallback(user_id).await {
+         Ok((route, timeline)) => {
+            self.timeline_routes.count(route);
+            Ok(timeline)
+         },
+         Err(err) if busy && another_route_may_answer(&err) => {
+            self.timeline_routes.count(Route::Waited);
+            self.fetch_user_tweets(user_id, None).await
+         },
+         Err(err) if another_route_may_answer(&err) => Err(Error::RateLimited),
+         Err(err) => Err(err),
+      }
+   }
+
+   /// The first page on a lease already taken, shared with identical calls
+   /// that arrived meanwhile.
+   async fn user_tweets_on(
+      &self,
+      session: SessionLease,
+      variables: &str,
+      guard: Option<super::InflightGuard>,
+   ) -> Result<Timeline> {
+      let (data, bytes) = self
+         .graphql_request_with_session::<UserTimelineData>(
+            session,
+            endpoints::GRAPH_USER_TWEETS,
+            variables,
+            endpoints::GQL_FEATURES,
+            Some(endpoints::USER_TWEETS_FIELD_TOGGLES),
+            None,
+         )
+         .await?;
+      if let Some(guard) = guard {
+         guard.complete(bytes);
+      }
+      parser::parse_timeline(&data)
+   }
+
+   /// A first page without `UserTweets`: original posts, which have about
+   /// five times its quota per account, else the replies timeline with
+   /// replies removed. Either way it has no reposts.
+   async fn first_page_fallback(&self, user_id: &str) -> Result<(Route, Timeline)> {
+      match self.originals_first_page(user_id).await {
+         Ok(timeline) => Ok((Route::Originals, timeline)),
+         Err(err) if another_route_may_answer(&err) => self
+            .posts_from_replies(user_id)
+            .await
+            .map(|timeline| (Route::Replies, timeline)),
+         Err(err) => Err(err),
+      }
+   }
+
+   async fn originals_first_page(&self, user_id: &str) -> Result<Timeline> {
+      let data = self
+         .graphql_request::<UserTimelineData>(
+            endpoints::GRAPH_USER_ORIGINALS,
+            &endpoints::user_originals_vars(user_id, None, false),
+            endpoints::USER_REPOSTS_FEATURES,
+            Some(endpoints::USER_REPOSTS_FIELD_TOGGLES),
+         )
+         .await?;
+      parser::parse_timeline(&data).map(without_cursors)
    }
 
    async fn fetch_user_tweets(&self, user_id: &str, cursor: Option<&str>) -> Result<Timeline> {
@@ -657,9 +778,7 @@ impl ApiClient {
    async fn posts_from_replies(&self, user_id: &str) -> Result<Timeline> {
       let mut timeline = self.get_user_tweets_and_replies(user_id, None).await?;
       timeline.keep_posts();
-      timeline.top = None;
-      timeline.bottom = None;
-      Ok(timeline)
+      Ok(without_cursors(timeline))
    }
 
    /// Get user's media timeline.

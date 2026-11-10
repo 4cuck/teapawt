@@ -121,6 +121,17 @@ enum Miss {
    Busy,
 }
 
+impl Miss {
+   /// What the queue report counts and what the caller is told, for a miss
+   /// that is not waited out.
+   fn settle(self) -> (Outcome, Error) {
+      match self {
+         Self::Nobody => (Outcome::Nobody, Error::NoSessions),
+         Self::Spent | Self::Busy => (Outcome::Spent, Error::RateLimited),
+      }
+   }
+}
+
 /// A candidate with known budget. Higher remaining is chosen, with an account
 /// on a slow exit ranked at [`SLOW_EXIT_DISCOUNT`]. At a tie, an account that
 /// has returned results for this call and already holds a warm HTTP/2
@@ -484,17 +495,13 @@ impl SessionPool {
                note(Outcome::Leased);
                return Ok(lease);
             },
-            Err(Miss::Nobody) => {
-               drop(limits);
-               note(Outcome::Nobody);
-               return Err(Error::NoSessions);
-            },
-            Err(Miss::Spent) => {
-               drop(limits);
-               note(Outcome::Spent);
-               return Err(Error::RateLimited);
-            },
             Err(Miss::Busy) => {},
+            Err(miss) => {
+               drop(limits);
+               let (outcome, err) = miss.settle();
+               note(outcome);
+               return Err(err);
+            },
          }
          let waiter = self.freed.notified();
          tokio::pin!(waiter);
@@ -503,6 +510,36 @@ impl SessionPool {
          waiter.as_mut().enable();
          drop(limits);
          waiter.await;
+      }
+   }
+
+   /// An account with quota for `api` and a free slot right now, without
+   /// queueing behind the calls already holding the rest. `Ok(None)` when
+   /// every such account is mid-call: the caller has another route and is
+   /// better off taking it than waiting seconds for this one.
+   pub(crate) async fn acquire_free(
+      &self,
+      api: &str,
+      required_kind: Option<SessionKind>,
+   ) -> Result<Option<SessionLease>> {
+      if self.sessions.is_empty() {
+         return Err(Error::NoSessions);
+      }
+      let started = Instant::now();
+      let mut limits = self.limits.write().await;
+      let pass = self.scan(&mut limits, &|_| api, required_kind, &|_| true, false);
+      drop(limits);
+      match pass {
+         Ok(lease) => {
+            self.queue.record(api, started.elapsed(), Outcome::Leased);
+            Ok(Some(lease))
+         },
+         Err(Miss::Busy) => Ok(None),
+         Err(miss) => {
+            let (outcome, err) = miss.settle();
+            self.queue.record(api, started.elapsed(), outcome);
+            Err(err)
+         },
       }
    }
 
@@ -806,6 +843,18 @@ impl SessionPool {
             crate::types::Damage::Window => {},
          }
       }
+      self.persist_soon(session_id);
+   }
+
+   /// X refused this account `api` with a bare 429: no window, no body. Sit it
+   /// out of `api` for a window, without the strike a counted 429 earns, since
+   /// nothing says it spent its quota.
+   pub async fn rest_endpoint(&self, session_id: i64, api: &str) {
+      let mut limits = self.limits.write().await;
+      if let Some(lim) = limits.get_mut(&session_id) {
+         lim.limit_endpoint(api);
+      }
+      drop(limits);
       self.persist_soon(session_id);
    }
 
@@ -1484,6 +1533,43 @@ mod tests {
 
       drop(first);
       drop(woke);
+      fs::remove_file(path).await.unwrap();
+   }
+
+   #[tokio::test]
+   async fn a_free_pick_steps_aside_instead_of_queueing() {
+      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
+      let path = env::temp_dir().join(format!(
+         "teapot-session-pool-free-{}.jsonl",
+         process::id()
+      ));
+      fs::write(
+         &path,
+         concat!(
+            r#"{"id":1,"username":"one","kind":"cookie","auth_token":"a","ct0":"c"}"#,
+            "\n"
+         ),
+      )
+      .await
+      .unwrap();
+      let pool = SessionPool::load(path.to_str().unwrap(), 1).await.unwrap();
+
+      let held = pool.acquire_free("x/UserTweets", None).await.unwrap();
+      assert!(held.is_some(), "an idle account is taken at once");
+      let busy = timeout(Duration::from_millis(50), pool.acquire_free("x/UserTweets", None))
+         .await
+         .expect("a busy pool answers at once instead of waiting for the call to end")
+         .unwrap();
+      assert!(busy.is_none());
+
+      drop(held);
+      let reset = time::OffsetDateTime::now_utc().unix_timestamp() + 900;
+      pool.update_session_limit(1, "x/UserTweets", 50, 0, reset).await;
+      assert!(matches!(
+         pool.acquire_free("x/UserTweets", None).await,
+         Err(Error::RateLimited)
+      ));
+
       fs::remove_file(path).await.unwrap();
    }
 
