@@ -75,7 +75,9 @@ pub struct SessionDetail {
 /// Pool of authentication sessions for Twitter API.
 #[derive(Clone)]
 pub struct SessionPool {
-   sessions: Vec<Arc<SessionSlot>>,
+   /// One shared slice: the pool is cloned into every request's state, and a
+   /// `Vec<Arc<_>>` made each clone and drop touch every account's refcount.
+   sessions: Arc<[SessionSlot]>,
    limits: Arc<RwLock<HashMap<i64, SessionLimits>>>,
    cursor: Arc<AtomicUsize>,
    state: Option<Arc<LimitState>>,
@@ -218,13 +220,13 @@ impl SessionPool {
       for session in parsed {
          let (creds, lims) = session.into_credentials_and_limits();
          let id = creds.id;
-         sessions.push(Arc::new(SessionSlot {
+         sessions.push(SessionSlot {
             credentials: Arc::new(creds),
             permits: Arc::new(Semaphore::new(max_concurrency)),
             max_concurrency,
             last_active: AtomicU64::new(0),
             slow_exit: AtomicBool::new(false),
-         }));
+         });
          limits.insert(id, lims);
       }
 
@@ -279,7 +281,7 @@ impl SessionPool {
       });
 
       let pool = Self {
-         sessions,
+         sessions: sessions.into(),
          limits,
          cursor: Arc::new(AtomicUsize::new(0)),
          state,
@@ -945,7 +947,7 @@ impl SessionPool {
    }
 
    /// Get session count.
-   pub const fn len(&self) -> usize {
+   pub fn len(&self) -> usize {
       self.sessions.len()
    }
 
@@ -960,7 +962,7 @@ impl SessionPool {
    }
 
    /// Check if pool is empty.
-   pub const fn is_empty(&self) -> bool {
+   pub fn is_empty(&self) -> bool {
       self.sessions.is_empty()
    }
 
