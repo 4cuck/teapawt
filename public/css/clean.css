@@ -2415,3 +2415,46 @@ nav.explore-tabbar {
   font-size: 0.9em;
   color: var(--fg_color);
 }
+
+/* Contact page: one channel per row, the label in a fixed column so the
+   values line up, and the long Session ID wrapping inside its own box. */
+.overlay-panel .contact-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 20px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+.overlay-panel .contact-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.overlay-panel .contact-list li:last-child { border-bottom: 0; }
+.overlay-panel .contact-list .contact-label {
+  flex: 0 0 6em;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.overlay-panel .contact-list .contact-value {
+  flex: 1 1 14em;
+  min-width: 0;
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+.overlay-panel .contact-list .contact-session {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+  user-select: all;
+}
+@media (max-width: 520px) {
+  .overlay-panel .contact-list .contact-label { flex-basis: 100%; }
+}

@@ -125,16 +125,28 @@ pub fn render_contact(contact: &ContactConfig, price: &str) -> Markup {
            @if contact.any() {
                ul class="contact-list" {
                    @if !contact.telegram.is_empty() {
-                       li { strong { "Telegram" } a href=(contact.telegram) rel="noopener" { (telegram_label(&contact.telegram)) } }
+                       li {
+                           span class="contact-label" { "Telegram" }
+                           a class="contact-value" href=(contact.telegram) rel="noopener" { (telegram_label(&contact.telegram)) }
+                       }
                    }
                    @if !contact.matrix.is_empty() {
-                       li { strong { "Matrix" } a href=(format!("https://matrix.to/#/{}", contact.matrix)) rel="noopener" { (contact.matrix) } }
+                       li {
+                           span class="contact-label" { "Matrix" }
+                           a class="contact-value" href=(format!("https://matrix.to/#/{}", contact.matrix)) rel="noopener" { (contact.matrix) }
+                       }
                    }
                    @if !contact.session.is_empty() {
-                       li { strong { "Session" } code class="contact-session" { (contact.session) } }
+                       li {
+                           span class="contact-label" { "Session" }
+                           code class="contact-value contact-session" { (contact.session) }
+                       }
                    }
                    @if !contact.email.is_empty() {
-                       li { strong { "Email" } a href=(format!("mailto:{}", contact.email)) { (contact.email) } }
+                       li {
+                           span class="contact-label" { "Email" }
+                           a class="contact-value" href=(format!("mailto:{}", contact.email)) { (contact.email) }
+                       }
                    }
                }
            } @else {
