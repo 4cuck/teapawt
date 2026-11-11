@@ -175,16 +175,18 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
    let drive = Some(donate_view::donate_drive_banner(&progress));
    let firefox_note = (firefox && !prefs.proxy_media && !warning_hidden)
       .then(|| crate::views::preferences::firefox_media_warning(false));
-   let search_note = state
-      .config
-      .turnstile
-      .configured()
+   let scrape = &state.config.scrape;
+   // The check-for-everyone notice already covers search.
+   let search_note = (state.config.turnstile.configured() && !scrape.gates_everyone())
       .then(search_turnstile_warning);
-   let scrape_note = state.config.scrape.enabled.then(|| {
-      crate::views::scrape::scrape_notice(
-         &crate::donations::format_usd(state.passes.price_cents()),
-         &crate::donations::format_usd(progress.goal_cents),
-      )
+   let scrape_note = scrape.enabled.then(|| {
+      let price = crate::donations::format_usd(state.passes.price_cents());
+      let goal = crate::donations::format_usd(progress.goal_cents);
+      if scrape.gates_everyone() {
+         crate::views::scrape::everyone_notice(&price, &goal, scrape.pass_minutes)
+      } else {
+         crate::views::scrape::scrape_notice(&price, &goal)
+      }
    });
    let notice = if drive.is_none()
       && firefox_note.is_none()

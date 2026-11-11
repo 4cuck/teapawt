@@ -4,8 +4,9 @@
 //! accounts. Networks in `scrape.blockedAsns` are asked to solve a check on
 //! every page; a country in `scrape.watchedCountries` is asked while its
 //! pages run above `scrape.surgePerMinute`. A solved check lets that address
-//! through for `scrape.passMinutes`. Search pass holders and crawlers
-//! Cloudflare has verified never see it.
+//! through for `scrape.passMinutes`. With `scrape.everyone` set, every
+//! visitor is asked. Search pass holders (signed-in browsers and
+//! whitelisted addresses) and crawlers Cloudflare has verified never see it.
 
 use std::{
    collections::HashMap,
@@ -164,6 +165,7 @@ impl<'a> Visitor<'a> {
 enum Reason {
    Network(u32),
    Surge,
+   Everyone,
 }
 
 /// Why this visitor should solve the check, counting the request.
@@ -174,6 +176,9 @@ fn reason(config: &ScrapeConfig, visitor: &Visitor<'_>, now: i64) -> Option<Reas
    {
       with_window(&asn_key(asn), |window| window.hit(now));
       return Some(Reason::Network(asn));
+   }
+   if config.everyone {
+      return Some(Reason::Everyone);
    }
    let country = visitor.country.filter(|country| {
       config
@@ -186,16 +191,20 @@ fn reason(config: &ScrapeConfig, visitor: &Visitor<'_>, now: i64) -> Option<Reas
 
 /// The reason to show again after a failed check, without counting.
 fn reason_shown(config: &ScrapeConfig, visitor: &Visitor<'_>) -> Reason {
+   let fallback = if config.everyone { Reason::Everyone } else { Reason::Surge };
    visitor
       .asn
       .filter(|asn| config.blocked_asns.contains(asn))
-      .map_or(Reason::Surge, Reason::Network)
+      .map_or(fallback, Reason::Network)
 }
 
+/// The home page costs no X call and carries the notice explaining the
+/// check, so it stays readable before the check is solved.
 fn is_open(path: &str) -> bool {
-   OPEN_PAGES
-      .iter()
-      .any(|page| path == *page || path.strip_prefix(page).is_some_and(|rest| rest.starts_with('/')))
+   path == "/"
+      || OPEN_PAGES
+         .iter()
+         .any(|page| path == *page || path.strip_prefix(page).is_some_and(|rest| rest.starts_with('/')))
       || OPEN_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
 }
 
@@ -302,23 +311,27 @@ fn cleared(state: &AppState, jar: &CookieJar) -> bool {
 fn challenge(state: &AppState, jar: &CookieJar, reason: Reason, resume: &str, failed: bool) -> Response {
    let prefs = Prefs::from_cookies(jar, &state.config);
    let price = donations::format_usd(state.passes.price_cents());
+   let goal = donations::format_usd(state.config.donations.goal_cents);
    let why = match reason {
       Reason::Network(asn) => Why::Network {
          asn,
          per_minute: network_rate(asn),
       },
       Reason::Surge => Why::Surge,
+      Reason::Everyone => Why::Everyone,
    };
+   let title = why.title();
    let content = view::render_gate(&GatePage {
       site_key: &state.config.turnstile.site_key,
       action: VERIFY_PATH,
       resume,
       why,
       price: &price,
+      goal: &goal,
       pass_minutes: state.config.scrape.pass_minutes,
       failed,
    });
-   let markup = PageLayout::new(&state.config, "Slow down", content)
+   let markup = PageLayout::new(&state.config, title, content)
       .prefs(&prefs)
       .render();
    // 429 is the status nginx and Cloudflare keep out of the page cache.
@@ -450,6 +463,7 @@ mod tests {
    #[test]
    fn paying_and_static_pages_stay_open() {
       for open in [
+         "/",
          "/contact",
          "/search-pass/login",
          "/donate",
@@ -462,9 +476,24 @@ mod tests {
       ] {
          assert!(is_open(open), "{open}");
       }
-      for gated in ["/", "/jack", "/contactlenses", "/donatello/rss", "/jack/status/20", "/search"] {
+      for gated in ["/jack", "/contactlenses", "/donatello/rss", "/jack/status/20", "/search"] {
          assert!(!is_open(gated), "{gated}");
       }
+   }
+
+   #[test]
+   fn everyone_is_checked_but_a_blocked_network_keeps_its_own_reason() {
+      let config = ScrapeConfig {
+         everyone: true,
+         ..config()
+      };
+      assert_eq!(reason(&config, &visitor(Some(7922), Some("US")), 1_000), Some(Reason::Everyone));
+      assert_eq!(reason(&config, &visitor(None, None), 1_000), Some(Reason::Everyone));
+      assert_eq!(
+         reason(&config, &visitor(Some(132_203), Some("SG")), 1_000),
+         Some(Reason::Network(132_203))
+      );
+      assert_eq!(reason_shown(&config, &visitor(None, None)), Reason::Everyone);
    }
 
    #[test]

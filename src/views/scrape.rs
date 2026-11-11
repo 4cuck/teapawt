@@ -11,6 +11,18 @@ pub enum Why {
    Network { asn: u32, per_minute: u32 },
    /// A watched country above its usual rate.
    Surge,
+   /// `scrape.everyone`: every visitor, until the month's goal is met.
+   Everyone,
+}
+
+impl Why {
+   #[must_use]
+   pub const fn title(&self) -> &'static str {
+      match self {
+         Self::Everyone => "Quick check",
+         Self::Network { .. } | Self::Surge => "Slow down",
+      }
+   }
 }
 
 pub struct GatePage<'a> {
@@ -19,6 +31,8 @@ pub struct GatePage<'a> {
    pub resume:       &'a str,
    pub why:          Why,
    pub price:        &'a str,
+   /// The monthly donation goal, formatted.
+   pub goal:         &'a str,
    pub pass_minutes: i64,
    pub failed:       bool,
 }
@@ -37,7 +51,7 @@ fn network_name(asn: u32) -> String {
 pub fn render_gate(page: &GatePage<'_>) -> Markup {
    html! {
        div class="turnstile-panel scrape-gate" {
-           h1 { "Slow down" }
+           h1 { (page.why.title()) }
            @match page.why {
                Why::Network { asn, per_minute } => {
                    p {
@@ -54,10 +68,17 @@ pub fn render_gate(page: &GatePage<'_>) -> Markup {
                        "almost all by one scraper. Every visitor from here is asked to confirm for a while."
                    }
                }
+               Why::Everyone => {
+                   p {
+                       "Bots are loading far more pages than people are, so for now every visitor is asked "
+                       "to pass a Cloudflare check. We will turn it off once donations reach this month's "
+                       (page.goal) " " a href="/donate" { "goal" } "."
+                   }
+               }
            }
            p {
                "Each page costs a request on one of a limited number of X accounts. "
-               "This scraper uses them up, so profiles and RSS feeds stall for everyone else, "
+               "Scrapers use them up, so profiles and RSS feeds stall for everyone else, "
                "for 10 to 40 seconds at a time."
            }
            @if let Why::Network { asn: TENCENT_ASN, .. } = page.why {
@@ -89,6 +110,30 @@ pub fn render_gate(page: &GatePage<'_>) -> Markup {
                "Donated before? " a href="/contact" { "Ask for a pass" } "."
            }
            script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer {}
+       }
+   }
+}
+
+/// The home page notice while `scrape.everyone` is on.
+pub fn everyone_notice(price: &str, goal: &str, pass_minutes: i64) -> Markup {
+   html! {
+       aside class="home-announce scrape-announce" {
+           strong { "We had to turn on a Cloudflare check for everyone" }
+           p {
+               "Bots are loading far more pages than people are. Every page costs a request on a "
+               "limited pool of X accounts, so profiles and feeds were stalling for real readers. "
+               "For now, every visitor is asked to pass a Cloudflare Turnstile check, "
+               "once every " (pass_minutes) " minutes."
+           }
+           p {
+               "We will turn it off once we reach this month's " (goal) " "
+               a href="/donate" { "donation goal" } ". That money buys the accounts the bots burn through."
+           }
+           p {
+               "A " a href="/search-pass" { "search pass" } " (" (price) " a month) skips the check: "
+               a href="/search-pass/login" { "log in" } ", or add your address to the pass to skip it "
+               "on every domain. Donated already? " a href="/contact" { "Ask for a pass" } "."
+           }
        }
    }
 }
@@ -209,6 +254,7 @@ mod tests {
          resume: "/jack?x=1",
          why: Why::Network { asn: 132_203, per_minute: 6100 },
          price: "$15",
+         goal: "$300",
          pass_minutes: 60,
          failed: false,
       })
@@ -222,11 +268,26 @@ mod tests {
          resume: "/",
          why: Why::Surge,
          price: "$15",
+         goal: "$300",
          pass_minutes: 60,
          failed: true,
       })
       .into_string();
       assert!(!surge.contains("To Tencent Cloud"));
       assert!(surge.contains("did not go through"));
+      let everyone = render_gate(&GatePage {
+         site_key: "key",
+         action: "/.scrape-check",
+         resume: "/",
+         why: Why::Everyone,
+         price: "$15",
+         goal: "$300",
+         pass_minutes: 60,
+         failed: false,
+      })
+      .into_string();
+      assert!(everyone.contains("Quick check"));
+      assert!(everyone.contains("$300"));
+      assert!(!everyone.contains("To Tencent Cloud"));
    }
 }

@@ -260,6 +260,17 @@ pub struct ScrapeConfig {
    /// How long one solved check lets a visitor's address through.
    #[serde(default = "default_gate_pass_minutes", rename = "passMinutes")]
    pub pass_minutes:       i64,
+   /// Every visitor is checked, wherever they come from. Meant to be
+   /// switched off by hand once the month's donation goal is met.
+   #[serde(default)]
+   pub everyone:           bool,
+}
+
+impl ScrapeConfig {
+   #[must_use]
+   pub const fn gates_everyone(&self) -> bool {
+      self.enabled && self.everyone
+   }
 }
 
 impl Default for ScrapeConfig {
@@ -270,6 +281,7 @@ impl Default for ScrapeConfig {
          watched_countries: default_watched_countries(),
          surge_per_minute:  default_surge_per_minute(),
          pass_minutes:      default_gate_pass_minutes(),
+         everyone:          false,
       }
    }
 }
