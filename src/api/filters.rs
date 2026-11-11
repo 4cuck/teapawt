@@ -50,17 +50,33 @@ impl ApiClient {
          "clearing sensitive-content filters and age gates on cookie sessions"
       );
       let mut ok = 0_usize;
+      let mut refreshed = 0_usize;
+      let mut fresh = Vec::new();
       for id in ids {
          match self.clear_session_filters_retry(id).await {
             Ok(()) => {
                self.sessions.mark_filters_cleared(id).await;
                ok += 1;
             },
-            Err(err) => {
-               tracing::warn!(
+            Err(err) if csrf_mismatch(&err.to_string()) => match self.refresh_ct0(id).await {
+               Ok(Some(ct0)) => {
+                  refreshed += 1;
+                  fresh.push((id, ct0.clone()));
+                  if self.clear_with_ct0(id, &ct0).await.is_ok() {
+                     self.sessions.mark_filters_cleared(id).await;
+                     ok += 1;
+                  }
+               },
+               Ok(None) => tracing::info!(
                   session_id = id,
-                  "failed to clear NSFW filters or age gate: {err}"
-               );
+                  "x.com set no new ct0; the auth token looks dead"
+               ),
+               Err(refresh_err) => {
+                  tracing::warn!(session_id = id, "could not refresh ct0: {refresh_err}");
+               },
+            },
+            Err(err) => {
+               tracing::warn!(session_id = id, "failed to clear NSFW filters or age gate: {err}");
                if filter_setting_locked(&err.to_string()) {
                   self.sessions.retire_filter_blocked(id).await;
                }
@@ -68,7 +84,32 @@ impl ApiClient {
          }
          sleep(Duration::from_millis(250)).await;
       }
-      tracing::info!(ok, "sensitive-content filters and age gates cleared");
+      if let Err(err) = self.sessions.store_ct0s(&fresh).await {
+         tracing::warn!("could not store refreshed ct0s: {err}");
+      }
+      tracing::info!(ok, refreshed, "sensitive-content filters and age gates cleared");
+   }
+
+   /// Ask x.com for the `ct0` it will accept with this account's `auth_token`.
+   ///
+   /// A plain visit while that cookie is set answers with a new `ct0`, which is
+   /// written back to the sessions file. `Ok(Some(_))` is a different one.
+   async fn refresh_ct0(&self, session_id: i64) -> Result<Option<String>> {
+      let Some(credentials) = self.sessions.credentials(session_id) else {
+         return Ok(None);
+      };
+      self.refresh_stored_ct0(&SessionLease::bare(credentials)).await
+   }
+
+   /// Clear this account's filters using a `ct0` it was just handed.
+   async fn clear_with_ct0(&self, session_id: i64, ct0: &str) -> Result<()> {
+      let Some(credentials) = self.sessions.credentials(session_id) else {
+         return Ok(());
+      };
+      let mut credentials = (*credentials).clone();
+      credentials.ct0 = ct0.to_owned();
+      let session = SessionLease::bare(std::sync::Arc::new(credentials));
+      self.clear_session_filters_with(&session).await
    }
 
    async fn clear_session_filters_retry(&self, session_id: i64) -> Result<()> {
@@ -91,6 +132,10 @@ impl ApiClient {
          .sessions
          .acquire_id(session_id, endpoints::ACCOUNT_SETTINGS)
          .await?;
+      self.clear_session_filters_with(&session).await
+   }
+
+   async fn clear_session_filters_with(&self, session: &SessionLease) -> Result<()> {
       if session.kind != SessionKind::Cookie {
          return Ok(());
       }
@@ -251,16 +296,15 @@ impl ApiClient {
          "x-twitter-auth-type",
          header::HeaderValue::from_static("OAuth2Session"),
       );
+      let ct0 = self.sessions.ct0(session.id).unwrap_or_else(|| session.ct0.clone());
       headers.insert(
          "x-csrf-token",
-         session
-            .ct0
-            .parse()
+         ct0.parse()
             .map_err(|_| Error::Internal("invalid ct0 header value".into()))?,
       );
       headers.insert(
          header::COOKIE,
-         format!("auth_token={}; ct0={}", session.auth_token, session.ct0)
+         format!("auth_token={}; ct0={ct0}", session.auth_token)
             .parse()
             .map_err(|_| Error::Internal("invalid cookie header value".into()))?,
       );
@@ -292,6 +336,11 @@ impl ApiClient {
 
 fn filter_setting_locked(message: &str) -> bool {
    message.to_ascii_lowercase().contains("may not change this setting")
+}
+
+/// x.com code 353: the `ct0` sent as `x-csrf-token` is not the one it holds.
+fn csrf_mismatch(message: &str) -> bool {
+   message.contains("\"code\":353") || message.to_ascii_lowercase().contains("csrf")
 }
 
 fn birthdate_already_locked(message: &str) -> bool {

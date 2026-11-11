@@ -103,6 +103,23 @@ fn is_denylisted(message: &str) -> bool {
    message.contains("QueryDenylistedFailure") || message.contains("Query is denylisted")
 }
 
+/// A `SearchTimeline` body with no posts in it. A suspended account is answered
+/// with an empty 404 for the same query an account in good standing gets posts
+/// for, so the emptiness is the account's and not the query's.
+fn search_answer_is_empty(bytes: &[u8]) -> bool {
+   #[derive(Deserialize)]
+   struct SearchBody {
+      data: Option<serde_json::Value>,
+   }
+   let Ok(body) = serde_json::from_slice::<SearchBody>(bytes) else {
+      return false;
+   };
+   let Some(data) = body.data else {
+      return true;
+   };
+   serde_json::to_string(&data).is_ok_and(|text| !text.contains("tweet_results"))
+}
+
 /// The errors that fail a request. X returns the page plus an error for
 /// each field it could not fill, such as a list banner it cannot decode or
 /// one post's long-form text. Such an error names the field in `path`, so
@@ -333,6 +350,13 @@ fn log_upstream(body: &str) -> String {
       return format!("HTML error page, {} bytes", body.len());
    }
    body.to_owned()
+}
+
+fn ct0_cookie(value: &header::HeaderValue) -> Option<String> {
+   let text = value.to_str().ok()?;
+   let (pair, _) = text.split_once(';').unwrap_or((text, ""));
+   let (name, cookie) = pair.split_once('=')?;
+   (name.trim() == "ct0" && !cookie.trim().is_empty()).then(|| cookie.trim().to_owned())
 }
 
 fn twitter_error_code(body: &str) -> Option<i64> {
@@ -588,13 +612,51 @@ impl ApiClient {
 
    /// The browser and proxy a request for this session goes out as.
    pub(crate) fn egress_for(&self, session: &SessionLease) -> Egress {
+      self.egress_for_id(session.id)
+   }
+
+   pub(crate) fn egress_for_id(&self, session_id: i64) -> Egress {
       Egress {
-         session: session.id,
-         proxy: self
-            .proxies
-            .as_ref()
-            .map(|pool| pool.for_session(session.id)),
+         session: session_id,
+         proxy: self.proxies.as_ref().map(|pool| pool.for_session(session_id)),
       }
+   }
+
+   /// Ask x.com for the `ct0` it currently accepts for this account and store it.
+   ///
+   /// A plain visit carrying only the `auth_token` cookie is answered with a
+   /// fresh `ct0`. Nothing is written when x.com sets none or the same one.
+   pub(crate) async fn refresh_stored_ct0(&self, session: &SessionLease) -> Result<Option<String>> {
+      if session.auth_token.is_empty() {
+         return Ok(None);
+      }
+      let mut headers = header::HeaderMap::new();
+      headers.insert(
+         header::COOKIE,
+         format!("auth_token={}", session.auth_token)
+            .parse()
+            .map_err(|_| Error::Internal("invalid auth token".into()))?,
+      );
+      let response = self
+         .client
+         .get_on("https://x.com/", &headers, Some(&self.egress_for(session)))
+         .await?;
+      let ct0 = response
+         .headers()
+         .get_all(header::SET_COOKIE)
+         .iter()
+         .find_map(ct0_cookie)
+         .unwrap_or_default();
+      if ct0.is_empty() || ct0 == session.ct0 {
+         return Ok(None);
+      }
+      self.sessions.hold_ct0(session.id, ct0.clone());
+      tracing::info!(
+         session_id = session.id,
+         session_user = %session.username,
+         "stored a fresh ct0"
+      );
+      Ok(Some(ct0))
    }
 
    pub(crate) async fn bearer_and_tid(&self, api_path: &str) -> (&'static str, Option<String>) {
@@ -1257,6 +1319,17 @@ impl ApiClient {
       let data = resp
          .data
          .ok_or_else(|| Error::Internal("Response parse error: missing data".into()))?;
+      // A suspended account answers search with a page that parses and holds no
+      // posts, where an account in good standing returns them.
+      if endpoint.ends_with("/SearchTimeline") && search_answer_is_empty(&bytes) {
+         tracing::info!(
+            session_id = session.id,
+            session_user = %session.username,
+            "search came back empty; account looks suspended, leaving it out of search"
+         );
+         self.sessions.mark_suspended(session.id).await;
+         return Err(Error::TransientUpstream);
+      }
       Ok((data, bytes))
    }
 
@@ -1392,16 +1465,45 @@ impl ApiClient {
             return Err(Error::SessionRejected(format!("Status {status}: {shown}")));
          }
 
+         if status.as_u16() == 403 && twitter_error_code(&body) == Some(353) {
+            // The ct0 this account was stored with no longer matches the one
+            // x.com holds. Fetch the current one and remember it; requests
+            // after the next start send it.
+            tracing::info!(
+               session_id = session.id,
+               session_user = %session.username,
+               "ct0 rejected, asking x.com for a fresh one"
+            );
+            if let Err(err) = self.refresh_stored_ct0(session).await {
+               tracing::warn!(session_id = session.id, "could not refresh ct0: {err}");
+            }
+            self.sessions.refund_if_metered(session, endpoint).await;
+            return Err(Error::TransientUpstream);
+         }
+
          // Empty or HTML 404s are X/WAF blips, not a missing tweet or user.
          // JSON 404s can still be a real gone resource.
          if status.as_u16() == 404 {
             if body.trim().is_empty() || serde_json::from_str::<serde_json::Value>(&body).is_err() {
-               tracing::trace!(
-                  session_id = session.id,
-                  session_user = %session.username,
-                  endpoint,
-                  "bodyless 404, retrying without a transaction id"
-               );
+               // A suspended account is handed an empty 404 for search and a
+               // normal page for everything else. Remember it so search stops
+               // picking it, and let this one search fall through to another
+               // account.
+               if endpoint.ends_with("/SearchTimeline") {
+                  tracing::info!(
+                     session_id = session.id,
+                     session_user = %session.username,
+                     "account is suspended; keeping it for reads, leaving it out of search"
+                  );
+                  self.sessions.mark_suspended(session.id).await;
+               } else {
+                  tracing::trace!(
+                     session_id = session.id,
+                     session_user = %session.username,
+                     endpoint,
+                     "bodyless 404, retrying without a transaction id"
+                  );
+               }
                self.sessions.refund_if_metered(session, endpoint).await;
                return Err(Error::TransientUpstream);
             }
@@ -1498,16 +1600,15 @@ impl ApiClient {
                "x-twitter-auth-type",
                header::HeaderValue::from_static("OAuth2Session"),
             );
+            let ct0 = self.sessions.ct0(session.id).unwrap_or_else(|| session.ct0.clone());
             headers.insert(
                "x-csrf-token",
-               session
-                  .ct0
-                  .parse()
+               ct0.parse()
                   .map_err(|_| Error::Internal("invalid ct0 header value".into()))?,
             );
             headers.insert(
                header::COOKIE,
-               format!("auth_token={}; ct0={}", session.auth_token, session.ct0)
+               format!("auth_token={}; ct0={ct0}", session.auth_token)
                   .parse()
                   .map_err(|_| Error::Internal("invalid cookie header value".into()))?,
             );
@@ -1568,16 +1669,15 @@ impl ApiClient {
          "x-twitter-auth-type",
          header::HeaderValue::from_static("OAuth2Session"),
       );
+      let ct0 = self.sessions.ct0(session.id).unwrap_or_else(|| session.ct0.clone());
       headers.insert(
          "x-csrf-token",
-         session
-            .ct0
-            .parse()
+         ct0.parse()
             .map_err(|_| Error::Internal("invalid ct0 header value".into()))?,
       );
       headers.insert(
          header::COOKIE,
-         format!("auth_token={}; ct0={}", session.auth_token, session.ct0)
+         format!("auth_token={}; ct0={ct0}", session.auth_token)
             .parse()
             .map_err(|_| Error::Internal("invalid cookie header value".into()))?,
       );
@@ -1668,6 +1768,16 @@ mod tests {
       let metadata = data.audio_space.unwrap().metadata.unwrap();
 
       assert_eq!(audio_space_status(&metadata), "Replay available · 4 plays");
+   }
+
+   #[test]
+   fn a_search_page_without_posts_is_empty_and_one_with_posts_is_not() {
+      assert!(search_answer_is_empty(br#"{"data":{"search_by_raw_query":{}}}"#));
+      assert!(search_answer_is_empty(br#"{"data":null}"#));
+      assert!(!search_answer_is_empty(
+         br#"{"data":{"search_by_raw_query":{"tweet_results":{}}}}"#
+      ));
+      assert!(!search_answer_is_empty(b"not json"));
    }
 
    #[test]

@@ -83,6 +83,8 @@ pub struct SessionPool {
    state: Option<Arc<LimitState>>,
    /// `sessions.jsonl` this pool was loaded from.
    source_path: String,
+   /// `ct0`s fetched since the last write to the sessions file.
+   pending_ct0: Arc<std::sync::Mutex<Vec<(i64, String)>>>,
    /// Calls parked until an account frees up, for the minute report.
    waiting: Arc<AtomicUsize>,
    /// Time each call spent getting an account, reported every minute.
@@ -185,6 +187,9 @@ struct PoolCount {
 
 struct SessionSlot {
    credentials: Arc<SessionCredentials>,
+   /// A `ct0` fetched after startup, sent in place of the one in `credentials`.
+   /// x.com rotates it, and the credentials are shared and loaded once.
+   fresh_ct0: Arc<std::sync::RwLock<Option<String>>>,
    permits: Arc<Semaphore>,
    max_concurrency: usize,
    /// Signaled when a lease on this account returns its permit, waking one
@@ -266,6 +271,19 @@ impl Drop for SessionLease {
    }
 }
 
+impl SessionLease {
+   /// Credentials only, holding no concurrency permit. For a call that retries
+   /// an account the pool has already released.
+   pub(crate) fn bare(credentials: Arc<SessionCredentials>) -> Self {
+      Self {
+         credentials,
+         permit: None,
+         metered: AtomicBool::new(false),
+         freed: Arc::new(Notify::new()),
+      }
+   }
+}
+
 impl Deref for SessionLease {
    type Target = SessionCredentials;
 
@@ -313,6 +331,7 @@ impl SessionPool {
          let id = creds.id;
          sessions.push(SessionSlot {
             credentials: Arc::new(creds),
+            fresh_ct0: Arc::new(std::sync::RwLock::new(None)),
             permits: Arc::new(Semaphore::new(max_concurrency)),
             max_concurrency,
             freed: Arc::new(Notify::new()),
@@ -380,6 +399,7 @@ impl SessionPool {
          state,
          source_path: path.to_owned(),
          waiting: Arc::default(),
+         pending_ct0: Arc::default(),
          queue: Arc::default(),
       };
       pool.spawn_flusher();
@@ -1126,6 +1146,18 @@ impl SessionPool {
       }
    }
 
+   /// X confirmed this account is suspended. It stays in the pool for profile
+   /// and tweet reads, which a suspended account can still do, and is kept out
+   /// of search.
+   pub async fn mark_suspended(&self, session_id: i64) {
+      let mut limits = self.limits.write().await;
+      if let Some(lim) = limits.get_mut(&session_id) {
+         lim.suspended = true;
+      }
+      drop(limits);
+      self.persist_soon(session_id);
+   }
+
    /// Mark a session as globally rate limited.
    pub async fn mark_limited(&self, session_id: i64) {
       let mut limits = self.limits.write().await;
@@ -1179,6 +1211,72 @@ impl SessionPool {
             Some(slot.credentials.id)
          })
          .collect()
+   }
+
+   /// One account's credentials, without taking a concurrency slot or checking
+   /// whether it may be used. For work that only needs to know who it is.
+   pub fn credentials(&self, session_id: i64) -> Option<Arc<SessionCredentials>> {
+      self.sessions
+         .iter()
+         .find(|slot| slot.credentials.id == session_id)
+         .map(|slot| Arc::clone(&slot.credentials))
+   }
+
+   /// The `ct0` to send for this account: one fetched since startup, or the one
+   /// loaded from the sessions file.
+   pub fn ct0(&self, session_id: i64) -> Option<String> {
+      let slot = self.sessions.iter().find(|slot| slot.credentials.id == session_id)?;
+      let fresh = slot
+         .fresh_ct0
+         .read()
+         .unwrap_or_else(std::sync::PoisonError::into_inner)
+         .clone();
+      Some(fresh.unwrap_or_else(|| slot.credentials.ct0.clone()))
+   }
+
+   /// Remember a `ct0` x.com just issued, so later requests send it, and queue a
+   /// write of the sessions file.
+   pub fn remember_ct0(&self, session_id: i64, ct0: String) {
+      self.hold_ct0(session_id, ct0.clone());
+      self.pending_ct0
+         .lock()
+         .unwrap_or_else(std::sync::PoisonError::into_inner)
+         .push((session_id, ct0));
+      let pool = self.clone();
+      tokio::spawn(async move {
+         sleep(Duration::from_secs(2)).await;
+         if let Err(err) = pool.flush_ct0().await {
+            tracing::warn!("could not store refreshed ct0s: {err}");
+         }
+      });
+   }
+
+   /// Remember a `ct0` without writing it. The caller writes the whole batch.
+   pub fn hold_ct0(&self, session_id: i64, ct0: String) {
+      let Some(slot) = self.sessions.iter().find(|slot| slot.credentials.id == session_id) else {
+         return;
+      };
+      *slot.fresh_ct0.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ct0);
+   }
+
+   async fn flush_ct0(&self) -> Result<()> {
+      let pending = std::mem::take(
+         &mut *self.pending_ct0.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+      );
+      if pending.is_empty() {
+         return Ok(());
+      }
+      store_session_ct0s(&self.source_path, &pending).await.map(|_| ())
+   }
+
+   /// Write a fresh `ct0` back to the sessions file. See [`store_session_ct0`].
+   pub async fn store_ct0(&self, session_id: i64, ct0: &str) -> Result<bool> {
+      store_session_ct0(&self.source_path, session_id, ct0).await
+   }
+
+   /// Write many refreshed `ct0`s in one pass over the sessions file.
+   pub async fn store_ct0s(&self, fresh: &[(i64, String)]) -> Result<()> {
+      store_session_ct0s(&self.source_path, fresh).await.map(|_| ())
    }
 
    /// Take a specific session, for startup work that must hit that account.
@@ -1308,10 +1406,8 @@ impl SessionPool {
                && !creds.ct0.is_empty()
          })
          .map(|creds| {
-            (
-               creds.id,
-               format!("auth_token={}; ct0={}", creds.auth_token, creds.ct0),
-            )
+            let ct0 = self.ct0(creds.id).unwrap_or_else(|| creds.ct0.clone());
+            (creds.id, format!("auth_token={}; ct0={ct0}", creds.auth_token))
          })
    }
 
@@ -1505,22 +1601,105 @@ async fn file_has_session(path: &str, session_id: i64) -> Result<bool> {
 }
 
 async fn rewrite_sessions_without(path: &str, session_id: i64) -> Result<()> {
+   rewrite_sessions(path, session_id, |_| None)
+      .await
+      .map(|_| ())
+}
+
+/// Replace the `ct0` stored for one account. See [`store_session_ct0s`].
+async fn store_session_ct0(path: &str, session_id: i64, ct0: &str) -> Result<bool> {
+   store_session_ct0s(path, &[(session_id, ct0.to_owned())]).await.map(|count| count > 0)
+}
+
+/// Replace the `ct0` stored for each of these accounts, in one rewrite.
+///
+/// x.com rotates `ct0` on its own, and a request signed with the old one is
+/// refused with "csrf cookie and header do not match". The credentials are
+/// shared and loaded once, so the fresh values are written back to the
+/// sessions file for the next start.
+async fn store_session_ct0s(path: &str, fresh: &[(i64, String)]) -> Result<usize> {
+   if fresh.is_empty() {
+      return Ok(0);
+   }
+   let ct0s: HashMap<i64, &str> = fresh.iter().map(|(id, ct0)| (*id, ct0.as_str())).collect();
    let content = fs::read_to_string(path).await?;
    let mut kept = String::with_capacity(content.len());
+   let mut changed = 0_usize;
+   for line in content.lines() {
+      if line.trim().is_empty() {
+         continue;
+      }
+      let Some(id) = session_line_id(line) else {
+         kept.push_str(line);
+         kept.push('\n');
+         continue;
+      };
+      let Some(ct0) = ct0s.get(&id) else {
+         kept.push_str(line);
+         kept.push('\n');
+         continue;
+      };
+      match retarget_ct0(line, ct0) {
+         Some(updated) => {
+            changed += 1;
+            kept.push_str(&updated);
+         },
+         None => kept.push_str(line),
+      }
+      kept.push('\n');
+   }
+   if changed == 0 {
+      return Ok(0);
+   }
+   let tmp = format!("{path}.tmp");
+   fs::write(&tmp, kept).await?;
+   fs::rename(&tmp, path).await?;
+   Ok(changed)
+}
+
+fn retarget_ct0(line: &str, ct0: &str) -> Option<String> {
+   let mut value: serde_json::Value = serde_json::from_str(line).ok()?;
+   if value.get("ct0").and_then(|item| item.as_str()) == Some(ct0) {
+      return None;
+   }
+   value["ct0"] = serde_json::Value::String(ct0.to_owned());
+   serde_json::to_string(&value).ok()
+}
+
+/// Rewrite the sessions file, dropping `session_id` or swapping its line.
+///
+/// `edit` returns the replacement line, or `None` to drop it. `Ok(false)`
+/// means the account was not in the file.
+async fn rewrite_sessions(
+   path: &str,
+   session_id: i64,
+   mut edit: impl FnMut(&str) -> Option<String>,
+) -> Result<bool> {
+   let content = fs::read_to_string(path).await?;
+   let mut kept = String::with_capacity(content.len());
+   let mut found = false;
    for line in content.lines() {
       if line.trim().is_empty() {
          continue;
       }
       if session_line_id(line) == Some(session_id) {
+         found = true;
+         if let Some(replacement) = edit(line) {
+            kept.push_str(&replacement);
+            kept.push('\n');
+         }
          continue;
       }
       kept.push_str(line);
       kept.push('\n');
    }
+   if !found {
+      return Ok(false);
+   }
    let tmp = format!("{path}.tmp");
    fs::write(&tmp, kept).await?;
    fs::rename(&tmp, path).await?;
-   Ok(())
+   Ok(true)
 }
 
 fn session_line_id(line: &str) -> Option<i64> {
@@ -1564,9 +1743,29 @@ mod tests {
 
    use super::{
       MAX_PARK, QUEUE_PER_SLOT, SessionKind, SessionPool, normalized_parameter_string,
-      percent_encode,
+      percent_encode, store_session_ct0s,
    };
    use crate::error::Error;
+
+   #[tokio::test]
+   async fn a_refreshed_ct0_is_written_back_and_the_rest_are_left_alone() {
+      let path = format!("/tmp/teapot-ct0-{}-{}.jsonl", process::id(), line!());
+      let _ = fs::remove_file(&path).await;
+      fs::write(
+         &path,
+         "{\"id\":1,\"ct0\":\"old\"}\n{\"id\":2,\"ct0\":\"keep\"}\n",
+      )
+      .await
+      .unwrap();
+      let changed = store_session_ct0s(&path, &[(1, "fresh".to_owned())]).await.unwrap();
+      assert_eq!(changed, 1);
+      let content = fs::read_to_string(&path).await.unwrap();
+      assert!(content.contains("\"ct0\":\"fresh\""));
+      assert!(content.contains("\"ct0\":\"keep\""));
+      let again = store_session_ct0s(&path, &[(1, "fresh".to_owned())]).await.unwrap();
+      assert_eq!(again, 0);
+      let _ = fs::remove_file(&path).await;
+   }
 
    #[test]
    fn oauth_percent_encoding_follows_rfc_5849() {

@@ -62,6 +62,10 @@ pub struct SessionLimits {
    /// Kept out of profile pages. Search is tracked separately in `refused_ops`.
    #[serde(default)]
    pub profile_banned: bool,
+   /// X confirmed this account is suspended. It can still read profiles and
+   /// tweets, so it stays in the pool, but it cannot search.
+   #[serde(default)]
+   pub suspended: bool,
    /// Calls X refused this account with a bare 429, by endpoint. Kept apart
    /// from `apis`, which holds X's real window.
    #[serde(skip)]
@@ -233,6 +237,9 @@ impl SessionLimits {
 
    pub(crate) fn refuses_at(&self, name: &str, now: i64) -> bool {
       if self.profile_banned && is_profile_op(name) {
+         return true;
+      }
+      if self.suspended && name == "SearchTimeline" {
          return true;
       }
       let Some(&at) = self.refused_ops.get(name) else {
@@ -419,6 +426,7 @@ impl Session {
             verified_ops: HashMap::new(),
             profile_strikes: 0,
             profile_banned: false,
+            suspended: false,
             resting: HashMap::new(),
          },
       )
@@ -473,6 +481,16 @@ mod tests {
       assert_eq!(limits.rest_at(api, now + 121), 240);
       let later = now + 121 + 240 + BARE_429_MEMORY_SECS + 1;
       assert_eq!(limits.rest_at(api, later), 120);
+   }
+
+   #[test]
+   fn a_suspended_account_keeps_reading_but_cannot_search() {
+      let mut limits = SessionLimits::default();
+      limits.suspended = true;
+      assert!(limits.refuses("ph2f/SearchTimeline"));
+      assert!(!limits.refuses("x/UserTweets"));
+      assert!(!limits.refuses("x/UserByScreenName"));
+      assert!(!limits.profile_banned);
    }
 
    #[test]
