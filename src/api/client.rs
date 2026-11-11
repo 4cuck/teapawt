@@ -18,6 +18,7 @@ use super::{
    endpoints,
    http::{Egress, HttpClient, ProxyConfig, Purpose},
    latency::Latency,
+   log_events::{self, Event},
    operations::Operations,
    parser,
    timeline_route::TimelineRoutes,
@@ -487,6 +488,9 @@ impl ApiClient {
             for line in api.latency.report() {
                tracing::info!("upstream {line}");
             }
+            if let Some(line) = log_events::report() {
+               tracing::info!("upstream events {line}");
+            }
             for line in api.sessions.queue_report() {
                tracing::info!("account queue {line}");
             }
@@ -802,7 +806,8 @@ impl ApiClient {
          }
 
          if !empty {
-            tracing::warn!(
+            log_events::note(Event::SessionRetry);
+            tracing::debug!(
                session_id,
                endpoint,
                "session unusable, retrying on another"
@@ -1331,18 +1336,21 @@ impl ApiClient {
                // fullest account and was picked again about a thousand
                // times a minute, each pick a visitor's retry and often a 503.
                if self.client.exit_still_served(&self.egress_for(session)) {
-                  tracing::warn!(
+                  self.sessions.disarm_meter(session);
+                  let rest_secs = self.sessions.rest_endpoint(session.id, endpoint).await;
+                  log_events::note(Event::Bare429);
+                  tracing::debug!(
                      session_id = session.id,
                      session_user = %session.username,
                      endpoint,
-                     "X refused this account the call with a bare 429; resting it briefly"
+                     rest_secs,
+                     "X refused this account the call with a bare 429; resting it"
                   );
-                  self.sessions.disarm_meter(session);
-                  self.sessions.rest_endpoint(session.id, endpoint).await;
                   return Err(Error::RateLimited);
                }
                // The HTTP layer has parked the exit and tried another.
-               tracing::warn!(
+               log_events::note(Event::Edge429);
+               tracing::debug!(
                   session_id = session.id,
                   session_user = %session.username,
                   endpoint,
@@ -1351,7 +1359,8 @@ impl ApiClient {
                self.sessions.refund_if_metered(session, endpoint).await;
                return Err(Error::IpThrottled);
             }
-            tracing::warn!(
+            log_events::note(Event::Account429);
+            tracing::debug!(
                session_id = session.id,
                session_user = %session.username,
                endpoint,

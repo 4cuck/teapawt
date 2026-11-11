@@ -848,14 +848,13 @@ impl SessionPool {
       self.persist_soon(session_id);
    }
 
-   /// X refused this account `api` with a bare 429: no window, no body. These
-   /// clear within a couple of minutes, so it sits out only that long, with
-   /// no strike and its real window untouched.
-   pub async fn rest_endpoint(&self, session_id: i64, api: &str) {
+   /// X refused this account `api` with a bare 429: no window, no body. Most
+   /// clear within a couple of minutes, so it sits out only that long, longer
+   /// each time X refuses it again straight after, with no strike and its
+   /// real window untouched. Returns the rest in seconds.
+   pub async fn rest_endpoint(&self, session_id: i64, api: &str) -> Option<i64> {
       let mut limits = self.limits.write().await;
-      if let Some(lim) = limits.get_mut(&session_id) {
-         lim.rest(api);
-      }
+      limits.get_mut(&session_id).map(|lim| lim.rest(api))
    }
 
    /// Record that a session got results for `api`, which moves it ahead of

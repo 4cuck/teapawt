@@ -99,7 +99,7 @@ async fn main() -> eyre::Result<()> {
    tracing_subscriber::registry()
       .with(
          tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "teapot=debug,tower_http=debug".into()),
+            .unwrap_or_else(|_| "teapot=info,tower_http=info".into()),
       )
       .with(fmt::layer().with_writer(log_writer))
       .init();

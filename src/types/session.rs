@@ -62,16 +62,35 @@ pub struct SessionLimits {
    /// Kept out of profile pages. Search is tracked separately in `refused_ops`.
    #[serde(default)]
    pub profile_banned: bool,
-   /// Calls X refused this account with a bare 429, by endpoint, with when
-   /// it may try again. Kept apart from `apis`, which holds X's real window.
+   /// Calls X refused this account with a bare 429, by endpoint. Kept apart
+   /// from `apis`, which holds X's real window.
    #[serde(skip)]
-   pub resting: HashMap<String, i64>,
+   pub resting: HashMap<String, Rest>,
 }
 
-/// How long an account sits out a call X refused it with a bare 429. Half of
-/// those refusals cleared within 36 s and nine in ten within 150 s; sitting
-/// out the whole 15-minute window took 1,130 accounts off profile lookups.
+/// One endpoint an account sits out after a bare 429.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Rest {
+   pub until: i64,
+   /// Refusals in a row, each within [`BARE_429_MEMORY_SECS`] of the last rest
+   /// ending.
+   pub relapses: u32,
+}
+
+/// How long an account first sits out a call X refused it with a bare 429.
+/// Half of those refusals cleared within 36 s and nine in ten within 150 s;
+/// sitting every account out the whole 15-minute window took 1,130 accounts
+/// off profile lookups.
 const BARE_429_REST_SECS: i64 = 120;
+
+/// The longest rest, X's own window. Reached only by an account X refuses
+/// again each time it comes back: with a flat two minutes, three refusals in
+/// four were the account's first call after its rest, about 1,000 wasted
+/// calls and visitor retries a minute.
+const BARE_429_REST_MAX_SECS: i64 = 15 * 60;
+
+/// A refusal this soon after the last rest ended doubles the next one.
+const BARE_429_MEMORY_SECS: i64 = 5 * 60;
 
 /// How long a globally-limited session stays limited before auto-recovery (15
 /// min).
@@ -174,16 +193,34 @@ impl SessionLimits {
       false
    }
 
-   /// Sit this account out of `api` for [`BARE_429_REST_SECS`], leaving its
-   /// recorded window as X last reported it.
-   pub fn rest(&mut self, api: &str) {
+   /// Sit this account out of `api`, leaving its recorded window as X last
+   /// reported it. [`BARE_429_REST_SECS`] at first, doubling while X keeps
+   /// refusing it straight after each rest. Returns the rest in seconds.
+   pub fn rest(&mut self, api: &str) -> i64 {
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
-      self.resting.retain(|_, until| *until > now);
-      self.resting.insert(api.to_owned(), now + BARE_429_REST_SECS);
+      self.rest_at(api, now)
+   }
+
+   fn rest_at(&mut self, api: &str, now: i64) -> i64 {
+      let remembered = |rest: &Rest| rest.until + BARE_429_MEMORY_SECS > now;
+      let relapses = self
+         .resting
+         .get(api)
+         .filter(|last| remembered(last))
+         .map_or(0, |last| last.relapses.saturating_add(1));
+      let secs = BARE_429_REST_SECS
+         .saturating_mul(1 << relapses.min(8))
+         .min(BARE_429_REST_MAX_SECS);
+      self.resting.retain(|_, rest| remembered(rest));
+      self.resting.insert(api.to_owned(), Rest {
+         until: now + secs,
+         relapses,
+      });
+      secs
    }
 
    pub(crate) fn resting_at(&self, api: &str, now: i64) -> bool {
-      self.resting.get(api).is_some_and(|until| *until > now)
+      self.resting.get(api).is_some_and(|rest| rest.until > now)
    }
 
    /// Whether X refuses this account `api`. A search refusal is permanent.
@@ -410,6 +447,32 @@ mod tests {
          limits.headroom_at("x/UserByScreenName", "UserByScreenName", later),
          Headroom::Safe(90)
       );
+   }
+
+   #[test]
+   fn a_refusal_straight_after_a_rest_doubles_the_next_one() {
+      let mut limits = SessionLimits::default();
+      let api = "x/UserTweets";
+      let mut now = 1_000_000;
+      let mut rests = Vec::new();
+      for _ in 0..5 {
+         let secs = limits.rest_at(api, now);
+         rests.push(secs);
+         now += secs + 1;
+      }
+      assert_eq!(rests, [120, 240, 480, 900, 900]);
+      assert!(!limits.resting_at("x/TweetDetail", now));
+   }
+
+   #[test]
+   fn a_refusal_long_after_the_last_rest_starts_over() {
+      let mut limits = SessionLimits::default();
+      let api = "x/UserTweets";
+      let now = 1_000_000;
+      assert_eq!(limits.rest_at(api, now), 120);
+      assert_eq!(limits.rest_at(api, now + 121), 240);
+      let later = now + 121 + 240 + BARE_429_MEMORY_SECS + 1;
+      assert_eq!(limits.rest_at(api, later), 120);
    }
 
    #[test]

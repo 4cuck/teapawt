@@ -31,7 +31,10 @@ use futures_core::Stream;
 use http_body::Frame;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use super::browser::{self, Engine, Identity};
+use super::{
+   browser::{self, Engine, Identity},
+   log_events::{self, Event},
+};
 use crate::error::{Error, Result};
 
 const DEFAULT_BODY_LIMIT: usize = 32 * 1024 * 1024; // 32 MiB
@@ -1184,7 +1187,8 @@ impl HttpClient {
                send().await.map_err(describe)?
             },
             Err(_elapsed) => {
-               tracing::warn!(
+               log_events::note(Event::MediaStall);
+               tracing::debug!(
                   uri = loggable(uri),
                   "media headers stalled, opening a new connection"
                );
@@ -1216,7 +1220,8 @@ impl HttpClient {
             },
             Err(_elapsed) => {
                probe.failed();
-               tracing::warn!(
+               log_events::note(Event::HeaderStall);
+               tracing::debug!(
                   uri = loggable(uri),
                   "API headers stalled, opening another connection"
                );
@@ -1306,7 +1311,8 @@ impl HttpClient {
                   first_done = true;
                   match late {
                      Ok(inner) if !inner.status().is_server_error() => {
-                        tracing::info!(
+                        log_events::note(Event::LateHeaders);
+                        tracing::debug!(
                            uri = loggable(uri),
                            "late headers arrived on the first connection"
                         );
@@ -1349,7 +1355,8 @@ impl HttpClient {
       if let Some(alternate) = alternate.as_ref() {
          self.retire(Some(alternate));
       }
-      tracing::warn!(uri = loggable(uri), "API headers stalled again");
+      log_events::note(Event::StalledTwice);
+      tracing::debug!(uri = loggable(uri), "API headers stalled again");
       Err(Error::Internal("API headers stalled".into()))
    }
 

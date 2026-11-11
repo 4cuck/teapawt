@@ -7,6 +7,7 @@ mod filters;
 pub mod http;
 mod latency;
 mod limits_db;
+mod log_events;
 mod operations;
 mod parser;
 mod proxy_pool;
