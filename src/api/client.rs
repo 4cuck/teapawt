@@ -491,7 +491,7 @@ impl ApiClient {
             if let Some(line) = log_events::report() {
                tracing::info!("upstream events {line}");
             }
-            for line in api.sessions.queue_report() {
+            for line in api.sessions.queue_report().await {
                tracing::info!("account queue {line}");
             }
             if let Some(report) = api.timeline_routes.report(api.sessions.len()) {

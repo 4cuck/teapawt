@@ -83,9 +83,8 @@ pub struct SessionPool {
    state: Option<Arc<LimitState>>,
    /// `sessions.jsonl` this pool was loaded from.
    source_path: String,
-   /// Signaled after a lease returns its permit, so a caller blocked on a full
-   /// pool can take whichever account freed rather than one chosen up front.
-   freed: Arc<Notify>,
+   /// Calls parked until an account frees up, for the minute report.
+   waiting: Arc<AtomicUsize>,
    /// Time each call spent getting an account, reported every minute.
    queue: Arc<AccountQueue>,
 }
@@ -112,6 +111,32 @@ const WARM_CONNECTION_SECS: u64 = 900;
 /// fraction of the calls it has left, so the quick exits carry the load until
 /// their accounts are down to half of what the slow ones still hold.
 const SLOW_EXIT_DISCOUNT: i32 = 2;
+/// Accounts a parked call listens on. A release on any of them wakes it.
+const WAIT_ON_ACCOUNTS: usize = 32;
+/// A parked call looks at the pool again after this even if none of its
+/// accounts frees, for one whose rest or window ran out meanwhile.
+const RESCAN_AFTER: Duration = Duration::from_secs(1);
+/// The longest a call waits for an account before the visitor is told to try
+/// again. When X has most accounts resting, the few left cannot drain the
+/// line, and waiting it out only ended at the 45 s page timeout.
+const MAX_PARK: Duration = Duration::from_secs(2);
+/// Calls allowed in line per slot on the accounts a call would wait on. A
+/// profile lookup holds a slot about 150 ms, so a line this deep clears in
+/// about a second; a deeper one is turned away at once instead of joining.
+const QUEUE_PER_SLOT: usize = 8;
+
+/// Who is asking, which decides the accounts it may take.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Caller {
+   /// A call that has not queued. It leaves alone an account a parked call
+   /// is waiting on, so the slot that frees goes to the call already waiting.
+   Fresh,
+   /// The second copy of a slow call: a warm connection on a quick exit
+   /// first, and never an account a parked call is waiting on.
+   Hedge,
+   /// A parked call that was woken. It may take the accounts it waited on.
+   Queued,
+}
 
 /// Why one pass over the pool found no account.
 enum Miss {
@@ -147,14 +172,78 @@ struct Candidate {
    slow_exit: bool,
 }
 
+/// Where the accounts for one call stood, for the minute report.
+#[derive(Default)]
+struct PoolCount {
+   free: usize,
+   busy: usize,
+   held: usize,
+   resting: usize,
+   spent: usize,
+   out: usize,
+}
+
 struct SessionSlot {
    credentials: Arc<SessionCredentials>,
    permits: Arc<Semaphore>,
    max_concurrency: usize,
+   /// Signaled when a lease on this account returns its permit, waking one
+   /// call parked on this account and no other.
+   freed: Arc<Notify>,
+   /// Parked calls listening on this account.
+   wanted: AtomicUsize,
    /// Unix timestamp (seconds) when this session last completed an upstream call.
    last_active: AtomicU64,
    /// The exit this account is pinned to answers well behind the rest.
    slow_exit: AtomicBool,
+}
+
+/// A parked call's claim on the accounts it listens on, given up on drop.
+struct Wanted<'a> {
+   sessions: &'a [SessionSlot],
+   indices: Vec<usize>,
+}
+
+impl<'a> Wanted<'a> {
+   fn claim(sessions: &'a [SessionSlot], indices: Vec<usize>) -> Self {
+      for &index in &indices {
+         sessions[index].wanted.fetch_add(1, Ordering::Relaxed);
+      }
+      Self { sessions, indices }
+   }
+}
+
+/// Letting go hands each account on: one that is free and still wanted wakes
+/// the next call parked on it. Without this, a call that parked on an account
+/// already free but held for others sleeps until its rescan, and a call
+/// dropped right after its wake-up takes that wake-up with it.
+impl Drop for Wanted<'_> {
+   fn drop(&mut self) {
+      for &index in &self.indices {
+         let slot = &self.sessions[index];
+         if slot.wanted.fetch_sub(1, Ordering::Relaxed) > 1
+            && slot.permits.available_permits() > 0
+         {
+            slot.freed.notify_one();
+         }
+      }
+   }
+}
+
+/// Counts a call as parked for as long as it lives.
+struct Parked<'a>(&'a AtomicUsize);
+
+impl<'a> Parked<'a> {
+   fn new(waiting: &'a AtomicUsize) -> Self {
+      waiting.fetch_add(1, Ordering::Relaxed);
+      Self(waiting)
+   }
+}
+
+impl Drop for Parked<'_> {
+   fn drop(&mut self) {
+      self.0.fetch_sub(1, Ordering::Relaxed);
+   }
 }
 
 /// A session and the concurrency permit held for its request lifetime.
@@ -170,6 +259,8 @@ impl Drop for SessionLease {
    fn drop(&mut self) {
       // Return the slot before waking anyone. A scan that runs while the
       // permit is still held goes back to sleep and misses this signal.
+      // Only a call parked on this very account is woken: one woken for an
+      // account it cannot use went back to sleep and took the signal with it.
       drop(self.permit.take());
       self.freed.notify_one();
    }
@@ -224,6 +315,8 @@ impl SessionPool {
             credentials: Arc::new(creds),
             permits: Arc::new(Semaphore::new(max_concurrency)),
             max_concurrency,
+            freed: Arc::new(Notify::new()),
+            wanted: AtomicUsize::new(0),
             last_active: AtomicU64::new(0),
             slow_exit: AtomicBool::new(false),
          });
@@ -286,7 +379,7 @@ impl SessionPool {
          cursor: Arc::new(AtomicUsize::new(0)),
          state,
          source_path: path.to_owned(),
-         freed: Arc::new(Notify::new()),
+         waiting: Arc::default(),
          queue: Arc::default(),
       };
       pool.spawn_flusher();
@@ -489,15 +582,28 @@ impl SessionPool {
       let started = Instant::now();
       let label = api_for(required_kind.unwrap_or(SessionKind::Cookie));
       let note = |outcome| self.queue.record(label, started.elapsed(), outcome);
+      let mut parked = None;
+      // This call's claim on the accounts it listened on, let go after the
+      // next scan so the accounts it did not take go to the next in line.
+      let mut claim: Option<Wanted<'_>> = None;
       loop {
+         let caller = if claim.is_some() { Caller::Queued } else { Caller::Fresh };
+         let mut busy = Vec::new();
          let mut limits = self.limits.write().await;
-         match self.scan(&mut limits, &api_for, required_kind, &accept, false) {
+         let pass = self.scan(&mut limits, &api_for, required_kind, &accept, caller, Some(&mut busy));
+         drop(claim.take());
+         match pass {
             Ok(lease) => {
                drop(limits);
                note(Outcome::Leased);
                return Ok(lease);
             },
-            Err(Miss::Busy) => {},
+            Err(Miss::Busy) if !self.should_shed(started, &busy) => {},
+            Err(Miss::Busy) => {
+               drop(limits);
+               note(Outcome::Shed);
+               return Err(Error::RateLimited);
+            },
             Err(miss) => {
                drop(limits);
                let (outcome, err) = miss.settle();
@@ -505,14 +611,52 @@ impl SessionPool {
                return Err(err);
             },
          }
-         let waiter = self.freed.notified();
-         tokio::pin!(waiter);
+         parked.get_or_insert_with(|| Parked::new(&self.waiting));
+         let mut waiters = busy
+            .iter()
+            .map(|&index| Box::pin(self.sessions[index].freed.notified()))
+            .collect::<Vec<_>>();
          // Register before leaving the lock so a release during the handoff
          // is still observed.
-         waiter.as_mut().enable();
+         for waiter in &mut waiters {
+            waiter.as_mut().enable();
+         }
+         claim = Some(Wanted::claim(&self.sessions, busy.clone()));
          drop(limits);
-         waiter.await;
+         let freed = std::future::poll_fn(|cx| {
+            if waiters.iter_mut().any(|waiter| waiter.as_mut().poll(cx).is_ready()) {
+               std::task::Poll::Ready(())
+            } else {
+               std::task::Poll::Pending
+            }
+         });
+         let rescan = RESCAN_AFTER.min(MAX_PARK.saturating_sub(started.elapsed()));
+         tokio::select! {
+            () = freed => {},
+            () = sleep(rescan) => {},
+         }
       }
+   }
+
+   /// Whether a call that found every usable account mid-call should be turned
+   /// away instead of parked: it has waited [`MAX_PARK`] already, or more
+   /// calls wait on those accounts than their slots clear in about a second.
+   /// The line is read from the busiest account, since a parked call listens
+   /// on all of them.
+   fn should_shed(&self, started: Instant, busy: &[usize]) -> bool {
+      if started.elapsed() >= MAX_PARK {
+         return true;
+      }
+      let ahead = busy
+         .iter()
+         .map(|&index| self.sessions[index].wanted.load(Ordering::Relaxed))
+         .max()
+         .unwrap_or(0);
+      let slots: usize = busy
+         .iter()
+         .map(|&index| self.sessions[index].max_concurrency)
+         .sum();
+      ahead >= slots.max(1) * QUEUE_PER_SLOT
    }
 
    /// An account with quota for `api` and a free slot right now, without
@@ -529,7 +673,7 @@ impl SessionPool {
       }
       let started = Instant::now();
       let mut limits = self.limits.write().await;
-      let pass = self.scan(&mut limits, &|_| api, required_kind, &|_| true, false);
+      let pass = self.scan(&mut limits, &|_| api, required_kind, &|_| true, Caller::Fresh, None);
       drop(limits);
       match pass {
          Ok(lease) => {
@@ -564,14 +708,58 @@ impl SessionPool {
       }
       let mut limits = self.limits.try_write().ok()?;
       self
-         .scan(&mut limits, &|_| api, required_kind, &accept, true)
+         .scan(&mut limits, &|_| api, required_kind, &accept, Caller::Hedge, None)
          .ok()
    }
 
    /// One line per operation that asked for an account since the last call:
    /// how many got one, how long that took, and how many were turned away.
-   pub(crate) fn queue_report(&self) -> Vec<String> {
-      self.queue.report()
+   /// An operation that queued often also gets a line on where its accounts
+   /// were: free, mid-call, held for parked calls, resting, spent or out.
+   pub(crate) async fn queue_report(&self) -> Vec<String> {
+      let report = self.queue.report();
+      let mut lines = report.lines;
+      if report.crowded.is_empty() {
+         return lines;
+      }
+      let limits = self.limits.read().await;
+      let now = time::OffsetDateTime::now_utc().unix_timestamp();
+      for api in &report.crowded {
+         lines.push(self.pool_line(&limits, api, now));
+      }
+      lines
+   }
+
+   fn pool_line(&self, limits: &HashMap<i64, SessionLimits>, api: &str, now: i64) -> String {
+      let op_name = crate::types::operation_name(api);
+      let mut count = PoolCount::default();
+      for slot in self.sessions.iter() {
+         let lim = limits.get(&slot.credentials.id);
+         let state = match lim {
+            Some(lim)
+               if lim.rejected || lim.is_globally_limited_at(now) || lim.refuses_at(op_name, now) =>
+            {
+               &mut count.out
+            },
+            Some(lim) if lim.resting_at(api, now) => &mut count.resting,
+            Some(lim) if lim.headroom_at(api, op_name, now) == Headroom::Blocked => &mut count.spent,
+            _ if slot.permits.available_permits() == 0 => &mut count.busy,
+            _ if slot.wanted.load(Ordering::Relaxed) > 0 => &mut count.held,
+            _ => &mut count.free,
+         };
+         *state += 1;
+      }
+      format!(
+         "{op_name} accounts: {} free, {} mid-call, {} held for parked calls, {} resting after a \
+          bare 429, {} spent, {} out; {} calls parked",
+         count.free,
+         count.busy,
+         count.held,
+         count.resting,
+         count.spent,
+         count.out,
+         self.waiting.load(Ordering::Relaxed),
+      )
    }
 
    /// Flag the accounts pinned to an exit that trails the fleet, so they are
@@ -591,14 +779,20 @@ impl SessionPool {
    /// The account with the most calls left, starting from the rotation point.
    /// A known window always beats an account we have never measured: that
    /// unknown account is how a 429 still gets through.
+   ///
+   /// An account a parked call listens on counts as mid-call for anyone but
+   /// a parked call. `busy` collects the accounts that could serve this call
+   /// once they free up, for a caller that is about to park.
    fn scan<'a>(
       &self,
       limits: &mut HashMap<i64, SessionLimits>,
       api_for: &impl Fn(SessionKind) -> &'a str,
       required_kind: Option<SessionKind>,
       accept: &impl Fn(i64) -> bool,
-      prefer_warm: bool,
+      caller: Caller,
+      mut busy_out: Option<&mut Vec<usize>>,
    ) -> StdResult<SessionLease, Miss> {
+      let prefer_warm = caller == Caller::Hedge;
       let start = self.cursor.fetch_add(1, Ordering::Relaxed);
       let count = self.sessions.len();
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -627,8 +821,15 @@ impl SessionPool {
          if headroom == Some(Headroom::Blocked) {
             continue;
          }
-         if slot.permits.available_permits() == 0 {
+         if slot.permits.available_permits() == 0
+            || (caller != Caller::Queued && slot.wanted.load(Ordering::Relaxed) > 0)
+         {
             busy = true;
+            if let Some(out) = busy_out.as_deref_mut()
+               && out.len() < WAIT_ON_ACCOUNTS
+            {
+               out.push(index);
+            }
             continue;
          }
          let verified = session_limits.is_some_and(|lim| lim.verified_op(op_name));
@@ -702,24 +903,15 @@ impl SessionPool {
       let Ok(permit) = Arc::clone(&slot.permits).try_acquire_owned() else {
          return Err(Miss::Busy);
       };
-      Ok(self.lease(
-         Arc::clone(&slot.credentials),
-         permit,
-         spent == Spend::Metered,
-      ))
+      Ok(Self::lease(slot, permit, spent == Spend::Metered))
    }
 
-   fn lease(
-      &self,
-      credentials: Arc<SessionCredentials>,
-      permit: OwnedSemaphorePermit,
-      metered: bool,
-   ) -> SessionLease {
+   fn lease(slot: &SessionSlot, permit: OwnedSemaphorePermit, metered: bool) -> SessionLease {
       SessionLease {
-         credentials,
+         credentials: Arc::clone(&slot.credentials),
          permit: Some(permit),
          metered: AtomicBool::new(metered),
-         freed: Arc::clone(&self.freed),
+         freed: Arc::clone(&slot.freed),
       }
    }
 
@@ -853,6 +1045,7 @@ impl SessionPool {
    /// each time X refuses it again straight after, with no strike and its
    /// real window untouched. Returns the rest in seconds.
    pub async fn rest_endpoint(&self, session_id: i64, api: &str) -> Option<i64> {
+      self.queue.note_rest(api);
       let mut limits = self.limits.write().await;
       limits.get_mut(&session_id).map(|lim| lim.rest(api))
    }
@@ -1010,14 +1203,13 @@ impl SessionPool {
       {
          return Err(Error::RateLimited);
       }
-      let credentials = Arc::clone(&slot.credentials);
       let permits = Arc::clone(&slot.permits);
       drop(limits);
       let permit = permits
          .acquire_owned()
          .await
          .map_err(|_| Error::Internal("session request limiter closed".into()))?;
-      Ok(self.lease(credentials, permit, false))
+      Ok(Self::lease(slot, permit, false))
    }
 
    /// Remember that this session already had sensitive-content filters turned
@@ -1363,11 +1555,17 @@ fn normalized_parameter_string(params: &[(&str, &str)]) -> String {
 
 #[cfg(test)]
 mod tests {
-   use std::{env, process, time::Duration};
+   use std::{
+      env, process,
+      time::{Duration, Instant},
+   };
 
    use tokio::{fs, time::timeout};
 
-   use super::{SessionKind, SessionPool, normalized_parameter_string, percent_encode};
+   use super::{
+      MAX_PARK, QUEUE_PER_SLOT, SessionKind, SessionPool, normalized_parameter_string,
+      percent_encode,
+   };
    use crate::error::Error;
 
    #[test]
@@ -1535,6 +1733,96 @@ mod tests {
       fs::remove_file(path).await.unwrap();
    }
 
+   /// Two accounts, one slot each. Account 1 cannot look up profiles.
+   async fn profile_pool(name: &str) -> (SessionPool, std::path::PathBuf) {
+      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
+      let path = env::temp_dir().join(format!("teapot-session-pool-{name}-{}.jsonl", process::id()));
+      fs::write(
+         &path,
+         concat!(
+            r#"{"id":1,"username":"one","kind":"cookie","auth_token":"a","ct0":"c"}"#,
+            "\n",
+            r#"{"id":2,"username":"two","kind":"cookie","auth_token":"b","ct0":"d"}"#,
+            "\n"
+         ),
+      )
+      .await
+      .unwrap();
+      let pool = SessionPool::load(path.to_str().unwrap(), 1).await.unwrap();
+      pool.mark_refused(1, "x/UserByScreenName").await;
+      (pool, path)
+   }
+
+   #[tokio::test]
+   async fn a_release_wakes_a_call_that_can_use_that_account() {
+      let (pool, path) = profile_pool("own-wake").await;
+      let lookup = pool.acquire("x/UserByScreenName", None).await.unwrap();
+      assert_eq!(lookup.id, 2);
+      let detail = pool.acquire("x/TweetDetail", None).await.unwrap();
+      assert_eq!(detail.id, 1);
+
+      // Parked first, on account 2 only. One shared wake-up went to it when
+      // account 1 freed, and the call that could use account 1 slept on.
+      let profile_pool = pool.clone();
+      let profile =
+         tokio::spawn(async move { profile_pool.acquire("x/UserByScreenName", None).await });
+      tokio::time::sleep(Duration::from_millis(30)).await;
+      let detail_pool = pool.clone();
+      let next_detail = tokio::spawn(async move { detail_pool.acquire("x/TweetDetail", None).await });
+      tokio::time::sleep(Duration::from_millis(30)).await;
+
+      drop(detail);
+      let next_detail = timeout(Duration::from_millis(300), next_detail)
+         .await
+         .expect("the call that can use the freed account is the one woken")
+         .unwrap()
+         .unwrap();
+      assert_eq!(next_detail.id, 1);
+      assert!(!profile.is_finished(), "account 2 is still mid-call");
+
+      drop(lookup);
+      let profile = timeout(Duration::from_millis(300), profile)
+         .await
+         .expect("account 2 freeing wakes the profile lookup")
+         .unwrap()
+         .unwrap();
+      assert_eq!(profile.id, 2);
+
+      drop(next_detail);
+      drop(profile);
+      fs::remove_file(path).await.unwrap();
+   }
+
+   #[tokio::test]
+   async fn a_new_call_leaves_the_account_a_parked_call_waits_on() {
+      let (pool, path) = profile_pool("held").await;
+      let lookup = pool.acquire("x/UserByScreenName", None).await.unwrap();
+      let detail = pool.acquire("x/TweetDetail", None).await.unwrap();
+
+      let profile_pool = pool.clone();
+      let profile =
+         tokio::spawn(async move { profile_pool.acquire("x/UserByScreenName", None).await });
+      tokio::time::sleep(Duration::from_millis(30)).await;
+
+      // Account 2 frees while the profile lookup is still parked on it. A
+      // call that could go anywhere does not take the only account the
+      // lookup can use.
+      drop(lookup);
+      let barged = pool.acquire_free("x/TweetDetail", None).await.unwrap();
+      assert!(barged.is_none(), "account 2 is held for the parked lookup");
+
+      let profile = timeout(Duration::from_millis(300), profile)
+         .await
+         .expect("the parked lookup gets the account it waited on")
+         .unwrap()
+         .unwrap();
+      assert_eq!(profile.id, 2);
+
+      drop(detail);
+      drop(profile);
+      fs::remove_file(path).await.unwrap();
+   }
+
    #[tokio::test]
    async fn a_free_pick_steps_aside_instead_of_queueing() {
       unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
@@ -1569,6 +1857,89 @@ mod tests {
          Err(Error::RateLimited)
       ));
 
+      fs::remove_file(path).await.unwrap();
+   }
+
+   #[tokio::test]
+   async fn a_call_stuck_behind_a_held_account_is_turned_away_not_kept() {
+      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
+      let path = env::temp_dir().join(format!(
+         "teapot-session-pool-shed-wait-{}.jsonl",
+         process::id()
+      ));
+      fs::write(
+         &path,
+         concat!(
+            r#"{"id":1,"username":"one","kind":"cookie","auth_token":"a","ct0":"c"}"#,
+            "\n"
+         ),
+      )
+      .await
+      .unwrap();
+      let pool = SessionPool::load(path.to_str().unwrap(), 1).await.unwrap();
+
+      let held = pool.acquire("x/UserByScreenName", None).await.unwrap();
+      let started = Instant::now();
+      let waited = timeout(
+         MAX_PARK + Duration::from_secs(1),
+         pool.acquire("x/UserByScreenName", None),
+      )
+      .await
+      .expect("a parked call gives up at its limit instead of the page timeout");
+      assert!(matches!(waited, Err(Error::RateLimited)));
+      assert!(started.elapsed() >= MAX_PARK);
+
+      drop(held);
+      fs::remove_file(path).await.unwrap();
+   }
+
+   #[tokio::test]
+   async fn a_line_too_long_to_clear_is_not_joined() {
+      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
+      let path = env::temp_dir().join(format!(
+         "teapot-session-pool-shed-line-{}.jsonl",
+         process::id()
+      ));
+      fs::write(
+         &path,
+         concat!(
+            r#"{"id":1,"username":"one","kind":"cookie","auth_token":"a","ct0":"c"}"#,
+            "\n"
+         ),
+      )
+      .await
+      .unwrap();
+      let pool = SessionPool::load(path.to_str().unwrap(), 1).await.unwrap();
+
+      let held = pool.acquire("x/UserByScreenName", None).await.unwrap();
+      let parked = (0..QUEUE_PER_SLOT)
+         .map(|_| {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.acquire("x/UserByScreenName", None).await })
+         })
+         .collect::<Vec<_>>();
+      tokio::time::sleep(Duration::from_millis(50)).await;
+
+      let late = timeout(
+         Duration::from_millis(100),
+         pool.acquire("x/UserByScreenName", None),
+      )
+      .await
+      .expect("a full line answers at once");
+      assert!(matches!(late, Err(Error::RateLimited)));
+
+      // The calls already in line still get the account as it frees.
+      drop(held);
+      timeout(Duration::from_millis(500), async {
+         while !parked.iter().any(tokio::task::JoinHandle::is_finished) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+         }
+      })
+      .await
+      .expect("a parked call is woken when the account frees");
+      for task in parked {
+         task.abort();
+      }
       fs::remove_file(path).await.unwrap();
    }
 

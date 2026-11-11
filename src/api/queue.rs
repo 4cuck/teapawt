@@ -29,18 +29,39 @@ pub enum Outcome {
    Spent,
    /// No account can serve it at all.
    Nobody,
+   /// Every usable account was mid-call and the line was too long to join,
+   /// or the call waited its limit; the visitor is told to try again.
+   Shed,
 }
+
+/// An operation whose leases waited this often gets a pool breakdown in the
+/// report, showing whether its accounts were busy, resting or spent.
+const CROWDED_PERCENT: u64 = 5;
 
 #[derive(Default)]
 struct Operation {
+   /// The endpoint as last asked for, query id included, so the pool can be
+   /// read for the same key it is charged against.
+   endpoint: String,
    leased: u64,
    waited: u64,
    spent: u64,
    nobody: u64,
+   /// Turned away instead of waiting on a line that would not clear.
+   shed: u64,
+   /// Bare 429s from X that sat an account out of this operation.
+   rested: u64,
    /// Milliseconds per lease since the last report, sampled once full.
    ring: Vec<u32>,
    seen: u64,
    longest: u32,
+}
+
+/// The minute's lines, and the endpoints that queued for an account often
+/// enough to be worth a look at the pool.
+pub struct Report {
+   pub lines: Vec<String>,
+   pub crowded: Vec<String>,
 }
 
 impl Operation {
@@ -48,6 +69,7 @@ impl Operation {
       match outcome {
          Outcome::Spent => self.spent += 1,
          Outcome::Nobody => self.nobody += 1,
+         Outcome::Shed => self.shed += 1,
          Outcome::Leased => {
             self.leased += 1;
             if took >= WAITED {
@@ -103,39 +125,60 @@ pub struct AccountQueue {
 
 impl AccountQueue {
    pub fn record(&self, endpoint: &str, took: Duration, outcome: Outcome) {
+      self.with(endpoint, |operation| operation.push(took, outcome));
+   }
+
+   /// X refused an account this call with a bare 429 and it now rests.
+   pub fn note_rest(&self, endpoint: &str) {
+      self.with(endpoint, |operation| operation.rested += 1);
+   }
+
+   fn with(&self, endpoint: &str, update: impl FnOnce(&mut Operation)) {
       let Ok(mut operations) = self.operations.lock() else {
          return;
       };
       let name = operation_name(endpoint);
-      if let Some(operation) = operations.get_mut(name) {
-         operation.push(took, outcome);
+      let operation = if let Some(operation) = operations.get_mut(name) {
+         operation
       } else {
-         let mut operation = Operation::default();
-         operation.push(took, outcome);
-         operations.insert(name.to_owned(), operation);
+         operations.entry(name.to_owned()).or_default()
+      };
+      if operation.endpoint != endpoint {
+         endpoint.clone_into(&mut operation.endpoint);
       }
+      update(operation);
    }
 
    /// One line per operation asked for since the last report, busiest
    /// first, and the counters behind it reset.
-   pub fn report(&self) -> Vec<String> {
+   pub fn report(&self) -> Report {
       let Ok(mut operations) = self.operations.lock() else {
-         return Vec::new();
+         return Report {
+            lines: Vec::new(),
+            crowded: Vec::new(),
+         };
       };
       let mut drained = operations
          .drain()
-         .filter(|(_, op)| op.leased + op.spent + op.nobody > 0)
+         .filter(|(_, op)| op.leased + op.spent + op.nobody + op.shed + op.rested > 0)
          .collect::<Vec<_>>();
       drop(operations);
-      drained.sort_by_key(|(_, op)| Reverse(op.leased + op.spent + op.nobody));
-      drained
+      drained.sort_by_key(|(_, op)| Reverse(op.leased + op.spent + op.nobody + op.shed));
+      let crowded = drained
+         .iter()
+         .filter(|(_, op)| {
+            op.shed > 0 || op.waited * 100 >= op.leased.max(1) * CROWDED_PERCENT
+         })
+         .map(|(_, op)| op.endpoint.clone())
+         .collect();
+      let lines = drained
          .into_iter()
          .map(|(name, mut op)| {
             let mut line = String::new();
             let _ = write!(
                line,
                "{name}: {} leased, {} waited, p50 {} ms, p90 {} ms, p99 {} ms, max {} ms, {} \
-                out of quota, {} no account",
+                out of quota, {} no account, {} rested, {} shed",
                op.leased,
                op.waited,
                percentile(&mut op.ring, 50),
@@ -144,10 +187,13 @@ impl AccountQueue {
                op.longest,
                op.spent,
                op.nobody,
+               op.rested,
+               op.shed,
             );
             line
          })
-         .collect()
+         .collect();
+      Report { lines, crowded }
    }
 }
 
@@ -163,16 +209,30 @@ mod tests {
       }
       queue.record("q2/UserTweets", Duration::ZERO, Outcome::Spent);
       queue.record("q1/TweetDetail", Duration::ZERO, Outcome::Nobody);
+      queue.note_rest("q2/UserTweets");
 
-      let lines = queue.report();
+      let report = queue.report();
+      let lines = report.lines;
       assert_eq!(lines.len(), 2);
       assert_eq!(
          lines[0],
          "UserTweets: 5 leased, 2 waited, p50 2 ms, p90 300 ms, p99 300 ms, max 900 ms, 1 out \
-          of quota, 0 no account"
+          of quota, 0 no account, 1 rested, 0 shed"
       );
       assert!(lines[1].starts_with("TweetDetail: 0 leased"), "{}", lines[1]);
-      assert!(queue.report().is_empty());
+      // Two of five waited, and the pool is read under the newest query id.
+      assert_eq!(report.crowded, ["q2/UserTweets"]);
+      assert!(queue.report().lines.is_empty());
+   }
+
+   #[test]
+   fn an_operation_that_rarely_waits_is_not_crowded() {
+      let queue = AccountQueue::default();
+      for _ in 0..100 {
+         queue.record("q/UserMedia", Duration::ZERO, Outcome::Leased);
+      }
+      queue.record("q/UserMedia", Duration::from_millis(50), Outcome::Leased);
+      assert!(queue.report().crowded.is_empty());
    }
 
    #[test]
