@@ -47,6 +47,10 @@ pub struct SessionLimits {
    /// An adult birthdate has already been written so X stops age-gating media.
    #[serde(default)]
    pub age_gate_cleared: bool,
+   /// The filter and age-gate writes were tried and X refused them. Startup
+   /// does not spend the same POSTs on these cookies again.
+   #[serde(default)]
+   pub filters_failed: bool,
    pub apis: HashMap<String, RateLimit>,
    /// Operations X answers with an empty 404 from this account while another
    /// account gets a result, by operation name, with when that was seen.
@@ -446,6 +450,7 @@ impl Session {
             rejected: false,
             filters_cleared: false,
             age_gate_cleared: false,
+            filters_failed: false,
             apis: self.apis,
             refused_ops: HashMap::new(),
             verified_ops: HashMap::new(),

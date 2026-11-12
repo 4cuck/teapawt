@@ -77,6 +77,9 @@ impl ApiClient {
             },
             Err(err) => {
                tracing::warn!(session_id = id, "failed to clear NSFW filters or age gate: {err}");
+               // A failed write is remembered either way, so the next start
+               // does not spend the same POSTs on these cookies.
+               self.sessions.mark_filters_failed(id).await;
                if filter_setting_locked(&err.to_string()) {
                   self.sessions.retire_filter_blocked(id).await;
                }

@@ -1180,6 +1180,19 @@ impl SessionPool {
       }
    }
 
+   /// Undo a search suspension that was read off an empty 404 before the live
+   /// query id was checked. The account goes back to unchecked, so the next
+   /// search check is what decides, not the stale mark.
+   pub async fn clear_search_suspension(&self, session_id: i64) {
+      let mut limits = self.limits.write().await;
+      if let Some(lim) = limits.get_mut(&session_id) {
+         lim.suspended = false;
+         lim.refused_ops.remove("SearchTimeline");
+      }
+      drop(limits);
+      self.persist_soon(session_id);
+   }
+
    /// X confirmed this account is suspended from search. It stays reserved for
    /// search so profile reads do not pick it up, and search itself skips it.
    pub async fn mark_suspended(&self, session_id: i64) {
@@ -1236,7 +1249,8 @@ impl SessionPool {
                return None;
             }
             if limits.get(&slot.credentials.id).is_some_and(|session_limits| {
-               session_limits.filters_cleared && session_limits.age_gate_cleared
+               session_limits.filters_failed
+                  || (session_limits.filters_cleared && session_limits.age_gate_cleared)
             }) {
                return None;
             }
@@ -1340,6 +1354,17 @@ impl SessionPool {
          .await
          .map_err(|_| Error::Internal("session request limiter closed".into()))?;
       Ok(Self::lease(slot, permit, false))
+   }
+
+   /// The filter and age-gate writes failed for these cookies. Remember it so
+   /// a restart does not POST the same settings to them again.
+   pub async fn mark_filters_failed(&self, session_id: i64) {
+      let mut limits = self.limits.write().await;
+      if let Some(lim) = limits.get_mut(&session_id) {
+         lim.filters_failed = true;
+      }
+      drop(limits);
+      self.persist_soon(session_id);
    }
 
    /// Remember that this session already had sensitive-content filters turned

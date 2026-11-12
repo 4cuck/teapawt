@@ -936,6 +936,8 @@ impl ApiClient {
 
       // Two accounts got nothing: X is answering nobody, or this query id is
       // one it has retired. Read the live ids and resend once if it moved.
+      // The empty 404 was not charged to either account, so a retired id
+      // cannot mark a working account suspended.
       if session.kind == SessionKind::Cookie && matches!(last, Err(Error::TransientUpstream)) {
          let before = self.wire_operation(&session, endpoint, features).await.0;
          self.tid.recheck_operations().await;
@@ -1490,12 +1492,14 @@ impl ApiClient {
                // picking it, and let this one search fall through to another
                // account.
                if endpoint.ends_with("/SearchTimeline") {
+                  // An empty 404 is also what a retired query id gets. The
+                  // caller reads the live id and resends before deciding the
+                  // account is at fault, so nothing is recorded here.
                   tracing::info!(
                      session_id = session.id,
                      session_user = %session.username,
-                     "account is suspended; keeping it for reads, leaving it out of search"
+                     "search came back as an empty 404; not blaming the account yet"
                   );
-                  self.sessions.mark_suspended(session.id).await;
                } else {
                   tracing::trace!(
                      session_id = session.id,
