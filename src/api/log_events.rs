@@ -25,10 +25,14 @@ pub enum Event {
    Account429,
    /// A call moved to another account.
    SessionRetry,
+   /// X answered a search with an empty page or an empty 404.
+   SearchEmpty,
+   /// A search account answered nothing while another account got results.
+   SearchRested,
 }
 
 impl Event {
-   const ALL: [Self; 8] = [
+   const ALL: [Self; 10] = [
       Self::HeaderStall,
       Self::LateHeaders,
       Self::StalledTwice,
@@ -37,6 +41,8 @@ impl Event {
       Self::Edge429,
       Self::Account429,
       Self::SessionRetry,
+      Self::SearchEmpty,
+      Self::SearchRested,
    ];
 
    const fn label(self) -> &'static str {
@@ -49,6 +55,8 @@ impl Event {
          Self::Edge429 => "edge 429s",
          Self::Account429 => "account 429s",
          Self::SessionRetry => "session retries",
+         Self::SearchEmpty => "empty searches",
+         Self::SearchRested => "searches rested",
       }
    }
 }

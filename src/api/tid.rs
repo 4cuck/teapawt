@@ -106,14 +106,10 @@ impl TidClient {
       }
    }
 
-   /// Generate a transaction ID for a request path, or [`None`] if TID is
-   /// unavailable.
-   pub async fn generate(&self, path: &str) -> Option<String> {
-      self.generate_for("GET", path).await
-   }
-
-   /// Same as [`Self::generate`], with an explicit HTTP method. X hashes the
-   /// method into the transaction ID, so POSTs must not reuse the GET variant.
+   /// Same as [`Self::generate_for`], for a GET.
+   ///
+   /// X hashes the method into the transaction ID, so a POST must not reuse
+   /// this: pass the method to [`Self::generate_for`] instead.
    pub async fn generate_for(&self, method: &str, path: &str) -> Option<String> {
       if self.is_refused(method, path).await {
          return None;

@@ -108,6 +108,43 @@ impl Identity {
    pub fn profile(self) -> Impersonate {
       accepted_profile(self.engine)
    }
+
+   /// The version this identity names in its headers.
+   ///
+   /// primp's newest Chrome profile is 153. Its ClientHello is the same bytes
+   /// for every version from 150 up — same cipher suites, signature schemes,
+   /// groups and extension order — so a browser is only told apart from its
+   /// predecessor by what it says about itself. Sessions created in Chrome 157
+   /// have to keep saying 157, or the account changes browser between signup
+   /// and the first request teapot makes.
+   #[must_use]
+   pub fn version_headers(self) -> Option<[(&'static str, &'static str); 2]> {
+      if self.engine != Engine::Chrome {
+         return None;
+      }
+      let user_agent = match self.os {
+         ImpersonateOS::Windows => {
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+         },
+         ImpersonateOS::MacOS => {
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+         },
+         ImpersonateOS::Linux => {
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+         },
+         _ => return None,
+      };
+      Some([
+         ("user-agent", user_agent),
+         (
+            "sec-ch-ua",
+            "\"Not-A.Brand\";v=\"99\", \"Google Chrome\";v=\"157\", \"Chromium\";v=\"157\"",
+         ),
+      ])
+   }
 }
 
 impl fmt::Display for Identity {
@@ -324,5 +361,96 @@ mod tests {
    fn fallback_is_second_newest() {
       assert_eq!(fallback_profile(Engine::Chrome), Impersonate::ChromeV152);
       assert_eq!(fallback_profile(Engine::Safari), Impersonate::SafariV26_3);
+   }
+
+   /// Whether a second connection to the same host offers a session ticket.
+   /// `pre_shared_key` only exists when there is a ticket to resume, so a
+   /// single request can never show it.
+   #[test]
+   #[ignore = "reaches tls.peet.ws through the first proxy exit"]
+   fn chrome_resumption_on_the_wire() {
+      let proxies = std::fs::read_to_string("proxies.txt").expect("proxies.txt");
+      let line = proxies
+         .lines()
+         .find(|line| !line.trim().is_empty() && !line.starts_with('#'))
+         .expect("an exit");
+      let parts: Vec<&str> = line.trim().split(':').collect();
+      let url = format!("socks5h://{}:{}@{}:{}", parts[2], parts[3], parts[0], parts[1]);
+      let identity = Identity {
+         engine: Engine::Chrome,
+         os: ImpersonateOS::Windows,
+      };
+      let client = primp::Client::builder()
+         .impersonate(identity.profile())
+         .impersonate_os(identity.os)
+         .proxy(primp::Proxy::all(&url).expect("proxy"))
+         .timeout(Duration::from_secs(20))
+         // No reuse: every request is a new handshake, which is what asks the
+         // question.
+         .pool_max_idle_per_host(0)
+         .pool_idle_timeout(Duration::from_millis(1))
+         .build()
+         .expect("client");
+      let runtime = tokio::runtime::Runtime::new().expect("runtime");
+      for round in 1..=3 {
+         let body = runtime
+            .block_on(async {
+               let response = client.get("https://tls.peet.ws/api/all").send().await?;
+               response.text().await
+            })
+            .expect("peet");
+         let value: serde_json::Value = serde_json::from_str(&body).expect("json");
+         println!(
+            "round {round}: ja4={} ext_count={}",
+            value["tls"]["ja4"],
+            value["tls"]["ja4_r"].as_str().unwrap_or("")
+         );
+      }
+   }
+   /// Prints what a Chrome identity actually puts on the wire, to compare with
+   /// a capture from the browser the accounts were made in.
+   #[test]
+   #[ignore = "reaches tls.peet.ws through the first proxy exit"]
+   fn chrome_presentation_on_the_wire() {
+      let proxies = std::fs::read_to_string("proxies.txt").expect("proxies.txt");
+      let line = proxies
+         .lines()
+         .find(|line| !line.trim().is_empty() && !line.starts_with('#'))
+         .expect("an exit");
+      let parts: Vec<&str> = line.trim().split(':').collect();
+      let url = format!("socks5h://{}:{}@{}:{}", parts[2], parts[3], parts[0], parts[1]);
+      let identity = Identity {
+         engine: Engine::Chrome,
+         os: ImpersonateOS::Windows,
+      };
+      let builder = primp::Client::builder()
+         .impersonate(identity.profile())
+         .impersonate_os(identity.os)
+         .proxy(primp::Proxy::all(&url).expect("proxy"))
+         .timeout(Duration::from_secs(20));
+      let mut client = builder.build().expect("client");
+      for (name, value) in identity.version_headers().expect("chrome version headers") {
+         client.headers_mut().insert(
+            primp::header::HeaderName::from_static(name),
+            primp::header::HeaderValue::from_str(value).expect("header value"),
+         );
+      }
+      let body = tokio::runtime::Runtime::new()
+         .expect("runtime")
+         .block_on(async {
+            let response = client.get("https://tls.peet.ws/api/all").send().await?;
+            response.text().await
+         })
+         .expect("peet");
+      let value: serde_json::Value = serde_json::from_str(&body).expect("json");
+      println!("ja4: {}", value["tls"]["ja4"]);
+      println!("ja4_r: {}", value["tls"]["ja4_r"]);
+      println!("akamai: {}", value["http2"]["akamai_fingerprint"]);
+      for header in value["http2"]["sent_frames"][2]["headers"]
+         .as_array()
+         .expect("headers")
+      {
+         println!("{header}");
+      }
    }
 }

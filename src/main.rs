@@ -146,6 +146,10 @@ async fn main() -> eyre::Result<()> {
    api::browser::probe_accepted(proxies.as_ref().map(ProxyPool::first)).await;
 
    let fallback_proxies = api::load_fallback_proxies(&config.config.fallback_proxies_file).await?;
+   // The exits every client leaves through, taken before the pool moves into
+   // the API client. Nothing in the process fetches from the host's own
+   // address.
+   let exits = proxies.as_ref().map(ProxyPool::all).unwrap_or_default();
 
    // Initialize API client
    let api = ApiClient::new(&config, sessions, proxies, fallback_proxies);
@@ -155,11 +159,14 @@ async fn main() -> eyre::Result<()> {
    api.spawn_latency_report();
 
    // Initialize GIF transcoder if local mode
-   let http_client = HttpClient::new(
+   let mut http_client = HttpClient::new(
       &config.config.proxy,
       &config.config.proxy_auth,
       api::http::Purpose::Media,
    );
+   if !exits.is_empty() {
+      http_client = http_client.with_primary_proxies(exits);
+   }
    let gif_transcoder = if config.gif_transcoding.mode == GifTranscodingMode::Local {
       match GifTranscoder::new(http_client.clone(), config.gif_transcoding.clone()).await {
          Ok(transcoder) => {

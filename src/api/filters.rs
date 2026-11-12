@@ -1,10 +1,13 @@
-//! Turn off X's default sensitive-content filters on cookie sessions.
+//! Turn off the settings that hide posts from a cookie account.
 //!
-//! New accounts hide NSFW media, strip it from search, and age-gate adult
-//! media until a birthdate is on the profile. That leaks into teapawt search,
-//! so each cookie session is asked once to show sensitive media, stop
-//! filtering search, and store an adult birthdate (kept private on the
-//! profile).
+//! A fresh account hides sensitive media, and its search leaves out sensitive
+//! posts and anything from an account it blocked or muted. That leaks into
+//! teapawt search, so each cookie session is asked once to show sensitive
+//! media and to switch both search settings off.
+//!
+//! The adult birthdate that lifts X's age gate is written during signup, so
+//! nothing here touches the profile. Rewriting it on an account that already
+//! had one was what broke the signup flow.
 
 use std::time::Duration;
 
@@ -19,137 +22,90 @@ use crate::{
    types::SessionKind,
 };
 
-const SEARCH_SAFETY_BODY: &str = r#"{"optInFiltering":false,"optInBlocking":false}"#;
+/// "Display media that may contain sensitive content", the toggle on
+/// x.com/settings/content_you_see.
 const DISPLAY_SENSITIVE_BODY: &str = "display_sensitive_media=true";
-/// X's settings UI posts these exact field names to `account/update_profile`.
-/// Visibility is `self` so the date is not shown on the public profile.
-const ADULT_BIRTHDATE_BODY: &str = "birthdate_day=15&birthdate_month=6&birthdate_year=1990&\
-                                   birthdate_visibility=self&birthdate_year_visibility=self&\
-                                   skip_status=true";
+
+/// The two toggles under that page's search settings: `optInFiltering` is
+/// "Hide sensitive content", `optInBlocking` is "Remove blocked and muted
+/// accounts". Both are on for a new account.
+const SEARCH_SAFETY_BODY: &str = r#"{"optInFiltering":false,"optInBlocking":false}"#;
+
+/// Gap between two accounts, so a restart does not reach X as a burst.
+const GAP: Duration = Duration::from_millis(250);
 
 #[expect(
    clippy::multiple_inherent_impl,
-   reason = "filter sync is split from GraphQL endpoint methods"
+   reason = "settings sync is split from GraphQL endpoint methods"
 )]
 impl ApiClient {
-   /// Walk cookie sessions in the background and turn off NSFW filters.
+   /// Walk the cookie sessions in the background and turn those settings off.
    pub fn spawn_filter_sync(&self) {
       let client = self.clone();
       tokio::spawn(async move {
-         client.sync_sensitive_filters().await;
+         client.sync_hiding_settings().await;
       });
    }
 
-   async fn sync_sensitive_filters(&self) {
+   async fn sync_hiding_settings(&self) {
       let ids = self.sessions.pending_filter_sync_ids().await;
       if ids.is_empty() {
          return;
       }
-      tracing::info!(
-         count = ids.len(),
-         "clearing sensitive-content filters and age gates on cookie sessions"
-      );
+      tracing::info!(count = ids.len(), "turning off the settings that hide posts");
+
+      let total = ids.len();
       let mut ok = 0_usize;
-      let mut refreshed = 0_usize;
-      let mut fresh = Vec::new();
+      let mut first_error = None;
       for id in ids {
-         match self.clear_session_filters_retry(id).await {
+         match self.clear_session_filters(id).await {
             Ok(()) => {
                self.sessions.mark_filters_cleared(id).await;
                ok += 1;
             },
-            Err(err) if csrf_mismatch(&err.to_string()) => match self.refresh_ct0(id).await {
-               Ok(Some(ct0)) => {
-                  refreshed += 1;
-                  fresh.push((id, ct0.clone()));
-                  if self.clear_with_ct0(id, &ct0).await.is_ok() {
-                     self.sessions.mark_filters_cleared(id).await;
-                     ok += 1;
-                  }
-               },
-               Ok(None) => tracing::info!(
-                  session_id = id,
-                  "x.com set no new ct0; the auth token looks dead"
-               ),
-               Err(refresh_err) => {
-                  tracing::warn!(session_id = id, "could not refresh ct0: {refresh_err}");
-               },
-            },
-            Err(err) => {
-               tracing::warn!(session_id = id, "failed to clear NSFW filters or age gate: {err}");
-               // A failed write is remembered either way, so the next start
-               // does not spend the same POSTs on these cookies.
+            Err(Error::UserSuspended(msg)) => {
+               // X answers a suspended account's settings write with "not
+               // permitted to access this feature". Nothing about waiting
+               // changes that, so this account is not written again.
                self.sessions.mark_filters_failed(id).await;
-               if filter_setting_locked(&err.to_string()) {
-                  self.sessions.retire_filter_blocked(id).await;
-               }
+               first_error.get_or_insert(msg);
+            }
+            Err(err) => {
+               tracing::debug!(session_id = id, "could not change account settings: {err}");
+               first_error.get_or_insert_with(|| err.to_string());
             },
          }
-         sleep(Duration::from_millis(250)).await;
+         sleep(GAP).await;
       }
-      if let Err(err) = self.sessions.store_ct0s(&fresh).await {
-         tracing::warn!("could not store refreshed ct0s: {err}");
+
+      // One line per run rather than one per account: a start where X refuses
+      // every write is a single fact, and thousands of warnings buried the
+      // rest of the log the last time it happened.
+      let failed = total - ok;
+      tracing::info!(ok, failed, "account settings done");
+      if let Some(err) = first_error {
+         tracing::warn!(failed, "X refused some account settings: {err}");
       }
-      tracing::info!(ok, refreshed, "sensitive-content filters and age gates cleared");
    }
 
-   /// Ask x.com for the `ct0` it will accept with this account's `auth_token`.
-   ///
-   /// A plain visit while that cookie is set answers with a new `ct0`, which is
-   /// written back to the sessions file. `Ok(Some(_))` is a different one.
-   async fn refresh_ct0(&self, session_id: i64) -> Result<Option<String>> {
-      let Some(credentials) = self.sessions.credentials(session_id) else {
-         return Ok(None);
-      };
-      self.refresh_stored_ct0(&SessionLease::bare(credentials)).await
-   }
-
-   /// Clear this account's filters using a `ct0` it was just handed.
-   async fn clear_with_ct0(&self, session_id: i64, ct0: &str) -> Result<()> {
-      let Some(credentials) = self.sessions.credentials(session_id) else {
-         return Ok(());
-      };
-      let mut credentials = (*credentials).clone();
-      credentials.ct0 = ct0.to_owned();
-      let session = SessionLease::bare(std::sync::Arc::new(credentials));
-      self.clear_session_filters_with(&session).await
-   }
-
-   async fn clear_session_filters_retry(&self, session_id: i64) -> Result<()> {
-      let mut last_err = None;
-      for attempt in 0..3_u8 {
-         match self.clear_session_filters(session_id).await {
-            Ok(()) => return Ok(()),
-            Err(err) if attempt < 2 && err.to_string().contains("connect") => {
-               last_err = Some(err);
-               sleep(Duration::from_secs(1)).await;
-            },
-            Err(err) => return Err(err),
-         }
-      }
-      Err(last_err.unwrap_or_else(|| Error::Internal("filter sync retry exhausted".into())))
-   }
-
+   /// Both writes for one account. A session that is not a cookie has no
+   /// settings to change.
    async fn clear_session_filters(&self, session_id: i64) -> Result<()> {
       let session = self
          .sessions
          .acquire_id(session_id, endpoints::ACCOUNT_SETTINGS)
          .await?;
-      self.clear_session_filters_with(&session).await
-   }
-
-   async fn clear_session_filters_with(&self, session: &SessionLease) -> Result<()> {
       if session.kind != SessionKind::Cookie {
          return Ok(());
       }
 
       let user_id = self.session_user_id(&session).await?;
       self.set_display_sensitive_media(&session).await?;
-      self.set_search_safety(&session, &user_id).await?;
-      self.set_adult_birthdate(&session).await?;
-      Ok(())
+      self.set_search_safety(&session, &user_id).await
    }
 
+   /// The numeric id in the `searchSafety` path. Imported accounts are named
+   /// `x-<id>`, so most never ask; the rest are told by x.com.
    async fn session_user_id(&self, session: &SessionLease) -> Result<String> {
       if let Some(rest_id) = session.username.strip_prefix("x-")
          && rest_id.chars().all(|ch| ch.is_ascii_digit())
@@ -160,7 +116,7 @@ impl ApiClient {
 
       let path = "/1.1/account/verify_credentials.json";
       let headers = self
-         .cookie_rest_headers(session, "GET", path, "application/json")
+         .settings_headers(session, "GET", path, "application/json")
          .await?;
       let response = self
          .client
@@ -189,11 +145,16 @@ impl ApiClient {
    async fn set_display_sensitive_media(&self, session: &SessionLease) -> Result<()> {
       let path = "/1.1/account/settings.json";
       let mut headers = self
-         .cookie_rest_headers(session, "POST", path, "application/x-www-form-urlencoded")
+         .settings_headers(
+            session,
+            "POST",
+            path,
+            "application/x-www-form-urlencoded",
+         )
          .await?;
       headers.insert(
          header::REFERER,
-         header::HeaderValue::from_static("https://x.com/"),
+         header::HeaderValue::from_static("https://x.com/settings/content_you_see"),
       );
       let response = self
          .client
@@ -208,6 +169,8 @@ impl ApiClient {
          .account_response(session, endpoints::ACCOUNT_SETTINGS, response)
          .await?;
 
+      // The reply carries the whole settings object. A refusal that still
+      // answers 200 would otherwise look like success and never be retried.
       #[derive(Deserialize)]
       struct Settings {
          display_sensitive_media: Option<bool>,
@@ -222,45 +185,11 @@ impl ApiClient {
       Ok(())
    }
 
-   async fn set_adult_birthdate(&self, session: &SessionLease) -> Result<()> {
-      let path = "/1.1/account/update_profile.json";
-      let mut headers = self
-         .cookie_rest_headers(session, "POST", path, "application/x-www-form-urlencoded")
-         .await?;
-      headers.insert(
-         header::REFERER,
-         header::HeaderValue::from_static("https://x.com/settings/profile"),
-      );
-      let response = self
-         .client
-         .post_on(
-            endpoints::UPDATE_PROFILE_URL,
-            &headers,
-            Bytes::from_static(ADULT_BIRTHDATE_BODY.as_bytes()),
-            Some(&self.egress_for(session)),
-         )
-         .await?;
-      let bytes = match self
-         .account_response(session, endpoints::UPDATE_PROFILE, response)
-         .await
-      {
-         Ok((bytes, _)) => bytes,
-         Err(err) if birthdate_already_locked(&err.to_string()) => return Ok(()),
-         Err(err) => return Err(err),
-      };
-      if birthdate_write_rejected(&bytes) {
-         return Err(Error::Internal(
-            "update_profile rejected the adult birthdate".into(),
-         ));
-      }
-      Ok(())
-   }
-
    async fn set_search_safety(&self, session: &SessionLease, user_id: &str) -> Result<()> {
       let path = format!("/i/api/1.1/strato/column/User/{user_id}/search/searchSafety");
       let url = format!("https://x.com{path}");
       let mut headers = self
-         .cookie_rest_headers(session, "POST", &path, "application/json")
+         .settings_headers(session, "POST", &path, "application/json")
          .await?;
       headers.insert(
          header::REFERER,
@@ -281,7 +210,9 @@ impl ApiClient {
       Ok(())
    }
 
-   async fn cookie_rest_headers(
+   /// The headers a cookie session uses for its own settings writes, which go
+   /// out as the browser the session is presented as.
+   async fn settings_headers(
       &self,
       session: &SessionLease,
       method: &str,
@@ -289,6 +220,7 @@ impl ApiClient {
       content_type: &'static str,
    ) -> Result<header::HeaderMap> {
       let (bearer, tid) = self.bearer_and_tid_for(method, api_path).await;
+      let ct0 = self.sessions.ct0(session.id).unwrap_or_else(|| session.ct0.clone());
       let mut headers = header::HeaderMap::new();
       headers.insert(
          header::AUTHORIZATION,
@@ -299,7 +231,6 @@ impl ApiClient {
          "x-twitter-auth-type",
          header::HeaderValue::from_static("OAuth2Session"),
       );
-      let ct0 = self.sessions.ct0(session.id).unwrap_or_else(|| session.ct0.clone());
       headers.insert(
          "x-csrf-token",
          ct0.parse()
@@ -335,42 +266,4 @@ impl ApiClient {
       }
       Ok(headers)
    }
-}
-
-fn filter_setting_locked(message: &str) -> bool {
-   message.to_ascii_lowercase().contains("may not change this setting")
-}
-
-/// x.com code 353: the `ct0` sent as `x-csrf-token` is not the one it holds.
-fn csrf_mismatch(message: &str) -> bool {
-   message.contains("\"code\":353") || message.to_ascii_lowercase().contains("csrf")
-}
-
-fn birthdate_already_locked(message: &str) -> bool {
-   let lower = message.to_ascii_lowercase();
-   lower.contains("birth")
-      && (lower.contains("limited")
-         || lower.contains("already")
-         || lower.contains("cannot change")
-         || lower.contains("can't change")
-         || lower.contains("can not change"))
-}
-
-fn birthdate_write_rejected(body: &[u8]) -> bool {
-   #[derive(Deserialize)]
-   struct ApiErrors {
-      errors: Option<Vec<ApiError>>,
-   }
-   #[derive(Deserialize)]
-   struct ApiError {
-      message: Option<String>,
-   }
-   let Ok(parsed) = serde_json::from_slice::<ApiErrors>(body) else {
-      return false;
-   };
-   parsed.errors.into_iter().flatten().any(|err| {
-      err.message
-         .as_deref()
-         .is_some_and(|msg| !birthdate_already_locked(msg))
-   })
 }

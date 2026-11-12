@@ -74,11 +74,12 @@ pub const STRATO_TRANSLATE: &str = "strato/translateTweet";
 pub const GRAPHQL_URL: &str = "https://x.com/i/api/graphql";
 pub const API_URL: &str = "https://api.x.com/graphql";
 pub const STRATO_URL: &str = "https://x.com/i/api/1.1/strato/column/None";
+/// A cookie session's own account settings. The body is a form.
 pub const ACCOUNT_SETTINGS_URL: &str = "https://api.x.com/1.1/account/settings.json";
-pub const UPDATE_PROFILE_URL: &str = "https://api.x.com/1.1/account/update_profile.json";
 pub const VERIFY_CREDENTIALS_URL: &str = "https://api.x.com/1.1/account/verify_credentials.json";
+/// `operation_name` of both is what `acquire_id` reads: "settings" is the one
+/// operation a search account is allowed to call outside search.
 pub const ACCOUNT_SETTINGS: &str = "account/settings";
-pub const UPDATE_PROFILE: &str = "account/update_profile";
 pub const VERIFY_CREDENTIALS: &str = "account/verify_credentials";
 pub const SEARCH_SAFETY: &str = "search/searchSafety";
 pub const X_POSED_LOOKUP_URL: &str = "https://x-posed-cache.xaitax.workers.dev/lookup";
@@ -381,13 +382,18 @@ pub fn explore_timeline_name(id: &str) -> Option<String> {
 }
 
 pub fn search_vars(raw_query: &str, cursor: Option<&str>, product: &str) -> String {
+   // The People tab asks X for translated bios; the tweet tabs do not. Every
+   // People page in the Chrome search capture sends `true` (10 of 10) and
+   // every Latest page sends `false`, so a request that sends `false` for
+   // People is a shape no browser produces.
+   let translated_bios = product == "People";
    vars(json!({
       "rawQuery": raw_query,
       "count": 20,
       "cursor": cursor,
       "querySource": "typed_query",
       "product": product,
-      "withGrokTranslatedBio": false,
+      "withGrokTranslatedBio": translated_bios,
       "withQuickPromoteEligibilityTweetFields": false,
    }))
 }
@@ -509,6 +515,13 @@ mod tests {
       assert_eq!(first["withQuickPromoteEligibilityTweetFields"], false);
       assert!(first.get("cursor").is_none());
       assert!(first.get("withDownvotePerspective").is_none());
+
+      // The People tab is the one that asks for translated bios, as Chrome
+      // does on every People page.
+      let people: serde_json::Value =
+         serde_json::from_str(&search_vars("test", None, "People")).unwrap();
+      assert_eq!(people["withGrokTranslatedBio"], true);
+      assert_eq!(people["product"], "People");
 
       let page: serde_json::Value =
          serde_json::from_str(&search_vars("test", Some("CURSOR"), "Media")).unwrap();

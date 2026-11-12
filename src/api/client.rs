@@ -459,9 +459,17 @@ impl ApiClient {
 
       let proxies = proxies.map(Arc::new);
       let operations = Operations::load();
+      // The script chunks are fetched by a client of their own, and it leaves
+      // through the same exits as everything else: abs.twimg.com is X's edge,
+      // and a chunk fetched from this host's own address is a signal a browser
+      // never sends.
+      let mut scripts = HttpClient::new("", "", Purpose::Script);
+      if let Some(ref pool) = proxies {
+         scripts = scripts.with_primary_proxies(pool.all());
+      }
       let tid = TidClient::new(
          client.clone(),
-         HttpClient::new("", "", Purpose::Script),
+         scripts,
          sessions.clone(),
          proxies.clone(),
          operations.clone(),
@@ -660,18 +668,12 @@ impl ApiClient {
    }
 
    pub(crate) async fn bearer_and_tid(&self, api_path: &str) -> (&'static str, Option<String>) {
-      if !self.tid_enabled {
-         return (endpoints::BEARER_TOKEN_NO_TID, None);
-      }
-      self
-         .tid
-         .generate(api_path)
-         .await
-         .map_or((endpoints::BEARER_TOKEN_NO_TID, None), |tid| {
-            (endpoints::BEARER_TOKEN, Some(tid))
-         })
+      self.bearer_and_tid_for("GET", api_path).await
    }
 
+   /// Same as [`Self::bearer_and_tid`], with the method the request goes out
+   /// as. X hashes the method into the transaction ID, so a POST signed with
+   /// the GET variant is refused with a bodyless 404 or a bare code 34.
    pub(crate) async fn bearer_and_tid_for(
       &self,
       method: &str,
@@ -924,23 +926,17 @@ impl ApiClient {
          last = next_last;
          if empty && last.is_ok() {
             // Another account got posts for the same variables, so the empty
-            // page was this one's. An account whose age gate or NSFW filter is
-            // still on hides posts for that query too, so it is only rested:
-            // nothing about its answer says X suspended it from search.
-            let search = endpoint.ends_with("SearchTimeline");
-            let filtered = search && !self.sessions.filters_cleared(session_id).await;
-            tracing::info!(
+            // page was this one's. It is still only rested: an empty page is
+            // also what a query with no matches gets, and what an account X
+            // age-gated hides, so nothing in this answer says the account is
+            // suspended. Counted, not logged: one busy minute is hundreds of
+            // these.
+            tracing::debug!(
                session_id,
                endpoint,
-               search,
-               filtered,
                "X answers this account nothing for this operation while others get results"
             );
-            if search && !filtered {
-               self.sessions.mark_suspended(session_id).await;
-            } else {
-               self.sessions.mark_refused(session_id, endpoint).await;
-            }
+            self.sessions.mark_refused(session_id, endpoint).await;
          }
       }
 
@@ -1333,16 +1329,17 @@ impl ApiClient {
          .ok_or_else(|| Error::Internal("Response parse error: missing data".into()))?;
       // A suspended account answers search with a page that parses and holds no
       // posts, where an account in good standing returns them. Such a page is
-      // also what a query with no matches gets, and what an account whose age
-      // gate or NSFW filter is still on hides. Only a caller that saw another
-      // account get posts for the same variables can tell them apart, so the
-      // verdict is left to the retry loop and nothing is recorded here.
+      // also what a query with no matches gets, and what an account X age-gated
+      // hides. Only a caller that saw another account get posts for the same
+      // variables can tell them apart, so the verdict is left to the retry
+      // loop and nothing is recorded here.
       if endpoint.ends_with("/SearchTimeline") && search_answer_is_empty(&bytes) {
-         tracing::info!(
+         tracing::debug!(
             session_id = session.id,
             session_user = %session.username,
             "search came back empty; not blaming the account yet"
          );
+         log_events::note(Event::SearchEmpty);
          return Err(Error::TransientUpstream);
       }
       Ok((data, bytes))
@@ -1496,6 +1493,22 @@ impl ApiClient {
             return Err(Error::TransientUpstream);
          }
 
+         // 403 + code 64 is X refusing this account itself ("not permitted to
+         // access this feature"), which is how a suspended account is told
+         // apart from a resource denial. Nothing about waiting changes it, so
+         // it is reported apart from the generic 403 below and the caller can
+         // stop writing to the account.
+         if status.as_u16() == 403 && twitter_error_code(&body) == Some(64) {
+            tracing::debug!(
+               session_id = session.id,
+               session_user = %session.username,
+               endpoint,
+               "X refuses this account: {shown}"
+            );
+            self.sessions.disarm_meter(session);
+            return Err(Error::UserSuspended(format!("Status {status}: {shown}")));
+         }
+
          // Empty or HTML 404s are X/WAF blips, not a missing tweet or user.
          // JSON 404s can still be a real gone resource.
          if status.as_u16() == 404 {
@@ -1508,11 +1521,12 @@ impl ApiClient {
                   // An empty 404 is also what a retired query id gets. The
                   // caller reads the live id and resends before deciding the
                   // account is at fault, so nothing is recorded here.
-                  tracing::info!(
+                  tracing::debug!(
                      session_id = session.id,
                      session_user = %session.username,
                      "search came back as an empty 404; not blaming the account yet"
                   );
+                  log_events::note(Event::SearchEmpty);
                } else {
                   tracing::trace!(
                      session_id = session.id,

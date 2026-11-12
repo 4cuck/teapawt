@@ -879,7 +879,7 @@ impl HttpClient {
 
    fn client_for(&self, via: Option<&Egress>) -> Result<primp::Client> {
       let Some(egress) = via else {
-         return Ok(self.default.clone());
+         return self.unowned_client();
       };
       let key = self.client_key(egress);
       if let Some(client) = self
@@ -905,6 +905,39 @@ impl HttpClient {
          idle,
       )?;
       tracing::debug!(session_id = egress.session, %identity, "browser client built");
+      if let Ok(mut clients) = self.sessions.lock() {
+         clients.entry(key).or_insert_with(|| client.clone());
+      }
+      Ok(client)
+   }
+
+   /// A client for a call that belongs to no account: a page bootstrap, a
+   /// script chunk, a probe. It still leaves through a proxy, the first
+   /// configured exit, so no fetch is ever made from this host's own address.
+   /// Without a configured pool there is nothing to route through and the
+   /// client built at startup is used.
+   fn unowned_client(&self) -> Result<primp::Client> {
+      let Some(pool) = self.primary_pool.as_ref() else {
+         return Ok(self.default.clone());
+      };
+      let proxy = pool.proxies.first().cloned();
+      let key = (0, proxy_tag(proxy.as_ref()));
+      if let Some(client) = self
+         .sessions
+         .lock()
+         .ok()
+         .and_then(|clients| clients.get(&key).cloned())
+      {
+         return Ok(client);
+      }
+      let identity = browser::identity_for(0);
+      let client = build_client(
+         identity,
+         proxy.as_ref(),
+         self.purpose,
+         &self.extra_headers,
+         POOL_PER_HOST,
+      )?;
       if let Ok(mut clients) = self.sessions.lock() {
          clients.entry(key).or_insert_with(|| client.clone());
       }
@@ -1568,7 +1601,22 @@ fn build_client(
       .build()
       .map_err(|err| Error::Internal(format!("browser client for {identity}: {err}")))?;
    shape_headers(client.headers_mut(), purpose, extra_headers);
+   present_version(client.headers_mut(), identity);
    Ok(client)
+}
+
+/// Write the browser version this identity presents into the headers primp
+/// built from its profile. primp's newest Chrome profile is 153; every version
+/// from 150 up sends the same ClientHello, so the version only exists here.
+fn present_version(headers: &mut HeaderMap, identity: Identity) {
+   let Some(pairs) = identity.version_headers() else {
+      return;
+   };
+   for (name, value) in pairs {
+      if let Ok(value) = HeaderValue::from_str(value) {
+         headers.insert(header::HeaderName::from_static(name), value);
+      }
+   }
 }
 
 /// Turn the profile's page-navigation headers into the set a browser sends
@@ -1583,6 +1631,9 @@ fn build_client(
 fn shape_headers(headers: &mut HeaderMap, purpose: Purpose, extra: &HeaderMap) {
    headers.remove("upgrade-insecure-requests");
    headers.remove("sec-fetch-user");
+   // A navigation asks for a prefetch with this; an XHR and a chunk load do
+   // not, and X's web app never sends it on either.
+   headers.remove("sec-purpose");
 
    let (accept, dest, mode, site, priority) = match purpose {
       Purpose::Api => ("*/*", "empty", "cors", "same-origin", Some("u=1, i")),

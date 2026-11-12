@@ -40,15 +40,14 @@ pub struct SessionLimits {
    /// fixes, so this is kept apart from the rate-limit state that expires.
    #[serde(skip)]
    pub rejected: bool,
-   /// Sensitive-media and search-safety filters have already been turned off
-   /// for this session, so startup does not POST the same settings again.
+   /// The settings that hide posts are already off for this session: sensitive
+   /// media is shown, and search hides neither sensitive posts nor posts from
+   /// blocked and muted accounts. A start does not spend the same writes again.
    #[serde(default)]
    pub filters_cleared: bool,
-   /// An adult birthdate has already been written so X stops age-gating media.
-   #[serde(default)]
-   pub age_gate_cleared: bool,
-   /// The filter and age-gate writes were tried and X refused them. Startup
-   /// does not spend the same POSTs on these cookies again.
+   /// X refused the settings write itself, as it does for a suspended account
+   /// ("not permitted to access this feature"). Waiting does not fix that, so
+   /// a restart does not spend the same POSTs again.
    #[serde(default)]
    pub filters_failed: bool,
    pub apis: HashMap<String, RateLimit>,
@@ -66,10 +65,6 @@ pub struct SessionLimits {
    /// Kept out of profile pages. Search is tracked separately in `refused_ops`.
    #[serde(default)]
    pub profile_banned: bool,
-   /// X confirmed this account is suspended. It can still read profiles and
-   /// tweets, so it stays in the pool, but it cannot search.
-   #[serde(default)]
-   pub suspended: bool,
    /// Reserved for search. Set when the account has returned search results,
    /// or when it was imported as a search account. View calls never take it,
    /// so a search suspension cannot spread through profile traffic.
@@ -258,17 +253,12 @@ impl SessionLimits {
       if self.profile_banned && is_profile_op(name) {
          return true;
       }
-      if self.suspended && name == "SearchTimeline" {
-         return true;
-      }
       let Some(&at) = self.refused_ops.get(name) else {
          return false;
       };
       // An empty search page is what a query with no matches gets, and what an
-      // account whose age gate or NSFW filter is still on hides, so a search
-      // refusal is a rest rather than a verdict: the account is tried again
-      // within the hour. Only `suspended`, set when another account got posts
-      // for the same query, keeps it out of search for good.
+      // account X age-gated or filtered hides, so a search refusal is a rest
+      // rather than a verdict: the account is tried again within the hour.
       let window = if name == "SearchTimeline" {
          SEARCH_REFUSED_SECS
       } else {
@@ -468,14 +458,12 @@ impl Session {
             limited_at: self.limited_at,
             rejected: false,
             filters_cleared: false,
-            age_gate_cleared: false,
             filters_failed: false,
             apis: self.apis,
             refused_ops: HashMap::new(),
             verified_ops: HashMap::new(),
             profile_strikes: 0,
             profile_banned: false,
-            suspended: false,
             search_only: self.pool.eq_ignore_ascii_case("search"),
             resting: HashMap::new(),
          },
@@ -570,30 +558,15 @@ mod tests {
    }
 
    #[test]
-   fn a_suspended_account_stays_out_of_both_pools() {
-      let mut limits = SessionLimits::default();
-      limits.suspended = true;
-      limits.reserve_for_search();
-      limits.refuse("SearchTimeline");
-      assert!(limits.refuses("ph2f/SearchTimeline"));
-      assert!(limits.refuses("x/UserTweets"));
-      assert!(limits.search_only);
-   }
-
-   #[test]
-   fn a_search_refusal_expires_and_a_suspension_does_not() {
+   fn a_search_refusal_expires_after_an_hour() {
       let mut limits = SessionLimits::default();
       limits.refuse("old/SearchTimeline");
       assert!(limits.refuses("new/SearchTimeline"));
 
       // An hour of rest, then search is tried again: the empty page may have
-      // been the query's, or the account's filters hiding it.
+      // been the query's, or the account's own filters hiding it.
       *limits.refused_ops.get_mut("SearchTimeline").unwrap() -= 2 * 60 * 60;
       assert!(!limits.refuses("new/SearchTimeline"));
-
-      // X confirmed the suspension with another account's result: that stays.
-      limits.suspended = true;
-      assert!(limits.refuses("new/SearchTimeline"));
 
       // Other operations come back after a day.
       let mut limits = SessionLimits::default();
