@@ -1145,9 +1145,10 @@ impl SessionPool {
    }
 
    /// Leave a session out of one operation X answers it nothing for. A search
-   /// refusal is permanent. The account stays in the search pool so it is not
-   /// mixed back into profile reads, and search will not pick it again. Other
-   /// refusals expire after a day.
+   /// refusal rests the account for an hour, since an empty page is also what
+   /// a query with no matches and an age-gated or filtered account produce.
+   /// The account stays in the search pool so it is not mixed back into
+   /// profile reads. Other refusals expire after a day.
    pub async fn mark_refused(&self, session_id: i64, api: &str) {
       let username = self
          .sessions
@@ -1164,7 +1165,7 @@ impl SessionPool {
          tracing::info!(
             session_id,
             session_user = %username,
-            "account cannot search; leaving it out permanently"
+            "account answered no search while another did; resting it"
          );
       }
       self.persist_soon(session_id);
@@ -1236,6 +1237,17 @@ impl SessionPool {
    /// Check if pool is empty.
    pub fn is_empty(&self) -> bool {
       self.sessions.is_empty()
+   }
+
+   /// Whether this account's sensitive-content filter and age gate are both
+   /// off, so its search page hides nothing another account's would show.
+   pub async fn filters_cleared(&self, session_id: i64) -> bool {
+      self
+         .limits
+         .read()
+         .await
+         .get(&session_id)
+         .is_some_and(|limits| limits.filters_cleared && limits.age_gate_cleared)
    }
 
    /// Cookie sessions that still have X's default sensitive-content filters on.

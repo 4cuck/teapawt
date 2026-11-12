@@ -26,7 +26,7 @@ pub fn render_donate_page(
                "xitter.cf needs " (format_usd(progress.goal_cents)) " every month for accounts and proxies. "
                "The counter resets on the 23rd. "
                "Viewing profiles and posts is covered by about 2,100 accounts. "
-               "Search is down to one account: the rest were suspended from search by accident, and replacements are being worked on. "
+               "Search runs on 77 accounts: the rest were suspended from search by accident, and an automatic replacement system is being built. "
                "Search asks for a Cloudflare Turnstile checkbox that lasts 5 minutes while that pool is rebuilt. "
                "Donations are what replace those accounts and turn that check off. "
                "Choose an amount from $1 to $10,000."

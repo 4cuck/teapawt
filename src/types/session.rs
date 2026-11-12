@@ -110,9 +110,14 @@ const BARE_429_MEMORY_SECS: i64 = 5 * 60;
 const GLOBAL_LIMIT_DURATION_SECS: i64 = 15 * 60;
 
 /// How long an account sits out an operation X refused it, before it is
-/// tried again in case X lifted the restriction. Search is not included:
-/// an account that returns nothing for `SearchTimeline` stays out.
+/// tried again in case X lifted the restriction.
 const REFUSED_OP_SECS: i64 = 24 * 60 * 60;
+
+/// How long an account sits out search after an empty page. An empty page is
+/// weak evidence — a query with no matches, an age gate, or an NSFW filter
+/// all produce one — so the account goes back in front of the search check
+/// within the hour instead of being lost to search for good.
+const SEARCH_REFUSED_SECS: i64 = 60 * 60;
 
 /// `SearchTimeline` from `ph2fARFabkwfxqmSKQ1OPw/SearchTimeline`, so a mark
 /// outlives a change of query id.
@@ -236,9 +241,10 @@ impl SessionLimits {
       self.resting.get(api).is_some_and(|rest| rest.until > now)
    }
 
-   /// Whether X refuses this account `api`. A search refusal is permanent.
-   /// Other operations are tried again after a day. A search-only account
-   /// refuses every call that is not search, so view traffic cannot burn it.
+   /// Whether X refuses this account `api`. A confirmed suspension is
+   /// permanent; every other refusal, search included, expires. A search-only
+   /// account refuses every call that is not search, so view traffic cannot
+   /// burn it.
    #[must_use]
    pub fn refuses(&self, api: &str) -> bool {
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -258,20 +264,28 @@ impl SessionLimits {
       let Some(&at) = self.refused_ops.get(name) else {
          return false;
       };
-      if name == "SearchTimeline" {
-         return true;
-      }
-      now - at < REFUSED_OP_SECS
+      // An empty search page is what a query with no matches gets, and what an
+      // account whose age gate or NSFW filter is still on hides, so a search
+      // refusal is a rest rather than a verdict: the account is tried again
+      // within the hour. Only `suspended`, set when another account got posts
+      // for the same query, keeps it out of search for good.
+      let window = if name == "SearchTimeline" {
+         SEARCH_REFUSED_SECS
+      } else {
+         REFUSED_OP_SECS
+      };
+      now - at < window
    }
 
-   /// Leave this account out of `api`. A search refusal is permanent. The
-   /// account stays reserved for search, so it is not mixed back into views,
-   /// and search will not pick it again. Anything else is dropped once it is
-   /// older than [`REFUSED_OP_SECS`].
+   /// Leave this account out of `api` for a while. The account stays reserved
+   /// for search, so it is not mixed back into views. Anything older than
+   /// [`REFUSED_OP_SECS`], or [`SEARCH_REFUSED_SECS`] for search, is dropped.
    pub fn refuse(&mut self, api: &str) {
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
       let name = operation_name(api);
-      self.refused_ops.retain(|op, at| op == "SearchTimeline" || now - *at < REFUSED_OP_SECS);
+      self
+         .refused_ops
+         .retain(|_, at| now - *at < REFUSED_OP_SECS);
       self.refused_ops.insert(name.to_owned(), now);
       self.verified_ops.remove(name);
    }
@@ -288,11 +302,16 @@ impl SessionLimits {
    }
 
    /// Record that this account got results for `api`.
+   ///
+   /// A page with posts contradicts an earlier refusal of the same call, which
+   /// is only ever recorded from an empty answer, so the refusal is dropped.
+   /// Otherwise an account the search check just proved works would still sit
+   /// out its hour, since [`SessionLimits::refuses`] reads the refusal first.
    pub fn verify(&mut self, api: &str) {
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
-      self
-         .verified_ops
-         .insert(operation_name(api).to_owned(), now);
+      let name = operation_name(api);
+      self.refused_ops.remove(name);
+      self.verified_ops.insert(name.to_owned(), now);
    }
 
    /// Whether it is still unknown if X lets this account call `api`.
@@ -562,21 +581,41 @@ mod tests {
    }
 
    #[test]
-   fn a_search_refusal_is_kept() {
+   fn a_search_refusal_expires_and_a_suspension_does_not() {
       let mut limits = SessionLimits::default();
       limits.refuse("old/SearchTimeline");
-      let day = 25 * 60 * 60;
-      *limits.refused_ops.get_mut("SearchTimeline").unwrap() -= day;
       assert!(limits.refuses("new/SearchTimeline"));
 
-      limits.refuse("x/UserTweets");
-      *limits.refused_ops.get_mut("UserTweets").unwrap() -= day;
-      assert!(!limits.refuses("x/UserTweets"));
+      // An hour of rest, then search is tried again: the empty page may have
+      // been the query's, or the account's filters hiding it.
+      *limits.refused_ops.get_mut("SearchTimeline").unwrap() -= 2 * 60 * 60;
+      assert!(!limits.refuses("new/SearchTimeline"));
+
+      // X confirmed the suspension with another account's result: that stays.
+      limits.suspended = true;
       assert!(limits.refuses("new/SearchTimeline"));
+
+      // Other operations come back after a day.
+      let mut limits = SessionLimits::default();
+      limits.refuse("x/UserTweets");
+      *limits.refused_ops.get_mut("UserTweets").unwrap() -= 25 * 60 * 60;
+      assert!(!limits.refuses("x/UserTweets"));
    }
 
    #[test]
-   fn a_search_limit_is_permanent_and_a_profile_limit_waits_for_a_second_strike() {
+   fn a_verified_call_drops_the_refusal_it_contradicts() {
+      let mut limits = SessionLimits::default();
+      limits.refuse("old/SearchTimeline");
+      assert!(limits.refuses("new/SearchTimeline"));
+
+      // The account returned posts, so the empty page was not its verdict.
+      limits.verify("ph2f/SearchTimeline");
+      assert!(!limits.refuses("new/SearchTimeline"));
+      assert!(limits.verified("ph2f/SearchTimeline"));
+   }
+
+   #[test]
+   fn a_search_limit_removes_the_account_at_once_and_a_profile_limit_waits_for_a_second_strike() {
       let mut limits = SessionLimits::default();
       assert_eq!(
          limits.note_rate_limit("ph2f/SearchTimeline"),

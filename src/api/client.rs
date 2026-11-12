@@ -923,14 +923,24 @@ impl ApiClient {
          session = answered_on;
          last = next_last;
          if empty && last.is_ok() {
-            let permanent = endpoint.ends_with("SearchTimeline");
+            // Another account got posts for the same variables, so the empty
+            // page was this one's. An account whose age gate or NSFW filter is
+            // still on hides posts for that query too, so it is only rested:
+            // nothing about its answer says X suspended it from search.
+            let search = endpoint.ends_with("SearchTimeline");
+            let filtered = search && !self.sessions.filters_cleared(session_id).await;
             tracing::info!(
                session_id,
                endpoint,
-               permanent,
+               search,
+               filtered,
                "X answers this account nothing for this operation while others get results"
             );
-            self.sessions.mark_refused(session_id, endpoint).await;
+            if search && !filtered {
+               self.sessions.mark_suspended(session_id).await;
+            } else {
+               self.sessions.mark_refused(session_id, endpoint).await;
+            }
          }
       }
 
@@ -1322,14 +1332,17 @@ impl ApiClient {
          .data
          .ok_or_else(|| Error::Internal("Response parse error: missing data".into()))?;
       // A suspended account answers search with a page that parses and holds no
-      // posts, where an account in good standing returns them.
+      // posts, where an account in good standing returns them. Such a page is
+      // also what a query with no matches gets, and what an account whose age
+      // gate or NSFW filter is still on hides. Only a caller that saw another
+      // account get posts for the same variables can tell them apart, so the
+      // verdict is left to the retry loop and nothing is recorded here.
       if endpoint.ends_with("/SearchTimeline") && search_answer_is_empty(&bytes) {
          tracing::info!(
             session_id = session.id,
             session_user = %session.username,
-            "search came back empty; account looks suspended, leaving it out of search"
+            "search came back empty; not blaming the account yet"
          );
-         self.sessions.mark_suspended(session.id).await;
          return Err(Error::TransientUpstream);
       }
       Ok((data, bytes))

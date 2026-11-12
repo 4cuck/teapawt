@@ -233,16 +233,16 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
 fn search_turnstile_warning() -> maud::Markup {
    html! {
        aside class="home-announce" {
-           strong { "Search is down to one account" }
+           strong { "Search is back on 77 accounts" }
            p {
-               "Profiles, posts, and the rest of the site are working. About 2,100 accounts were added for viewing, so that part is fixed. "
-               "Search is not. Almost every account X lets us search with was suspended by accident, and one is left. "
-               "Search still asks for a Cloudflare Turnstile while that is being rebuilt."
+               "Profiles, posts, and the rest of the site are working. About 2,100 accounts were added for viewing, and 77 for search, so search returns results again. "
+               "Search still asks for a Cloudflare Turnstile checkbox that lasts five minutes while the pool is this small."
            }
            p {
+               "An automatic system that creates thousands of accounts a day will replace this pool, cheap enough to run that search never runs dry again, once X's whole anti-bot system is worked out. "
                "This month's goal is $450. "
                a href="/donate" { "Donations" }
-               " replace the suspended search accounts and their proxies, keep the site online, and turn the Turnstile off."
+               " pay for the search accounts and their proxies, keep the site online, and turn the Turnstile off."
            }
        }
    }
