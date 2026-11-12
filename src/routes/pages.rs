@@ -233,13 +233,16 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
 fn search_turnstile_warning() -> maud::Markup {
    html! {
        aside class="home-announce" {
-           strong { "Search requires a check, and this month costs more" }
+           strong { "Search is down to one account" }
            p {
-               "Search requires a Cloudflare Turnstile because too many bots are using the site and about 1,000 accounts have been suspended from search. "
-               "That is why this month's goal is higher: those accounts and their proxies have to be paid for again. "
-               "We need more "
-               a href="/donate" { "donations" }
-               " this month to replace them, keep the site online, and disable Cloudflare Turnstile on search."
+               "Profiles, posts, and the rest of the site are working. About 2,100 accounts were added for viewing, so that part is fixed. "
+               "Search is not. Almost every account X lets us search with was suspended by accident, and one is left. "
+               "Search still asks for a Cloudflare Turnstile while that is being rebuilt."
+           }
+           p {
+               "This month's goal is $450. "
+               a href="/donate" { "Donations" }
+               " replace the suspended search accounts and their proxies, keep the site online, and turn the Turnstile off."
            }
        }
    }

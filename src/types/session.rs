@@ -66,6 +66,11 @@ pub struct SessionLimits {
    /// tweets, so it stays in the pool, but it cannot search.
    #[serde(default)]
    pub suspended: bool,
+   /// Reserved for search. Set when the account has returned search results,
+   /// or when it was imported as a search account. View calls never take it,
+   /// so a search suspension cannot spread through profile traffic.
+   #[serde(default)]
+   pub search_only: bool,
    /// Calls X refused this account with a bare 429, by endpoint. Kept apart
    /// from `apis`, which holds X's real window.
    #[serde(skip)]
@@ -228,7 +233,8 @@ impl SessionLimits {
    }
 
    /// Whether X refuses this account `api`. A search refusal is permanent.
-   /// Other operations are tried again after a day.
+   /// Other operations are tried again after a day. A search-only account
+   /// refuses every call that is not search, so view traffic cannot burn it.
    #[must_use]
    pub fn refuses(&self, api: &str) -> bool {
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -236,6 +242,9 @@ impl SessionLimits {
    }
 
    pub(crate) fn refuses_at(&self, name: &str, now: i64) -> bool {
+      if self.search_only && name != "SearchTimeline" {
+         return true;
+      }
       if self.profile_banned && is_profile_op(name) {
          return true;
       }
@@ -251,14 +260,14 @@ impl SessionLimits {
       now - at < REFUSED_OP_SECS
    }
 
-   /// Leave this account out of `api`. Search stays out. Anything else is
-   /// dropped once it is older than [`REFUSED_OP_SECS`].
+   /// Leave this account out of `api`. A search refusal is permanent. The
+   /// account stays reserved for search, so it is not mixed back into views,
+   /// and search will not pick it again. Anything else is dropped once it is
+   /// older than [`REFUSED_OP_SECS`].
    pub fn refuse(&mut self, api: &str) {
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
       let name = operation_name(api);
-      self.refused_ops.retain(|op, at| {
-         op == "SearchTimeline" || now - *at < REFUSED_OP_SECS
-      });
+      self.refused_ops.retain(|op, at| op == "SearchTimeline" || now - *at < REFUSED_OP_SECS);
       self.refused_ops.insert(name.to_owned(), now);
       self.verified_ops.remove(name);
    }
@@ -283,9 +292,21 @@ impl SessionLimits {
    }
 
    /// Whether it is still unknown if X lets this account call `api`.
+   /// Search is not probed across the view pool: an account joins search only
+   /// after it has returned results, or because it was imported for search.
    #[must_use]
    pub fn unchecked(&self, api: &str) -> bool {
+      if operation_name(api) == "SearchTimeline" && !self.search_only {
+         return false;
+      }
       !self.refuses(api) && !self.verified(api)
+   }
+
+   /// Keep this account for search alone. View calls never take it. A later
+   /// failed search does not clear this: the account stays out of both pools
+   /// rather than being mixed back into profiles.
+   pub fn reserve_for_search(&mut self) {
+      self.search_only = true;
    }
 
    /// Spend one local call against `api` when its window is known.
@@ -400,6 +421,10 @@ pub struct Session {
    // Cookie credentials
    pub auth_token: String,
    pub ct0: String,
+   /// `"search"` keeps this account out of profile and tweet reads. Absent
+   /// means the shared view pool, which is every account already on disk.
+   #[serde(default)]
+   pub pool: String,
 }
 
 impl Session {
@@ -427,6 +452,7 @@ impl Session {
             profile_strikes: 0,
             profile_banned: false,
             suspended: false,
+            search_only: self.pool.eq_ignore_ascii_case("search"),
             resting: HashMap::new(),
          },
       )
@@ -484,13 +510,50 @@ mod tests {
    }
 
    #[test]
-   fn a_suspended_account_keeps_reading_but_cannot_search() {
+   fn a_search_account_never_serves_a_view() {
+      let mut limits = SessionLimits::default();
+      limits.reserve_for_search();
+      assert!(limits.refuses("x/UserTweets"));
+      assert!(limits.refuses("x/UserByScreenName"));
+      assert!(limits.refuses("x/TweetDetail"));
+      assert!(!limits.refuses("ph2f/SearchTimeline"));
+      assert!(limits.unchecked("ph2f/SearchTimeline"));
+
+      limits.verify("ph2f/SearchTimeline");
+      assert!(!limits.unchecked("ph2f/SearchTimeline"));
+      assert!(limits.refuses("x/UserTweets"));
+   }
+
+   #[test]
+   fn a_view_account_is_not_probed_for_search() {
+      let limits = SessionLimits::default();
+      assert!(limits.unchecked("x/UserTweets"));
+      assert!(!limits.unchecked("ph2f/SearchTimeline"));
+      assert!(!limits.refuses("x/UserTweets"));
+   }
+
+   #[test]
+   fn an_imported_search_account_starts_search_only() {
+      let session = Session {
+         id: 9,
+         pool: "search".to_owned(),
+         ..Session::default()
+      };
+      let (_, limits) = session.into_credentials_and_limits();
+      assert!(limits.search_only);
+      assert!(limits.refuses("x/UserTweets"));
+      assert!(!limits.refuses("ph2f/SearchTimeline"));
+   }
+
+   #[test]
+   fn a_suspended_account_stays_out_of_both_pools() {
       let mut limits = SessionLimits::default();
       limits.suspended = true;
+      limits.reserve_for_search();
+      limits.refuse("SearchTimeline");
       assert!(limits.refuses("ph2f/SearchTimeline"));
-      assert!(!limits.refuses("x/UserTweets"));
-      assert!(!limits.refuses("x/UserByScreenName"));
-      assert!(!limits.profile_banned);
+      assert!(limits.refuses("x/UserTweets"));
+      assert!(limits.search_only);
    }
 
    #[test]

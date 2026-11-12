@@ -1,10 +1,10 @@
-//! Find out which cookie sessions X lets search, before visitors rely on them.
+//! Find out which search accounts X still lets search, before visitors rely
+//! on them.
 //!
-//! X refuses some accounts search outright: every `SearchTimeline` from them
-//! is an empty 404, while the same account still loads profiles and posts.
-//! Accounts nobody has checked are searched once each in the background,
-//! spaced out. Those that get results go first for search from then on; the
-//! refused ones stay out of search and are not tried again.
+//! Only accounts reserved for search are checked. The view pool is not
+//! probed: a search from a view account is what got those accounts suspended,
+//! and an account that comes back empty stays out of search for good. An
+//! account that returns results is kept for search alone.
 
 use std::time::{Duration, Instant};
 

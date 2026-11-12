@@ -25,9 +25,10 @@ pub fn render_donate_page(
            p {
                "xitter.cf needs " (format_usd(progress.goal_cents)) " every month for accounts and proxies. "
                "The counter resets on the 23rd. "
-               "About 1,000 accounts are in rotation. Scraping from one IP is allowed. "
-               "Search asks for a Cloudflare Turnstile checkbox that lasts 5 minutes, because bots got about 1,000 accounts suspended from search. "
-               "Donations are what turn that check off. "
+               "Viewing profiles and posts is covered by about 2,100 accounts. "
+               "Search is down to one account: the rest were suspended from search by accident, and replacements are being worked on. "
+               "Search asks for a Cloudflare Turnstile checkbox that lasts 5 minutes while that pool is rebuilt. "
+               "Donations are what replace those accounts and turn that check off. "
                "Choose an amount from $1 to $10,000."
            }
            (money_meter(progress, false))

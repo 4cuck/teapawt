@@ -24,7 +24,10 @@ use tokio::{
 
 use crate::{
    error::{Error, Result},
-   types::{Headroom, RateLimit, Session, SessionCredentials, SessionKind, SessionLimits, Spend},
+   types::{
+      Headroom, RateLimit, Session, SessionCredentials, SessionKind, SessionLimits, Spend,
+      operation_name,
+   },
 };
 
 use super::{
@@ -152,11 +155,14 @@ enum Miss {
 
 impl Miss {
    /// What the queue report counts and what the caller is told, for a miss
-   /// that is not waited out.
+   /// that is not waited out. Busy is not a rate limit: the account still has
+   /// quota and another call holds its slot. Search has one such account, so
+   /// reporting that as spent told visitors the account was out of calls.
    fn settle(self) -> (Outcome, Error) {
       match self {
          Self::Nobody => (Outcome::Nobody, Error::NoSessions),
-         Self::Spent | Self::Busy => (Outcome::Spent, Error::RateLimited),
+         Self::Spent => (Outcome::Spent, Error::RateLimited),
+         Self::Busy => (Outcome::Shed, Error::TransientUpstream),
       }
    }
 }
@@ -327,7 +333,11 @@ impl SessionPool {
       let mut limits = HashMap::with_capacity(parsed.len());
 
       for session in parsed {
-         let (creds, lims) = session.into_credentials_and_limits();
+         let search_account = session.pool.eq_ignore_ascii_case("search");
+         let (creds, mut lims) = session.into_credentials_and_limits();
+         if search_account {
+            lims.reserve_for_search();
+         }
          let id = creds.id;
          sessions.push(SessionSlot {
             credentials: Arc::new(creds),
@@ -414,8 +424,9 @@ impl SessionPool {
       match serde_json::from_str::<BTreeMap<i64, SessionLimits>>(&content) {
          Ok(saved) => {
             let mut restored = 0_usize;
-            for (id, saved_limits) in saved {
+            for (id, mut saved_limits) in saved {
                if let Some(slot) = limits.get_mut(&id) {
+                  saved_limits.search_only = slot.search_only;
                   *slot = saved_limits;
                   restored += 1;
                }
@@ -431,8 +442,12 @@ impl SessionPool {
       saved: HashMap<i64, SessionLimits>,
    ) -> usize {
       let mut restored = 0_usize;
-      for (id, saved_limits) in saved {
+      for (id, mut saved_limits) in saved {
          if let Some(slot) = limits.get_mut(&id) {
+            // The sessions file is the assignment. A saved row from before
+            // the split must not pull a search account back into views, and
+            // must not reserve a view account that was never proven.
+            saved_limits.search_only = slot.search_only;
             *slot = saved_limits;
             restored += 1;
          }
@@ -579,14 +594,22 @@ impl SessionPool {
       self.sessions.iter().any(|slot| {
          slot.credentials.id != excluded_id
             && required_kind.is_none_or(|kind| slot.credentials.kind == kind)
-            && limits
-               .get(&slot.credentials.id)
-               .is_none_or(|session_limits| {
-                  !session_limits.rejected
-                     && !session_limits.is_limited(api)
-                     && !session_limits.refuses(api)
-               })
+            && self.serves(&limits, slot.credentials.id, api)
       })
+   }
+
+   /// Whether this account may take `api`: not rejected, not refused, and in
+   /// the pool that owns the call. Search never sees a view account. A view
+   /// never sees a search account.
+   fn serves(&self, limits: &HashMap<i64, SessionLimits>, id: i64, api: &str) -> bool {
+      let Some(session_limits) = limits.get(&id) else {
+         return operation_name(api) != "SearchTimeline";
+      };
+      let search = operation_name(api) == "SearchTimeline";
+      !session_limits.rejected
+         && !session_limits.is_limited(api)
+         && !session_limits.refuses(api)
+         && session_limits.search_only == search
    }
 
    async fn acquire_with_filter<'a>(
@@ -622,7 +645,7 @@ impl SessionPool {
             Err(Miss::Busy) => {
                drop(limits);
                note(Outcome::Shed);
-               return Err(Error::RateLimited);
+               return Err(Error::TransientUpstream);
             },
             Err(miss) => {
                drop(limits);
@@ -757,7 +780,11 @@ impl SessionPool {
          let lim = limits.get(&slot.credentials.id);
          let state = match lim {
             Some(lim)
-               if lim.rejected || lim.is_globally_limited_at(now) || lim.refuses_at(op_name, now) =>
+               if lim.rejected
+                  || lim.is_globally_limited_at(now)
+                  || lim.refuses_at(op_name, now)
+                  || (op_name == "SearchTimeline" && !lim.search_only)
+                  || (op_name != "SearchTimeline" && lim.search_only) =>
             {
                &mut count.out
             },
@@ -830,13 +857,25 @@ impl SessionPool {
          {
             continue;
          }
-         any = true;
          let api = api_for(slot.credentials.kind);
-         let op_name = crate::types::operation_name(api);
+         let op_name = operation_name(api);
          let session_limits = limits.get(&slot.credentials.id);
          if session_limits.is_some_and(|lim| lim.rejected) {
             continue;
          }
+         // Search uses only the search pool. A view account is not a candidate,
+         // even when it has never been searched, so a search cannot park
+         // behind accounts it must not touch.
+         if op_name == "SearchTimeline" && session_limits.is_none_or(|lim| !lim.search_only) {
+            continue;
+         }
+         // A search account is not a candidate for anything else. `refuses`
+         // already blocks the spend; skipping here keeps a profile lookup
+         // from parking on an account it will never be given.
+         if op_name != "SearchTimeline" && session_limits.is_some_and(|lim| lim.search_only) {
+            continue;
+         }
+         any = true;
          let headroom = session_limits.map(|lim| lim.headroom_at(api, op_name, now));
          if headroom == Some(Headroom::Blocked) {
             continue;
@@ -938,18 +977,9 @@ impl SessionPool {
    /// How many sessions can still call `api`.
    pub(crate) async fn available_for(&self, api: &str) -> usize {
       let limits = self.limits.read().await;
-      self
-         .sessions
+      self.sessions
          .iter()
-         .filter(|slot| {
-            limits
-               .get(&slot.credentials.id)
-               .is_none_or(|session_limits| {
-                  !session_limits.rejected
-                     && !session_limits.is_limited(api)
-                     && !session_limits.refuses(api)
-               })
-         })
+         .filter(|slot| self.serves(&limits, slot.credentials.id, api))
          .count()
    }
 
@@ -1087,13 +1117,16 @@ impl SessionPool {
       let mut limits = self.limits.write().await;
       if let Some(lim) = limits.get_mut(&session_id) {
          lim.verify(api);
+         if operation_name(api) == "SearchTimeline" {
+            lim.reserve_for_search();
+         }
       }
       drop(limits);
       self.mark_dirty(session_id);
    }
 
-   /// Cookie sessions nobody has yet seen get results for `api`, or refused
-   /// long enough ago to look at again.
+   /// Cookie sessions reserved for search that have not yet returned a result
+   /// or been refused.
    pub async fn unchecked_for(&self, api: &str) -> Vec<i64> {
       let limits = self.limits.read().await;
       self
@@ -1111,9 +1144,10 @@ impl SessionPool {
          .collect()
    }
 
-   /// Leave a session out of one operation X answers it nothing for, while
-   /// other accounts get results. Search stays out for good. The rest of its
-   /// endpoints stay in use, and a non-search refusal expires after a day.
+   /// Leave a session out of one operation X answers it nothing for. A search
+   /// refusal is permanent. The account stays in the search pool so it is not
+   /// mixed back into profile reads, and search will not pick it again. Other
+   /// refusals expire after a day.
    pub async fn mark_refused(&self, session_id: i64, api: &str) {
       let username = self
          .sessions
@@ -1146,13 +1180,14 @@ impl SessionPool {
       }
    }
 
-   /// X confirmed this account is suspended. It stays in the pool for profile
-   /// and tweet reads, which a suspended account can still do, and is kept out
-   /// of search.
+   /// X confirmed this account is suspended from search. It stays reserved for
+   /// search so profile reads do not pick it up, and search itself skips it.
    pub async fn mark_suspended(&self, session_id: i64) {
       let mut limits = self.limits.write().await;
       if let Some(lim) = limits.get_mut(&session_id) {
          lim.suspended = true;
+         lim.reserve_for_search();
+         lim.refuse("SearchTimeline");
       }
       drop(limits);
       self.persist_soon(session_id);
@@ -1200,12 +1235,9 @@ impl SessionPool {
             if slot.credentials.kind != SessionKind::Cookie {
                return None;
             }
-            if limits
-               .get(&slot.credentials.id)
-               .is_some_and(|session_limits| {
-                  session_limits.filters_cleared && session_limits.age_gate_cleared
-               })
-            {
+            if limits.get(&slot.credentials.id).is_some_and(|session_limits| {
+               session_limits.filters_cleared && session_limits.age_gate_cleared
+            }) {
                return None;
             }
             Some(slot.credentials.id)
@@ -1280,6 +1312,8 @@ impl SessionPool {
    }
 
    /// Take a specific session, for startup work that must hit that account.
+   /// A search account is handed out only for search, and for the one settings
+   /// write that turns its own search filter off.
    pub async fn acquire_id(&self, session_id: i64, api: &str) -> Result<SessionLease> {
       let slot = self
          .sessions
@@ -1287,19 +1321,17 @@ impl SessionPool {
          .find(|slot| slot.credentials.id == session_id)
          .ok_or(Error::NoSessions)?;
       let limits = self.limits.read().await;
-      if limits
-         .get(&session_id)
-         .is_some_and(|session_limits| session_limits.rejected)
-      {
-         return Err(Error::SessionRejected(format!(
-            "session {session_id} rejected"
-         )));
-      }
-      if limits
-         .get(&session_id)
-         .is_some_and(|session_limits| session_limits.is_limited(api))
-      {
-         return Err(Error::RateLimited);
+      let search_settings =
+         operation_name(api) == "settings" && limits.get(&session_id).is_some_and(|lim| lim.search_only);
+      if !search_settings && !self.serves(&limits, session_id, api) {
+         let rejected = limits.get(&session_id).is_some_and(|lim| lim.rejected);
+         return Err(if rejected {
+            Error::SessionRejected(format!("session {session_id} rejected"))
+         } else if limits.get(&session_id).is_some_and(|lim| lim.is_limited(api)) {
+            Error::RateLimited
+         } else {
+            Error::NoSessions
+         });
       }
       let permits = Arc::clone(&slot.permits);
       drop(limits);
@@ -1355,6 +1387,7 @@ impl SessionPool {
          oauth_secret: credentials.oauth_secret.clone(),
          auth_token: credentials.auth_token.clone(),
          ct0: credentials.ct0.clone(),
+         pool: String::new(),
       };
       let Ok(line) = serde_json::to_string(&session) else {
          return;
@@ -1404,6 +1437,12 @@ impl SessionPool {
             creds.kind == SessionKind::Cookie
                && !creds.auth_token.is_empty()
                && !creds.ct0.is_empty()
+               && !self
+                  .limits
+                  .try_read()
+                  .ok()
+                  .and_then(|limits| limits.get(&creds.id).map(|lim| lim.search_only))
+                  .unwrap_or(false)
          })
          .map(|creds| {
             let ct0 = self.ct0(creds.id).unwrap_or_else(|| creds.ct0.clone());
@@ -2085,7 +2124,7 @@ mod tests {
       )
       .await
       .expect("a parked call gives up at its limit instead of the page timeout");
-      assert!(matches!(waited, Err(Error::RateLimited)));
+      assert!(matches!(waited, Err(Error::TransientUpstream)));
       assert!(started.elapsed() >= MAX_PARK);
 
       drop(held);
@@ -2125,7 +2164,7 @@ mod tests {
       )
       .await
       .expect("a full line answers at once");
-      assert!(matches!(late, Err(Error::RateLimited)));
+      assert!(matches!(late, Err(Error::TransientUpstream)));
 
       // The calls already in line still get the account as it frees.
       drop(held);
@@ -2259,6 +2298,7 @@ mod tests {
       .await
       .unwrap();
       let pool = SessionPool::load(path.to_str().unwrap(), 4).await.unwrap();
+      pool.mark_verified(2, "old-id/SearchTimeline").await;
       pool.mark_refused(1, "old-id/SearchTimeline").await;
 
       for _ in 0..4 {
@@ -2268,8 +2308,10 @@ mod tests {
             .unwrap();
          assert_eq!(lease.id, 2);
       }
+      // Account 1 was refused before it was reserved, so it stays a viewer.
+      // Account 2 can search and is no longer available for views.
       assert_eq!(pool.available_for("new-id/SearchTimeline").await, 1);
-      assert_eq!(pool.available_for("x/UserTweets").await, 2);
+      assert_eq!(pool.available_for("x/UserTweets").await, 1);
 
       fs::remove_file(path).await.unwrap();
    }
@@ -2296,7 +2338,7 @@ mod tests {
       .unwrap();
       let pool = SessionPool::load(path.to_str().unwrap(), 4).await.unwrap();
       pool.mark_verified(2, "a/SearchTimeline").await;
-      assert_eq!(pool.unchecked_for("b/SearchTimeline").await, vec![1, 3]);
+      assert_eq!(pool.unchecked_for("b/SearchTimeline").await, Vec::<i64>::new());
 
       for _ in 0..5 {
          let lease = pool
@@ -2305,14 +2347,46 @@ mod tests {
             .unwrap();
          assert_eq!(lease.id, 2);
       }
-      let other = pool
-         .acquire_excluding("b/SearchTimeline", Some(SessionKind::Cookie), Some(2))
+      // The account that can search is no longer in the view pool.
+      assert!(
+         pool.acquire("x/UserTweets", Some(SessionKind::Cookie))
+            .await
+            .is_err()
+            || pool
+               .acquire_excluding("x/UserTweets", Some(SessionKind::Cookie), Some(2))
+               .await
+               .unwrap()
+               .id
+               != 2
+      );
+      let view = pool
+         .acquire("x/UserTweets", Some(SessionKind::Cookie))
          .await
          .unwrap();
-      assert_ne!(other.id, 2);
+      assert_ne!(view.id, 2);
+      drop(view);
+      assert!(
+         pool.acquire_excluding("b/SearchTimeline", Some(SessionKind::Cookie), Some(2))
+            .await
+            .is_err()
+      );
 
       pool.mark_refused(2, "b/SearchTimeline").await;
-      assert_eq!(pool.unchecked_for("b/SearchTimeline").await, vec![1, 3]);
+      assert!(pool.unchecked_for("b/SearchTimeline").await.is_empty());
+      assert!(
+         pool.acquire("b/SearchTimeline", Some(SessionKind::Cookie))
+            .await
+            .is_err()
+      );
+      // A refused search account is not put back into views. Mixing it back
+      // is how a search suspension spreads to the accounts people browse with.
+      for _ in 0..4 {
+         let back = pool
+            .acquire("x/UserTweets", Some(SessionKind::Cookie))
+            .await
+            .unwrap();
+         assert_ne!(back.id, 2);
+      }
 
       fs::remove_file(path).await.unwrap();
    }
