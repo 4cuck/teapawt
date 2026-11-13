@@ -31,8 +31,11 @@ const DISPLAY_SENSITIVE_BODY: &str = "display_sensitive_media=true";
 /// accounts". Both are on for a new account.
 const SEARCH_SAFETY_BODY: &str = r#"{"optInFiltering":false,"optInBlocking":false}"#;
 
-/// Gap between two accounts, so a restart does not reach X as a burst.
-const GAP: Duration = Duration::from_millis(250);
+/// Gap between two accounts, so a restart does not reach X as a burst. A
+/// settings write is a page-level action, not a read: one account every five
+/// seconds is about what a person changing their own settings produces, and
+/// twelve at once is a pattern no browser makes.
+const GAP: Duration = Duration::from_secs(5);
 
 #[expect(
    clippy::multiple_inherent_impl,

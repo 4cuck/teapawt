@@ -220,7 +220,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
       .collect();
    println!("{} accounts, {} new, {} exits", accounts.len(), pending.len(), proxies.len());
 
-   let concurrency = 6;
+   // One account at a time, with a gap between them. Six simultaneous page
+   // loads through the same small pool of exits is a pattern no browser
+   // produces, and the settings writes that follow are paced the same way.
+   let concurrency: usize = std::env::var("IMPORT_CONCURRENCY")
+      .ok()
+      .and_then(|value| value.parse().ok())
+      .filter(|count: &usize| *count > 0)
+      .unwrap_or(1);
+   let gap = std::time::Duration::from_secs(
+      std::env::var("IMPORT_GAP_SECS")
+         .ok()
+         .and_then(|value| value.parse().ok())
+         .unwrap_or(12),
+   );
    let clients: Vec<Arc<primp::Client>> = proxies
       .iter()
       .map(|proxy| browser(proxy).map(Arc::new))
@@ -239,8 +252,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
          outcomes[slot] = Some(joined.unwrap_or_else(|err| Err(err.to_string())));
          slot += 1;
       }
-      if end % 300 == 0 || end == pending.len() {
-         println!("checked {end} of {}", pending.len());
+      println!("checked {end} of {}", pending.len());
+      if end < pending.len() {
+         tokio::time::sleep(gap).await;
       }
    }
    let dead = fs::OpenOptions::new().create(true).append(true).open(DEAD)?;
