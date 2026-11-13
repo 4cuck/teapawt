@@ -87,8 +87,6 @@ pub struct SessionPool {
    state: Option<Arc<LimitState>>,
    /// `sessions.jsonl` this pool was loaded from.
    source_path: String,
-   /// `ct0`s fetched since the last write to the sessions file.
-   pending_ct0: Arc<std::sync::Mutex<Vec<(i64, String)>>>,
    /// Calls parked until an account frees up, for the minute report.
    waiting: Arc<AtomicUsize>,
    /// Time each call spent getting an account, reported every minute.
@@ -194,9 +192,6 @@ struct PoolCount {
 
 struct SessionSlot {
    credentials: Arc<SessionCredentials>,
-   /// A `ct0` fetched after startup, sent in place of the one in `credentials`.
-   /// x.com rotates it, and the credentials are shared and loaded once.
-   fresh_ct0: Arc<std::sync::RwLock<Option<String>>>,
    permits: Arc<Semaphore>,
    max_concurrency: usize,
    /// Signaled when a lease on this account returns its permit, waking one
@@ -329,7 +324,6 @@ impl SessionPool {
          let id = creds.id;
          sessions.push(SessionSlot {
             credentials: Arc::new(creds),
-            fresh_ct0: Arc::new(std::sync::RwLock::new(None)),
             permits: Arc::new(Semaphore::new(max_concurrency)),
             max_concurrency,
             freed: Arc::new(Notify::new()),
@@ -397,7 +391,6 @@ impl SessionPool {
          state,
          source_path: path.to_owned(),
          waiting: Arc::default(),
-         pending_ct0: Arc::default(),
          queue: Arc::default(),
       };
       pool.spawn_flusher();
@@ -1145,19 +1138,79 @@ impl SessionPool {
          .map(|slot| slot.credentials.username.clone())
          .unwrap_or_default();
       let mut limits = self.limits.write().await;
+      let mut banned = false;
       if let Some(lim) = limits.get_mut(&session_id) {
          lim.refuse(api);
+         if api.ends_with("SearchTimeline") {
+            banned = lim.note_search_refusal();
+         }
       }
       drop(limits);
       if api.ends_with("SearchTimeline") {
-         tracing::debug!(
-            session_id,
-            session_user = %username,
-            "account answered no search while another did; resting it"
-         );
+         if banned {
+            tracing::info!(
+               session_id,
+               session_user = %username,
+               "this account has answered no search three times while another did; out of search"
+            );
+         } else {
+            tracing::debug!(
+               session_id,
+               session_user = %username,
+               "account answered no search while another did; resting it"
+            );
+         }
          log_events::note(Event::SearchRested);
       }
       self.persist_soon(session_id);
+   }
+
+   /// Take this account out of search for good and back into the view pool.
+   ///
+   /// X answering a settings write with "not permitted to access this feature"
+   /// is a suspension, not an empty search page. Reading profiles is a
+   /// different gate, so the account is moved to the view pool rather than
+   /// dropped, and the sessions file is rewritten so a restart keeps it there.
+   pub async fn demote_to_view(&self, session_id: i64) {
+      let mut limits = self.limits.write().await;
+      if let Some(lim) = limits.get_mut(&session_id) {
+         lim.search_banned = true;
+         lim.search_only = false;
+         lim.suspicion_checked = true;
+         lim.refuse("SearchTimeline");
+      }
+      drop(limits);
+      self.persist_soon(session_id);
+      match demote_session_line(&self.source_path, session_id).await {
+         Ok(true) => tracing::info!(
+            session_id,
+            "moved to the view pool; it can still read profiles"
+         ),
+         Ok(false) => {},
+         Err(err) => tracing::warn!(session_id, "could not move it to the view pool: {err}"),
+      }
+   }
+
+   /// Claim the one settings probe that decides whether this account is
+   /// suspended. `true` means run it; `false` means another call already has.
+   pub async fn claim_suspicion_check(&self, session_id: i64) -> bool {
+      let mut limits = self.limits.write().await;
+      match limits.get_mut(&session_id) {
+         Some(lim) if !lim.suspicion_checked => {
+            lim.suspicion_checked = true;
+            true
+         },
+         _ => false,
+      }
+   }
+
+   /// Give the claim back when the probe told us nothing, so a later empty
+   /// search can ask again.
+   pub async fn release_suspicion_check(&self, session_id: i64) {
+      let mut limits = self.limits.write().await;
+      if let Some(lim) = limits.get_mut(&session_id) {
+         lim.suspicion_checked = false;
+      }
    }
 
    /// Mark a session's credentials as refused, taking it out of rotation until
@@ -1215,7 +1268,9 @@ impl SessionPool {
             !limits
                .get(&slot.credentials.id)
                .is_some_and(|session_limits| {
-                  session_limits.filters_cleared || session_limits.filters_failed
+                  session_limits.filters_cleared
+                     || session_limits.filters_failed
+                     || session_limits.search_banned
                })
          })
          .map(|slot| slot.credentials.id)
@@ -1253,61 +1308,26 @@ impl SessionPool {
          .map(|slot| Arc::clone(&slot.credentials))
    }
 
-   /// The `ct0` to send for this account: one fetched since startup, or the one
-   /// loaded from the sessions file.
-   pub fn ct0(&self, session_id: i64) -> Option<String> {
-      let slot = self.sessions.iter().find(|slot| slot.credentials.id == session_id)?;
-      let fresh = slot
-         .fresh_ct0
-         .read()
-         .unwrap_or_else(std::sync::PoisonError::into_inner)
-         .clone();
-      Some(fresh.unwrap_or_else(|| slot.credentials.ct0.clone()))
-   }
-
-   /// Remember a `ct0` x.com just issued, so later requests send it, and queue a
-   /// write of the sessions file.
-   pub fn remember_ct0(&self, session_id: i64, ct0: String) {
-      self.hold_ct0(session_id, ct0.clone());
-      self.pending_ct0
-         .lock()
-         .unwrap_or_else(std::sync::PoisonError::into_inner)
-         .push((session_id, ct0));
-      let pool = self.clone();
-      tokio::spawn(async move {
-         sleep(Duration::from_secs(2)).await;
-         if let Err(err) = pool.flush_ct0().await {
-            tracing::warn!("could not store refreshed ct0s: {err}");
-         }
-      });
-   }
-
-   /// Remember a `ct0` without writing it. The caller writes the whole batch.
-   pub fn hold_ct0(&self, session_id: i64, ct0: String) {
-      let Some(slot) = self.sessions.iter().find(|slot| slot.credentials.id == session_id) else {
-         return;
-      };
-      *slot.fresh_ct0.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ct0);
-   }
-
-   async fn flush_ct0(&self) -> Result<()> {
-      let pending = std::mem::take(
-         &mut *self.pending_ct0.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
-      );
-      if pending.is_empty() {
-         return Ok(());
+   /// X rejected this account's `ct0`, so every csrf-protected call it makes
+   /// will be refused until the account is imported again.
+   ///
+   /// Nothing is fetched to replace it. A refresh meant a full page load of
+   /// x.com per rejection — the one request a browser makes that an API client
+   /// otherwise never makes, and where X's anti-bot check runs — so the token
+   /// is left stale and the account is taken out of rotation instead.
+   pub async fn mark_ct0_dead(&self, session_id: i64) {
+      let mut limits = self.limits.write().await;
+      if let Some(lim) = limits.get_mut(&session_id)
+         && !lim.ct0_dead
+      {
+         lim.ct0_dead = true;
+         drop(limits);
+         self.persist_soon(session_id);
+         tracing::info!(
+            session_id,
+            "ct0 is stale; out of rotation until it is imported again"
+         );
       }
-      store_session_ct0s(&self.source_path, &pending).await.map(|_| ())
-   }
-
-   /// Write a fresh `ct0` back to the sessions file. See [`store_session_ct0`].
-   pub async fn store_ct0(&self, session_id: i64, ct0: &str) -> Result<bool> {
-      store_session_ct0(&self.source_path, session_id, ct0).await
-   }
-
-   /// Write many refreshed `ct0`s in one pass over the sessions file.
-   pub async fn store_ct0s(&self, fresh: &[(i64, String)]) -> Result<()> {
-      store_session_ct0s(&self.source_path, fresh).await.map(|_| ())
    }
 
    /// Take a specific session, for startup work that must hit that account.
@@ -1362,7 +1382,7 @@ impl SessionPool {
                   .unwrap_or(false)
          })
          .map(|creds| {
-            let ct0 = self.ct0(creds.id).unwrap_or_else(|| creds.ct0.clone());
+            let ct0 = creds.ct0.clone();
             (creds.id, format!("auth_token={}; ct0={ct0}", creds.auth_token))
          })
    }
@@ -1517,64 +1537,37 @@ pub fn oauth1_sign(
    format!("OAuth {auth_header}")
 }
 
-/// Replace the `ct0` stored for one account. See [`store_session_ct0s`].
-async fn store_session_ct0(path: &str, session_id: i64, ct0: &str) -> Result<bool> {
-   store_session_ct0s(path, &[(session_id, ct0.to_owned())]).await.map(|count| count > 0)
-}
-
-/// Replace the `ct0` stored for each of these accounts, in one rewrite.
-///
-/// x.com rotates `ct0` on its own, and a request signed with the old one is
-/// refused with "csrf cookie and header do not match". The credentials are
-/// shared and loaded once, so the fresh values are written back to the
-/// sessions file for the next start.
-async fn store_session_ct0s(path: &str, fresh: &[(i64, String)]) -> Result<usize> {
-   if fresh.is_empty() {
-      return Ok(0);
-   }
-   let ct0s: HashMap<i64, &str> = fresh.iter().map(|(id, ct0)| (*id, ct0.as_str())).collect();
+/// Drop `pool` from one account's line, so the next start loads it into the
+/// view pool. `false` when the line carried no pool already.
+async fn demote_session_line(path: &str, session_id: i64) -> Result<bool> {
    let content = fs::read_to_string(path).await?;
    let mut kept = String::with_capacity(content.len());
-   let mut changed = 0_usize;
+   let mut changed = false;
    for line in content.lines() {
       if line.trim().is_empty() {
          continue;
       }
-      let Some(id) = session_line_id(line) else {
-         kept.push_str(line);
-         kept.push('\n');
-         continue;
-      };
-      let Some(ct0) = ct0s.get(&id) else {
-         kept.push_str(line);
-         kept.push('\n');
-         continue;
-      };
-      match retarget_ct0(line, ct0) {
-         Some(updated) => {
-            changed += 1;
-            kept.push_str(&updated);
-         },
-         None => kept.push_str(line),
+      if session_line_id(line) == Some(session_id) {
+         let mut value: serde_json::Value = serde_json::from_str(line)?;
+         if let Some(map) = value.as_object_mut()
+            && map.remove("pool").is_some()
+         {
+            kept.push_str(&serde_json::to_string(&value)?);
+            kept.push('\n');
+            changed = true;
+            continue;
+         }
       }
+      kept.push_str(line);
       kept.push('\n');
    }
-   if changed == 0 {
-      return Ok(0);
+   if !changed {
+      return Ok(false);
    }
    let tmp = format!("{path}.tmp");
    fs::write(&tmp, kept).await?;
    fs::rename(&tmp, path).await?;
-   Ok(changed)
-}
-
-fn retarget_ct0(line: &str, ct0: &str) -> Option<String> {
-   let mut value: serde_json::Value = serde_json::from_str(line).ok()?;
-   if value.get("ct0").and_then(|item| item.as_str()) == Some(ct0) {
-      return None;
-   }
-   value["ct0"] = serde_json::Value::String(ct0.to_owned());
-   serde_json::to_string(&value).ok()
+   Ok(true)
 }
 
 fn session_line_id(line: &str) -> Option<i64> {
@@ -1618,29 +1611,9 @@ mod tests {
 
    use super::{
       MAX_PARK, QUEUE_PER_SLOT, SessionKind, SessionPool, normalized_parameter_string,
-      percent_encode, store_session_ct0s,
+      percent_encode,
    };
    use crate::error::Error;
-
-   #[tokio::test]
-   async fn a_refreshed_ct0_is_written_back_and_the_rest_are_left_alone() {
-      let path = format!("/tmp/teapot-ct0-{}-{}.jsonl", process::id(), line!());
-      let _ = fs::remove_file(&path).await;
-      fs::write(
-         &path,
-         "{\"id\":1,\"ct0\":\"old\"}\n{\"id\":2,\"ct0\":\"keep\"}\n",
-      )
-      .await
-      .unwrap();
-      let changed = store_session_ct0s(&path, &[(1, "fresh".to_owned())]).await.unwrap();
-      assert_eq!(changed, 1);
-      let content = fs::read_to_string(&path).await.unwrap();
-      assert!(content.contains("\"ct0\":\"fresh\""));
-      assert!(content.contains("\"ct0\":\"keep\""));
-      let again = store_session_ct0s(&path, &[(1, "fresh".to_owned())]).await.unwrap();
-      assert_eq!(again, 0);
-      let _ = fs::remove_file(&path).await;
-   }
 
    #[test]
    fn oauth_percent_encoding_follows_rfc_5849() {

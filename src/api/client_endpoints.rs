@@ -1599,7 +1599,7 @@ impl ApiClient {
          "x-twitter-auth-type",
          header::HeaderValue::from_static("OAuth2Session"),
       );
-      let ct0 = self.sessions.ct0(session.id).unwrap_or_else(|| session.ct0.clone());
+      let ct0 = session.ct0.clone();
       headers.insert(
          "x-csrf-token",
          ct0.parse()

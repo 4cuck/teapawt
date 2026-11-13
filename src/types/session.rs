@@ -70,6 +70,32 @@ pub struct SessionLimits {
    /// so a search suspension cannot spread through profile traffic.
    #[serde(default)]
    pub search_only: bool,
+   /// Corroborated empty searches: X answered this account nothing while
+   /// another account got posts for the same query. One is not a verdict —
+   /// an empty page is also what a query with no matches and an age-gated
+   /// account produce — but three across rest cycles is.
+   #[serde(default)]
+   pub search_strikes: u32,
+   /// X will not serve this account search, and waiting does not change it.
+   /// It stays in the pool for profile reads and stops being tried for search.
+   #[serde(default)]
+   pub search_banned: bool,
+   /// The `ct0` this account holds is no longer the one X accepts.
+   ///
+   /// Every call teapot makes is csrf-protected, so an account whose token has
+   /// rotated cannot do any of the work the pool asks of it. It is not
+   /// refreshed: that meant a full page load of x.com per rejection, which is
+   /// where X's anti-bot check runs, and the traffic cost more accounts than
+   /// the tokens were worth. The credentials are kept so the account can be
+   /// re-imported with a fresh token later.
+   #[serde(default)]
+   pub ct0_dead: bool,
+   /// The settings write has been used to find out whether this account is
+   /// suspended rather than merely out of matches. Asked once, so an account
+   /// that answers search with nothing does not cost a settings POST every
+   /// time it comes back from its rest.
+   #[serde(default)]
+   pub suspicion_checked: bool,
    /// Calls X refused this account with a bare 429, by endpoint. Kept apart
    /// from `apis`, which holds X's real window.
    #[serde(skip)]
@@ -107,6 +133,11 @@ const GLOBAL_LIMIT_DURATION_SECS: i64 = 15 * 60;
 /// How long an account sits out an operation X refused it, before it is
 /// tried again in case X lifted the restriction.
 const REFUSED_OP_SECS: i64 = 24 * 60 * 60;
+
+/// Corroborated empty searches after which an account is out of search for
+/// good. Three rest cycles apart, so a query that simply has no matches — or
+/// an account whose filters are still on — cannot reach it.
+const SEARCH_STRIKE_LIMIT: u32 = 3;
 
 /// How long an account sits out search after an empty page. An empty page is
 /// weak evidence — a query with no matches, an age gate, or an NSFW filter
@@ -247,7 +278,14 @@ impl SessionLimits {
    }
 
    pub(crate) fn refuses_at(&self, name: &str, now: i64) -> bool {
+      // A rotated `ct0` closes every call the pool makes, not one of them.
+      if self.ct0_dead {
+         return true;
+      }
       if self.search_only && name != "SearchTimeline" {
+         return true;
+      }
+      if self.search_banned && name == "SearchTimeline" {
          return true;
       }
       if self.profile_banned && is_profile_op(name) {
@@ -278,6 +316,22 @@ impl SessionLimits {
          .retain(|_, at| now - *at < REFUSED_OP_SECS);
       self.refused_ops.insert(name.to_owned(), now);
       self.verified_ops.remove(name);
+   }
+
+   /// Count one empty search that another account answered with posts, and
+   /// say whether this was the one that settled it.
+   ///
+   /// The rest [`Self::refuse`] applies keeps the account out of search for an
+   /// hour. An account X has suspended from search comes back from every rest
+   /// and answers nothing again, so without a limit it is retried for as long
+   /// as the process runs. Three corroborated empties across rest cycles is
+   /// enough to stop trying.
+   pub fn note_search_refusal(&mut self) -> bool {
+      self.search_strikes = self.search_strikes.saturating_add(1);
+      if self.search_strikes >= SEARCH_STRIKE_LIMIT {
+         self.search_banned = true;
+      }
+      self.search_banned
    }
 
    /// Whether this account has been seen getting results for `api`.
@@ -465,6 +519,10 @@ impl Session {
             profile_strikes: 0,
             profile_banned: false,
             search_only: self.pool.eq_ignore_ascii_case("search"),
+            search_strikes: 0,
+            search_banned: false,
+            ct0_dead: false,
+            suspicion_checked: false,
             resting: HashMap::new(),
          },
       )
@@ -576,8 +634,38 @@ mod tests {
    }
 
    #[test]
-   fn a_verified_call_drops_the_refusal_it_contradicts() {
+   fn three_corroborated_empty_searches_take_an_account_out_for_good() {
       let mut limits = SessionLimits::default();
+
+      // One empty page is also a query with no matches, or filters still on.
+      assert!(!limits.note_search_refusal());
+      assert!(!limits.search_banned);
+
+      assert!(!limits.note_search_refusal());
+      assert!(limits.note_search_refusal(), "three strikes is a verdict");
+      assert!(limits.search_banned);
+      assert!(limits.refuses("ph2f/SearchTimeline"));
+
+      // Only search is closed to it: a pool account keeps reading profiles.
+      assert!(!limits.refuses("x/UserTweets"));
+   }
+
+   #[test]
+   fn a_stale_ct0_closes_every_call() {
+      let mut limits = SessionLimits::default();
+      assert!(!limits.refuses("ph2f/SearchTimeline"));
+
+      // X rotated the token: nothing the pool asks of the account can run,
+      // and no page load is made to replace it.
+      limits.ct0_dead = true;
+      assert!(limits.refuses("ph2f/SearchTimeline"));
+      assert!(limits.refuses("x/UserTweets"));
+      assert!(limits.refuses("x/UserByScreenName"));
+      assert!(!limits.unchecked("ph2f/SearchTimeline"));
+   }
+
+   #[test]
+   fn a_verified_call_drops_the_refusal_it_contradicts() {      let mut limits = SessionLimits::default();
       limits.refuse("old/SearchTimeline");
       assert!(limits.refuses("new/SearchTimeline"));
 

@@ -352,13 +352,6 @@ fn log_upstream(body: &str) -> String {
    body.to_owned()
 }
 
-fn ct0_cookie(value: &header::HeaderValue) -> Option<String> {
-   let text = value.to_str().ok()?;
-   let (pair, _) = text.split_once(';').unwrap_or((text, ""));
-   let (name, cookie) = pair.split_once('=')?;
-   (name.trim() == "ct0" && !cookie.trim().is_empty()).then(|| cookie.trim().to_owned())
-}
-
 fn twitter_error_code(body: &str) -> Option<i64> {
    #[derive(Deserialize)]
    struct ErrorCheck {
@@ -456,6 +449,15 @@ impl ApiClient {
       if !fallback_proxies.is_empty() {
          client = client.with_fallback_proxies(fallback_proxies);
       }
+      // Every account keeps the cookies X hands it, so a `guest_id` or `twid`
+      // set on one answer is sent back on the next call instead of being
+      // dropped. Nothing is fetched to fill this: it only reads the responses
+      // the calls in hand already receive.
+      let cookies = super::cookies::Jar::load(
+         std::env::var("TEAPOT_COOKIES_FILE").unwrap_or_else(|_| "session-cookies.json".to_owned()),
+      );
+      cookies.spawn_flusher();
+      client = client.with_cookies(std::sync::Arc::clone(&cookies));
 
       let proxies = proxies.map(Arc::new);
       let operations = Operations::load();
@@ -630,41 +632,32 @@ impl ApiClient {
       }
    }
 
-   /// Ask x.com for the `ct0` it currently accepts for this account and store it.
+   /// Find out, once, whether an account that answered no search is suspended.
    ///
-   /// A plain visit carrying only the `auth_token` cookie is answered with a
-   /// fresh `ct0`. Nothing is written when x.com sets none or the same one.
-   pub(crate) async fn refresh_stored_ct0(&self, session: &SessionLease) -> Result<Option<String>> {
-      if session.auth_token.is_empty() {
-         return Ok(None);
-      }
-      let mut headers = header::HeaderMap::new();
-      headers.insert(
-         header::COOKIE,
-         format!("auth_token={}", session.auth_token)
-            .parse()
-            .map_err(|_| Error::Internal("invalid auth token".into()))?,
-      );
-      let response = self
-         .client
-         .get_on("https://x.com/", &headers, Some(&self.egress_for(session)))
-         .await?;
-      let ct0 = response
-         .headers()
-         .get_all(header::SET_COOKIE)
-         .iter()
-         .find_map(ct0_cookie)
-         .unwrap_or_default();
-      if ct0.is_empty() || ct0 == session.ct0 {
-         return Ok(None);
-      }
-      self.sessions.hold_ct0(session.id, ct0.clone());
-      tracing::info!(
-         session_id = session.id,
-         session_user = %session.username,
-         "stored a fresh ct0"
-      );
-      Ok(Some(ct0))
+   /// One settings write decides it. A suspended account is taken out of
+   /// search for good and moved to the view pool; an account that takes the
+   /// write was simply handed an empty page, and stays where it is.
+   fn spawn_suspicion_probe(&self, session_id: i64) {
+      let client = self.clone();
+      tokio::spawn(async move {
+         if !client.sessions.claim_suspicion_check(session_id).await {
+            return;
+         }
+         match client.probe_search_suspension(session_id).await {
+            Some(true) => {
+               tracing::info!(
+                  session_id,
+                  "X refuses this account's settings write: suspended from search, moving it to the view pool"
+               );
+               client.sessions.demote_to_view(session_id).await;
+            },
+            Some(false) => tracing::debug!(
+               session_id,
+               "settings write accepted, so the empty search was the query's"
+            ),
+            None => client.sessions.release_suspicion_check(session_id).await,
+         }
+      });
    }
 
    pub(crate) async fn bearer_and_tid(&self, api_path: &str) -> (&'static str, Option<String>) {
@@ -937,6 +930,9 @@ impl ApiClient {
                "X answers this account nothing for this operation while others get results"
             );
             self.sessions.mark_refused(session_id, endpoint).await;
+            if endpoint.ends_with("SearchTimeline") {
+               self.spawn_suspicion_probe(session_id);
+            }
          }
       }
 
@@ -1478,17 +1474,11 @@ impl ApiClient {
          }
 
          if status.as_u16() == 403 && twitter_error_code(&body) == Some(353) {
-            // The ct0 this account was stored with no longer matches the one
-            // x.com holds. Fetch the current one and remember it; requests
-            // after the next start send it.
-            tracing::info!(
-               session_id = session.id,
-               session_user = %session.username,
-               "ct0 rejected, asking x.com for a fresh one"
-            );
-            if let Err(err) = self.refresh_stored_ct0(session).await {
-               tracing::warn!(session_id = session.id, "could not refresh ct0: {err}");
-            }
+            // The ct0 this account holds is no longer the one x.com accepts.
+            // It is not refreshed: that meant a full page load of x.com per
+            // rejection, which is where X's anti-bot check runs. The account
+            // is taken out of rotation and the call goes to another one.
+            self.sessions.mark_ct0_dead(session.id).await;
             self.sessions.refund_if_metered(session, endpoint).await;
             return Err(Error::TransientUpstream);
          }
@@ -1631,7 +1621,7 @@ impl ApiClient {
                "x-twitter-auth-type",
                header::HeaderValue::from_static("OAuth2Session"),
             );
-            let ct0 = self.sessions.ct0(session.id).unwrap_or_else(|| session.ct0.clone());
+            let ct0 = session.ct0.clone();
             headers.insert(
                "x-csrf-token",
                ct0.parse()
@@ -1700,7 +1690,7 @@ impl ApiClient {
          "x-twitter-auth-type",
          header::HeaderValue::from_static("OAuth2Session"),
       );
-      let ct0 = self.sessions.ct0(session.id).unwrap_or_else(|| session.ct0.clone());
+      let ct0 = session.ct0.clone();
       headers.insert(
          "x-csrf-token",
          ct0.parse()

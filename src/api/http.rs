@@ -33,6 +33,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::{
    browser::{self, Engine, Identity},
+   cookies::Jar,
    log_events::{self, Event},
 };
 use crate::error::{Error, Result};
@@ -625,6 +626,9 @@ pub struct HttpClient {
    /// Keyed by session and exit so a direct client is never reused for the
    /// fallback proxy.
    sessions: Arc<Mutex<HashMap<(i64, u64), primp::Client>>>,
+   /// The cookies each account has been handed, sent back with its calls and
+   /// replaced by every `set-cookie` an answer carries.
+   cookies: Option<Arc<Jar>>,
 }
 
 /// Response wrapper providing convenience methods.
@@ -665,7 +669,17 @@ impl HttpClient {
          direct_blocked_until: Arc::new(AtomicU64::new(0)),
          extra_headers,
          sessions: Arc::new(Mutex::new(HashMap::new())),
+         cookies: None,
       }
+   }
+
+   /// Keep and replay the cookies each account is handed. Every response is
+   /// read for `set-cookie`, so nothing is asked of x.com that a call in hand
+   /// was not already making.
+   #[must_use]
+   pub fn with_cookies(mut self, jar: Arc<Jar>) -> Self {
+      self.cookies = Some(jar);
+      self
    }
 
    /// Proxy used only when a direct request is answered with an HTML 429.
@@ -1199,14 +1213,24 @@ impl HttpClient {
       via: Option<&Egress>,
    ) -> Result<Response> {
       let client = self.client_for(via)?;
-      let send = || {
+      let mut headers = extra_headers.clone();
+      if let (Some(jar), Some(egress)) = (self.cookies.as_ref(), via) {
+         jar.merge_into(egress.session, &mut headers).await;
+      }
+      let send = || async {
          let mut request = client
             .request(method.clone(), uri)
-            .headers(extra_headers.clone());
+            .headers(headers.clone());
          if !body.is_empty() {
             request = request.body(body.clone());
          }
-         request.send()
+         let result = request.send().await;
+         if let (Some(jar), Some(egress), Ok(response)) =
+            (self.cookies.as_ref(), via, &result)
+         {
+            jar.absorb(egress.session, response.headers()).await;
+         }
+         result
       };
       if self.purpose == Purpose::Media && is_idempotent(method) {
          let inner = match tokio::time::timeout(MEDIA_HEADER_DEADLINE, send()).await {
@@ -1403,9 +1427,11 @@ impl HttpClient {
       retry_via: Option<&Egress>,
    ) -> Result<primp::Response> {
       let client = self.client_for(retry_via)?;
-      let mut request = client
-         .request(method.clone(), uri)
-         .headers(extra_headers.clone());
+      let mut headers = extra_headers.clone();
+      if let (Some(jar), Some(egress)) = (self.cookies.as_ref(), retry_via) {
+         jar.merge_into(egress.session, &mut headers).await;
+      }
+      let mut request = client.request(method.clone(), uri).headers(headers);
       if !body.is_empty() {
          request = request.body(body.clone());
       }
@@ -1413,6 +1439,9 @@ impl HttpClient {
       match request.send().await {
          Ok(inner) => {
             probe.answered();
+            if let (Some(jar), Some(egress)) = (self.cookies.as_ref(), retry_via) {
+               jar.absorb(egress.session, inner.headers()).await;
+            }
             Ok(inner)
          },
          Err(err) => {

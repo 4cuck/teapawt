@@ -142,6 +142,29 @@ impl ApiClient {
          .ok_or_else(|| Error::Internal("verify_credentials missing id_str".into()))
    }
 
+   /// Ask X whether this account is suspended, by writing one setting.
+   ///
+   /// An empty search page is also what a query with no matches and an
+   /// age-gated account produce, so it cannot be read as a verdict. A settings
+   /// write can: a suspended account is answered "not permitted to access this
+   /// feature", a working one takes the write. `None` means the answer said
+   /// nothing either way and the account should be asked again later.
+   pub(crate) async fn probe_search_suspension(&self, session_id: i64) -> Option<bool> {
+      let session = self
+         .sessions
+         .acquire_id(session_id, endpoints::ACCOUNT_SETTINGS)
+         .await
+         .ok()?;
+      match self.set_display_sensitive_media(&session).await {
+         Ok(()) => Some(false),
+         Err(Error::UserSuspended(_)) => Some(true),
+         Err(err) => {
+            tracing::debug!(session_id, "suspension probe inconclusive: {err}");
+            None
+         },
+      }
+   }
+
    async fn set_display_sensitive_media(&self, session: &SessionLease) -> Result<()> {
       let path = "/1.1/account/settings.json";
       let mut headers = self
@@ -220,7 +243,7 @@ impl ApiClient {
       content_type: &'static str,
    ) -> Result<header::HeaderMap> {
       let (bearer, tid) = self.bearer_and_tid_for(method, api_path).await;
-      let ct0 = self.sessions.ct0(session.id).unwrap_or_else(|| session.ct0.clone());
+      let ct0 = session.ct0.clone();
       let mut headers = header::HeaderMap::new();
       headers.insert(
          header::AUTHORIZATION,

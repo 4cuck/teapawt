@@ -400,11 +400,16 @@ mod tests {
             })
             .expect("peet");
          let value: serde_json::Value = serde_json::from_str(&body).expect("json");
-         println!(
-            "round {round}: ja4={} ext_count={}",
-            value["tls"]["ja4"],
-            value["tls"]["ja4_r"].as_str().unwrap_or("")
-         );
+         let ja4 = value["tls"]["ja4"].as_str().unwrap_or_default().to_owned();
+         println!("round {round}: ja4={ja4}");
+         // chrome_157_first_connect.json and chrome_157_second_connect.json:
+         // the first connection has no ticket to offer, every later one does.
+         let expected = if round == 1 {
+            "t13d1517h2_8daaf6152771_cb7bf5808d99"
+         } else {
+            "t13d1518h2_8daaf6152771_e2d80978ab2e"
+         };
+         assert_eq!(ja4, expected, "round {round} drifted from the Chrome 157 capture");
       }
    }
    /// Prints what a Chrome identity actually puts on the wire, to compare with
@@ -444,13 +449,16 @@ mod tests {
          .expect("peet");
       let value: serde_json::Value = serde_json::from_str(&body).expect("json");
       println!("ja4: {}", value["tls"]["ja4"]);
-      println!("ja4_r: {}", value["tls"]["ja4_r"]);
       println!("akamai: {}", value["http2"]["akamai_fingerprint"]);
-      for header in value["http2"]["sent_frames"][2]["headers"]
-         .as_array()
-         .expect("headers")
-      {
-         println!("{header}");
-      }
+      // chrome_157_first_connect.json: what Chrome 157 sends on a new
+      // connection, and what this client must send.
+      assert_eq!(
+         value["tls"]["ja4"], "t13d1517h2_8daaf6152771_cb7bf5808d99",
+         "fresh-connection JA4 drifted from the Chrome 157 capture"
+      );
+      assert_eq!(
+         value["http2"]["akamai_fingerprint"], "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
+         "HTTP/2 fingerprint drifted from the Chrome 157 capture"
+      );
    }
 }

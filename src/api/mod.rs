@@ -2,6 +2,7 @@ mod auth;
 pub mod browser;
 pub mod budget;
 mod client;
+mod cookies;
 mod endpoints;
 mod filters;
 pub mod http;
