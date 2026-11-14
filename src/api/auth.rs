@@ -145,6 +145,7 @@ enum Caller {
 }
 
 /// Why one pass over the pool found no account.
+#[derive(Debug)]
 enum Miss {
    /// None can serve this call: rejected, refused, or not acceptable.
    Nobody,
@@ -637,9 +638,33 @@ impl SessionPool {
                return Err(Error::TransientUpstream);
             },
             Err(miss) => {
-               drop(limits);
+               // Which call found the pool empty, and what the accounts that
+               // serve it looked like at that instant. Without this the 503
+               // says only "rate limited", which is equally consistent with a
+               // burst, a wave of parked accounts, and an exhausted window.
+               let refused = self
+                  .sessions
+                  .iter()
+                  .filter(|slot| {
+                     limits
+                        .get(&slot.credentials.id)
+                        .is_some_and(|lim| lim.refuses(api_for(slot.credentials.kind)))
+                  })
+                  .count();
+               let total = self.sessions.len();
+               let reason = format!("{miss:?}");
                let (outcome, err) = miss.settle();
+               drop(limits);
                note(outcome);
+               if matches!(err, Error::RateLimited) {
+                  tracing::warn!(
+                     operation = label,
+                     miss = %reason,
+                     total,
+                     refused,
+                     "no account had budget for this call"
+                  );
+               }
                return Err(err);
             },
          }

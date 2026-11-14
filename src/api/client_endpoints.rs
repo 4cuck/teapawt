@@ -68,6 +68,9 @@ fn tag_cursor(mut timeline: Timeline, tag: &str) -> Timeline {
 #[derive(Default)]
 struct FirstPage {
    empty: Option<Timeline>,
+   /// A route answered with nothing usable rather than with no quota, so
+   /// running out of calls is not what stopped this page.
+   answered_nothing: bool,
 }
 
 impl FirstPage {
@@ -79,15 +82,25 @@ impl FirstPage {
             self.empty = Some(timeline);
             None
          },
-         Err(err) if another_route_may_answer(&err) => None,
+         Err(err) if another_route_may_answer(&err) => {
+            if matches!(err, Error::TransientUpstream) {
+               self.answered_nothing = true;
+            }
+            None
+         },
          Err(err) => Some(Err(err)),
       }
    }
 
-   /// No route settled it: X sent nothing it could be checked against, or
-   /// every route was out of quota.
+   /// No route settled it.
+   ///
+   /// A route that answered with nothing, or a call shed while its accounts
+   /// were at their concurrency cap, is not a quota problem: telling the
+   /// visitor the instance has reached its upstream rate limit is wrong and
+   /// hides the real ones. Only a page every route refused for want of calls
+   /// is a rate limit.
    const fn unsettled(&self) -> Error {
-      if self.empty.is_some() {
+      if self.empty.is_some() || self.answered_nothing {
          Error::TransientUpstream
       } else {
          Error::RateLimited
@@ -1984,6 +1997,13 @@ mod first_page_tests {
       let mut first = FirstPage::default();
       assert!(first.hear(Err(Error::RateLimited)).is_none());
       assert!(matches!(first.unsettled(), Error::RateLimited));
+   }
+
+   #[test]
+   fn a_shed_call_is_not_reported_as_a_rate_limit() {
+      let mut first = FirstPage::default();
+      assert!(first.hear(Err(Error::TransientUpstream)).is_none());
+      assert!(matches!(first.unsettled(), Error::TransientUpstream));
    }
 
    #[test]
