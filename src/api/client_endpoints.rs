@@ -1084,7 +1084,10 @@ impl ApiClient {
    /// Search tweets.
    ///
    /// A query X has already rejected is rewritten before the request. A new
-   /// rejection is saved and retried once with that rewrite.
+   /// rejection is saved and retried once with that rewrite. A page X answers
+   /// with no posts is returned as that page: it is what a query with no
+   /// matches gets, and showing it as a failure invites a refresh that spends
+   /// the search again.
    pub async fn search(
       &self,
       query: &str,
@@ -1105,9 +1108,11 @@ impl ApiClient {
                   self.denylist.remember(&retry);
                   Err(Error::SearchDenylisted)
                },
+               Err(Error::TransientUpstream) => Ok(Timeline::default()),
                other => other,
             }
          },
+         Err(Error::TransientUpstream) => Ok(Timeline::default()),
          other => other,
       }
    }

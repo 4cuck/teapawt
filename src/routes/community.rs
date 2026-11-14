@@ -92,6 +92,7 @@ async fn community_media(
          &prefs,
          None,
          view,
+         "No items found",
       );
       return Ok(Html(fragment.into_string()).into_response());
    }
@@ -115,6 +116,7 @@ async fn community_media(
          &prefs,
          None,
          view,
+         "No items found",
       )),
    )
 }

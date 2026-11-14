@@ -1159,10 +1159,10 @@ impl SessionPool {
    }
 
    /// Leave a session out of one operation X answers it nothing for. A search
-   /// refusal rests the account for an hour, since an empty page is also what
-   /// a query with no matches and an age-gated or filtered account produce.
-   /// The account stays in the search pool so it is not mixed back into
-   /// profile reads. Other refusals expire after a day.
+   /// refusal rests the account for three minutes: an empty page is also what
+   /// a query with no matches and an age-gated or filtered account produce,
+   /// so it is not a ban. The account stays in the search pool so it is not
+   /// mixed back into profile reads. Other refusals expire after a day.
    pub async fn mark_refused(&self, session_id: i64, api: &str) {
       let username = self
          .sessions
@@ -1171,28 +1171,19 @@ impl SessionPool {
          .map(|slot| slot.credentials.username.clone())
          .unwrap_or_default();
       let mut limits = self.limits.write().await;
-      let mut banned = false;
       if let Some(lim) = limits.get_mut(&session_id) {
          lim.refuse(api);
-         if api.ends_with("SearchTimeline") {
-            banned = lim.note_search_refusal();
-         }
       }
       drop(limits);
       if api.ends_with("SearchTimeline") {
-         if banned {
-            tracing::info!(
-               session_id,
-               session_user = %username,
-               "this account has answered no search three times while another did; out of search"
-            );
-         } else {
-            tracing::debug!(
-               session_id,
-               session_user = %username,
-               "account answered no search while another did; resting it"
-            );
-         }
+         // Rested, not banned. An empty page is also a query with no matches,
+         // and a count of those banned accounts that still search. Only the
+         // settings probe, which a suspended account refuses, takes it out.
+         tracing::debug!(
+            session_id,
+            session_user = %username,
+            "account answered no search while another did; resting it"
+         );
          log_events::note(Event::SearchRested);
       }
       self.persist_soon(session_id);

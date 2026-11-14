@@ -119,6 +119,7 @@ pub fn render_search_results_with_prefs(
                prefs,
                newer_url,
                media_view,
+               "X returned no posts for this search.",
            ))
        }
    }

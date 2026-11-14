@@ -70,12 +70,6 @@ pub struct SessionLimits {
    /// so a search suspension cannot spread through profile traffic.
    #[serde(default)]
    pub search_only: bool,
-   /// Corroborated empty searches: X answered this account nothing while
-   /// another account got posts for the same query. One is not a verdict —
-   /// an empty page is also what a query with no matches and an age-gated
-   /// account produce — but three across rest cycles is.
-   #[serde(default)]
-   pub search_strikes: u32,
    /// X will not serve this account search, and waiting does not change it.
    /// It stays in the pool for profile reads and stops being tried for search.
    #[serde(default)]
@@ -134,20 +128,13 @@ const GLOBAL_LIMIT_DURATION_SECS: i64 = 15 * 60;
 /// tried again in case X lifted the restriction.
 const REFUSED_OP_SECS: i64 = 24 * 60 * 60;
 
-/// Corroborated empty searches after which an account is out of search for
-/// good. Six rest cycles at ten minutes is about an hour of evidence, so an
-/// account is not retired over a handful of queries that simply had no
-/// matches.
-const SEARCH_STRIKE_LIMIT: u32 = 6;
-
 /// How long an account sits out search after an empty page.
 ///
 /// An empty page is weak evidence — a query with no matches, an age gate, or
 /// an NSFW filter all produce one — so the account is rested rather than
-/// retired. Ten minutes keeps it out of the way of the query that just came
-/// back empty while returning it to the pool quickly enough that the rest
-/// does not drain a pool this size; the strike limit is scaled to match, so
-/// a permanent verdict still needs about an hour of corroborated empties.
+/// retired. Three minutes keeps it out of the way of the query that just came
+/// back empty. A ban is a separate decision: only a settings write that X
+/// refuses sets one.
 const SEARCH_REFUSED_SECS: i64 = 3 * 60;
 
 /// `SearchTimeline` from `ph2fARFabkwfxqmSKQ1OPw/SearchTimeline`, so a mark
@@ -321,22 +308,6 @@ impl SessionLimits {
          .retain(|_, at| now - *at < REFUSED_OP_SECS);
       self.refused_ops.insert(name.to_owned(), now);
       self.verified_ops.remove(name);
-   }
-
-   /// Count one empty search that another account answered with posts, and
-   /// say whether this was the one that settled it.
-   ///
-   /// The rest [`Self::refuse`] applies keeps the account out of search for an
-   /// hour. An account X has suspended from search comes back from every rest
-   /// and answers nothing again, so without a limit it is retried for as long
-   /// as the process runs. Three corroborated empties across rest cycles is
-   /// enough to stop trying.
-   pub fn note_search_refusal(&mut self) -> bool {
-      self.search_strikes = self.search_strikes.saturating_add(1);
-      if self.search_strikes >= SEARCH_STRIKE_LIMIT {
-         self.search_banned = true;
-      }
-      self.search_banned
    }
 
    /// Whether this account has been seen getting results for `api`.
@@ -524,7 +495,6 @@ impl Session {
             profile_strikes: 0,
             profile_banned: false,
             search_only: self.pool.eq_ignore_ascii_case("search"),
-            search_strikes: 0,
             search_banned: false,
             ct0_dead: false,
             suspicion_checked: false,
@@ -639,21 +609,16 @@ mod tests {
    }
 
    #[test]
-   fn corroborated_empty_searches_take_an_account_out_for_good() {
+   fn repeated_empty_searches_do_not_ban_the_account() {
       let mut limits = SessionLimits::default();
 
-      // One empty page is also a query with no matches, or filters still on.
-      assert!(!limits.note_search_refusal());
-      assert!(!limits.search_banned);
-
-      for _ in 1..SEARCH_STRIKE_LIMIT - 1 {
-         assert!(!limits.note_search_refusal());
+      // A query with no matches comes back empty from every account, so a
+      // count of them is not a suspension. Only the settings probe sets this.
+      for _ in 0..6 {
+         limits.refuse("ph2f/SearchTimeline");
       }
-      assert!(limits.note_search_refusal(), "the limit is a verdict");
-      assert!(limits.search_banned);
+      assert!(!limits.search_banned);
       assert!(limits.refuses("ph2f/SearchTimeline"));
-
-      // Only search is closed to it: a pool account keeps reading profiles.
       assert!(!limits.refuses("x/UserTweets"));
    }
 

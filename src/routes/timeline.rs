@@ -665,6 +665,7 @@ async fn user_tab_handler(
                prefs,
                None,
                if tab == TimelineKind::Media { view } else { "" },
+               "No items found",
             );
             Ok(Html(content.into_string()).into_response())
          },
@@ -718,6 +719,7 @@ async fn user_tab_handler(
                  prefs,
                  newer,
                  if tab == TimelineKind::Media { view } else { "" },
+                 "No items found",
              ))
          };
          let show_articles = if tab == TimelineKind::Articles {

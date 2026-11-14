@@ -19,7 +19,17 @@ pub fn render_timeline(
    cursor: Option<&str>,
    base_url: Option<&str>,
 ) -> Markup {
-   render_timeline_full(groups, config, cursor, base_url, None, None, None, "")
+   render_timeline_full(
+      groups,
+      config,
+      cursor,
+      base_url,
+      None,
+      None,
+      None,
+      "",
+      "No items found",
+   )
 }
 
 /// Render a timeline with prefs support (for bidi).
@@ -40,6 +50,7 @@ pub fn render_timeline_with_prefs(
       Some(prefs),
       newer_url,
       "",
+      "No items found",
    )
 }
 
@@ -52,6 +63,7 @@ pub fn render_timeline_with_view(
    prefs: &Prefs,
    newer_url: Option<&str>,
    view: &str,
+   empty: &'static str,
 ) -> Markup {
    render_timeline_full(
       groups,
@@ -62,6 +74,7 @@ pub fn render_timeline_with_view(
       Some(prefs),
       newer_url,
       view,
+      empty,
    )
 }
 
@@ -76,7 +89,15 @@ pub fn render_timeline_with_pinned_and_prefs(
    newer_url: Option<&str>,
 ) -> Markup {
    render_timeline_full(
-      groups, config, cursor, base_url, pinned, prefs, newer_url, "",
+      groups,
+      config,
+      cursor,
+      base_url,
+      pinned,
+      prefs,
+      newer_url,
+      "",
+      "No items found",
    )
 }
 
@@ -98,15 +119,6 @@ fn render_no_more() -> Markup {
    html! {
        div class="timeline-footer" {
            h2 class="timeline-end" { "No more items" }
-       }
-   }
-}
-
-/// Render "No items found" header.
-fn render_none_found() -> Markup {
-   html! {
-       div class="timeline-header" {
-           h2 class="timeline-none" { "No items found" }
        }
    }
 }
@@ -180,6 +192,7 @@ fn render_timeline_full(
    prefs: Option<&Prefs>,
    newer_url: Option<&str>,
    view: &str,
+   empty: &'static str,
 ) -> Markup {
    let load_more_url = match (cursor, base_url) {
       (Some(cur), Some(base)) => Some(formatters::cursor_url(base, cur)),
@@ -223,7 +236,9 @@ fn render_timeline_full(
            }
 
            @if !has_tweets && load_more_url.is_none() {
-               (render_none_found())
+               div class="timeline-header" {
+                   h2 class="timeline-none" { (empty) }
+               }
            }
 
            // Pagination is independent of visible cards. A media page can be
