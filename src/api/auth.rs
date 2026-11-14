@@ -87,6 +87,8 @@ pub struct SessionPool {
    state: Option<Arc<LimitState>>,
    /// `sessions.jsonl` this pool was loaded from.
    source_path: String,
+   /// `ct0`s x.com issued on a rejection, waiting to be written back.
+   pending_ct0: Arc<std::sync::Mutex<Vec<(i64, String)>>>,
    /// Calls parked until an account frees up, for the minute report.
    waiting: Arc<AtomicUsize>,
    /// Time each call spent getting an account, reported every minute.
@@ -192,6 +194,10 @@ struct PoolCount {
 
 struct SessionSlot {
    credentials: Arc<SessionCredentials>,
+   /// A `ct0` x.com issued on a rejection, sent in place of the stored one.
+   /// The credentials are shared and loaded once, so the fresh value lives
+   /// here and is written back to the sessions file for the next start.
+   fresh_ct0: Arc<std::sync::RwLock<Option<String>>>,
    permits: Arc<Semaphore>,
    max_concurrency: usize,
    /// Signaled when a lease on this account returns its permit, waking one
@@ -324,6 +330,7 @@ impl SessionPool {
          let id = creds.id;
          sessions.push(SessionSlot {
             credentials: Arc::new(creds),
+            fresh_ct0: Arc::new(std::sync::RwLock::new(None)),
             permits: Arc::new(Semaphore::new(max_concurrency)),
             max_concurrency,
             freed: Arc::new(Notify::new()),
@@ -391,6 +398,7 @@ impl SessionPool {
          state,
          source_path: path.to_owned(),
          waiting: Arc::default(),
+         pending_ct0: Arc::default(),
          queue: Arc::default(),
       };
       pool.spawn_flusher();
@@ -1308,6 +1316,65 @@ impl SessionPool {
          .map(|slot| Arc::clone(&slot.credentials))
    }
 
+   /// The `ct0` to send: one x.com issued on a rejection since startup, or the
+   /// one loaded from the sessions file.
+   pub fn ct0(&self, session_id: i64) -> Option<String> {
+      let slot = self.sessions.iter().find(|slot| slot.credentials.id == session_id)?;
+      let fresh = slot
+         .fresh_ct0
+         .read()
+         .unwrap_or_else(std::sync::PoisonError::into_inner)
+         .clone();
+      Some(fresh.unwrap_or_else(|| slot.credentials.ct0.clone()))
+   }
+
+   /// Keep a `ct0` x.com just issued and write it back for the next start.
+   ///
+   /// No request is made for it: a csrf rejection carries the replacement
+   /// token in its own `set-cookie`, so the account recovers on the call that
+   /// failed instead of costing a page load of x.com.
+   pub fn hold_ct0(&self, session_id: i64, ct0: String) {
+      let Some(slot) = self.sessions.iter().find(|slot| slot.credentials.id == session_id) else {
+         return;
+      };
+      *slot
+         .fresh_ct0
+         .write()
+         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ct0.clone());
+      self
+         .pending_ct0
+         .lock()
+         .unwrap_or_else(std::sync::PoisonError::into_inner)
+         .push((session_id, ct0));
+      let pool = self.clone();
+      tokio::spawn(async move {
+         sleep(Duration::from_secs(2)).await;
+         if let Err(err) = pool.flush_ct0().await {
+            tracing::warn!("could not store the fresh ct0s: {err}");
+         }
+      });
+   }
+
+   async fn flush_ct0(&self) -> Result<()> {
+      let pending = std::mem::take(
+         &mut *self.pending_ct0.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+      );
+      if pending.is_empty() {
+         return Ok(());
+      }
+      store_session_ct0s(&self.source_path, &pending).await.map(|_| ())
+   }
+
+   /// Put a retired account back in rotation: x.com issued it a token again.
+   pub async fn clear_ct0_dead(&self, session_id: i64) {
+      let mut limits = self.limits.write().await;
+      if let Some(lim) = limits.get_mut(&session_id) {
+         lim.ct0_dead = false;
+      }
+      drop(limits);
+      self.persist_soon(session_id);
+   }
+
    /// X rejected this account's `ct0`, so every csrf-protected call it makes
    /// will be refused until the account is imported again.
    ///
@@ -1535,6 +1602,56 @@ pub fn oauth1_sign(
       .join(", ");
 
    format!("OAuth {auth_header}")
+}
+
+/// Replace the `ct0` stored for each of these accounts, in one rewrite.
+async fn store_session_ct0s(path: &str, fresh: &[(i64, String)]) -> Result<usize> {
+   if fresh.is_empty() {
+      return Ok(0);
+   }
+   let ct0s: HashMap<i64, &str> = fresh.iter().map(|(id, ct0)| (*id, ct0.as_str())).collect();
+   let content = fs::read_to_string(path).await?;
+   let mut kept = String::with_capacity(content.len());
+   let mut changed = 0_usize;
+   for line in content.lines() {
+      if line.trim().is_empty() {
+         continue;
+      }
+      let Some(id) = session_line_id(line) else {
+         kept.push_str(line);
+         kept.push('\n');
+         continue;
+      };
+      let Some(ct0) = ct0s.get(&id) else {
+         kept.push_str(line);
+         kept.push('\n');
+         continue;
+      };
+      match retarget_ct0(line, ct0) {
+         Some(updated) => {
+            changed += 1;
+            kept.push_str(&updated);
+         },
+         None => kept.push_str(line),
+      }
+      kept.push('\n');
+   }
+   if changed == 0 {
+      return Ok(0);
+   }
+   let tmp = format!("{path}.tmp");
+   fs::write(&tmp, kept).await?;
+   fs::rename(&tmp, path).await?;
+   Ok(changed)
+}
+
+fn retarget_ct0(line: &str, ct0: &str) -> Option<String> {
+   let mut value: serde_json::Value = serde_json::from_str(line).ok()?;
+   if value.get("ct0").and_then(|item| item.as_str()) == Some(ct0) {
+      return None;
+   }
+   value["ct0"] = serde_json::Value::String(ct0.to_owned());
+   serde_json::to_string(&value).ok()
 }
 
 /// Drop `pool` from one account's line, so the next start loads it into the

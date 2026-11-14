@@ -352,6 +352,14 @@ fn log_upstream(body: &str) -> String {
    body.to_owned()
 }
 
+/// The `ct0` in one `set-cookie` line, when it is the one X just issued.
+fn ct0_cookie(value: &header::HeaderValue) -> Option<String> {
+   let text = value.to_str().ok()?;
+   let (pair, _) = text.split_once(';').unwrap_or((text, ""));
+   let (name, cookie) = pair.split_once('=')?;
+   (name.trim() == "ct0" && !cookie.trim().is_empty()).then(|| cookie.trim().to_owned())
+}
+
 fn twitter_error_code(body: &str) -> Option<i64> {
    #[derive(Deserialize)]
    struct ErrorCheck {
@@ -1386,6 +1394,13 @@ impl ApiClient {
          // skipped the other accounts that still had budget and returned
          // 429 to the visitor.
          let account_window = account_rate_window(response.headers());
+         // A csrf rejection carries the replacement token in its own
+         // `set-cookie`, read here before the body is taken.
+         let fresh_ct0 = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .find_map(ct0_cookie);
          let body = response.text().await.unwrap_or_default();
          let shown = log_upstream(&body);
 
@@ -1475,10 +1490,17 @@ impl ApiClient {
 
          if status.as_u16() == 403 && twitter_error_code(&body) == Some(353) {
             // The ct0 this account holds is no longer the one x.com accepts.
-            // It is not refreshed: that meant a full page load of x.com per
-            // rejection, which is where X's anti-bot check runs. The account
-            // is taken out of rotation and the call goes to another one.
-            self.sessions.mark_ct0_dead(session.id).await;
+            // The rejection itself carries the replacement in its set-cookie,
+            // so the account recovers on this call: no page load of x.com, and
+            // no second request. Only an account X answers without a token is
+            // taken out of rotation.
+            match fresh_ct0.filter(|ct0| ct0 != &session.ct0) {
+               Some(ct0) => {
+                  self.sessions.hold_ct0(session.id, ct0);
+                  self.sessions.clear_ct0_dead(session.id).await;
+               },
+               None => self.sessions.mark_ct0_dead(session.id).await,
+            }
             self.sessions.refund_if_metered(session, endpoint).await;
             return Err(Error::TransientUpstream);
          }
@@ -1621,7 +1643,7 @@ impl ApiClient {
                "x-twitter-auth-type",
                header::HeaderValue::from_static("OAuth2Session"),
             );
-            let ct0 = session.ct0.clone();
+            let ct0 = self.sessions.ct0(session.id).unwrap_or_else(|| session.ct0.clone());
             headers.insert(
                "x-csrf-token",
                ct0.parse()
@@ -1690,7 +1712,7 @@ impl ApiClient {
          "x-twitter-auth-type",
          header::HeaderValue::from_static("OAuth2Session"),
       );
-      let ct0 = session.ct0.clone();
+      let ct0 = self.sessions.ct0(session.id).unwrap_or_else(|| session.ct0.clone());
       headers.insert(
          "x-csrf-token",
          ct0.parse()

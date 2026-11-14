@@ -246,7 +246,7 @@ impl ApiClient {
       content_type: &'static str,
    ) -> Result<header::HeaderMap> {
       let (bearer, tid) = self.bearer_and_tid_for(method, api_path).await;
-      let ct0 = session.ct0.clone();
+      let ct0 = self.sessions.ct0(session.id).unwrap_or_else(|| session.ct0.clone());
       let mut headers = header::HeaderMap::new();
       headers.insert(
          header::AUTHORIZATION,
