@@ -148,7 +148,7 @@ const SEARCH_STRIKE_LIMIT: u32 = 6;
 /// back empty while returning it to the pool quickly enough that the rest
 /// does not drain a pool this size; the strike limit is scaled to match, so
 /// a permanent verdict still needs about an hour of corroborated empties.
-const SEARCH_REFUSED_SECS: i64 = 10 * 60;
+const SEARCH_REFUSED_SECS: i64 = 3 * 60;
 
 /// `SearchTimeline` from `ph2fARFabkwfxqmSKQ1OPw/SearchTimeline`, so a mark
 /// outlives a change of query id.
@@ -621,14 +621,14 @@ mod tests {
    }
 
    #[test]
-   fn a_search_refusal_expires_after_ten_minutes() {
+   fn a_search_refusal_expires_after_three_minutes() {
       let mut limits = SessionLimits::default();
       limits.refuse("old/SearchTimeline");
       assert!(limits.refuses("new/SearchTimeline"));
 
-      // Ten minutes of rest, then search is tried again: the empty page may
+      // Three minutes of rest, then search is tried again: the empty page may
       // have been the query's, or the account's own filters hiding it.
-      *limits.refused_ops.get_mut("SearchTimeline").unwrap() -= 11 * 60;
+      *limits.refused_ops.get_mut("SearchTimeline").unwrap() -= 4 * 60;
       assert!(!limits.refuses("new/SearchTimeline"));
 
       // Other operations come back after a day.
