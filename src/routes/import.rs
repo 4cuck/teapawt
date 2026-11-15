@@ -127,9 +127,10 @@ async fn private(request: Request, next: Next) -> Response {
       "x-robots-tag",
       HeaderValue::from_static("noindex, nofollow"),
    );
+   // `no-referrer` can also null out Origin on a browser's form POST.
    headers.insert(
       header::REFERRER_POLICY,
-      HeaderValue::from_static("no-referrer"),
+      HeaderValue::from_static("same-origin"),
    );
    headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(
       "default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
@@ -255,7 +256,11 @@ async fn admin<B: Backend>(State(state): State<B>, jar: CookieJar) -> Response {
 async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Request) -> Response {
    let origin = state.origin();
    if cross_origin(request.headers(), &origin) {
-      return StatusCode::FORBIDDEN.into_response();
+      return (
+         StatusCode::FORBIDDEN,
+         "The form must be submitted from the same site. Reload /import/admin and try again.",
+      )
+         .into_response();
    }
    let theme = state.theme(&jar);
    let Some(session) = jar
@@ -579,6 +584,7 @@ mod tests {
          .await
          .unwrap();
       assert_private(&response, StatusCode::OK);
+      assert_eq!(response.headers()[header::REFERRER_POLICY], "same-origin");
       let html = body(response).await;
       assert!(html.contains("method=\"post\" action=\"/import/admin\""));
       assert!(!html.contains(ADMIN));
@@ -595,6 +601,7 @@ mod tests {
          (Some("ordinary-pass-holder"), ORIGIN, csrf),
          (Some("another-admin"), ORIGIN, csrf),
          (Some(ADMIN), "https://other.example.test", csrf),
+         (Some(ADMIN), "null", csrf),
          (Some(ADMIN), ORIGIN, ""),
          (Some(ADMIN), ORIGIN, expired.as_str()),
       ] {
