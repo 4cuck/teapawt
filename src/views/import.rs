@@ -5,7 +5,9 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::accounts::{ImportSummary, Stats};
 
-use super::layout::{CLEAN_CSS, STYLE_CSS};
+use super::layout::{CLEAN_CSS, STYLE_CSS, theme_stylesheet};
+
+const IMPORT_CSS: &str = "/css/import.css?v=3";
 
 pub(crate) const PUBLIC_PATH: &str = "/import";
 pub(crate) const ADMIN_PATH: &str = "/import/admin";
@@ -22,7 +24,7 @@ pub(crate) struct Snapshot {
    pub updated: OffsetDateTime,
 }
 
-fn page(title: &str, dashboard: bool, content: Markup) -> Markup {
+fn page(theme: &str, title: &str, dashboard: bool, content: Markup) -> Markup {
    html! {
       (DOCTYPE)
       html lang="en" {
@@ -32,7 +34,10 @@ fn page(title: &str, dashboard: bool, content: Markup) -> Markup {
             title { (title) }
             link rel="stylesheet" href=(STYLE_CSS);
             link rel="stylesheet" href=(CLEAN_CSS);
-            link rel="stylesheet" href="/css/import.css?v=2";
+            @if let Some(href) = theme_stylesheet(theme) {
+               link rel="stylesheet" href=(href);
+            }
+            link rel="stylesheet" href=(IMPORT_CSS);
             @if dashboard {
                script src="/js/htmx.min.js" defer="" {}
             } @else {
@@ -50,8 +55,9 @@ fn page(title: &str, dashboard: bool, content: Markup) -> Markup {
    }
 }
 
-pub(crate) fn dashboard(snapshot: Option<&Snapshot>) -> Markup {
+pub(crate) fn dashboard(theme: &str, snapshot: Option<&Snapshot>) -> Markup {
    page(
+      theme,
       "Account inventory",
       true,
       html! {
@@ -130,17 +136,19 @@ fn summary_line(values: &ImportSummary) -> Markup {
    html! {
       (values.imported) " added"
       @if values.duplicates > 0 { ", " (values.duplicates) " duplicates" }
-      @if values.invalid > 0 { ", " (values.invalid) " invalid" }
+      @if values.invalid > 0 { ", " (values.invalid) " skipped (incomplete or invalid)" }
    }
 }
 
 pub(crate) fn admin(
+   theme: &str,
    csrf: &str,
    max_chars: usize,
    max_lines: usize,
    notice: Option<&AdminNotice>,
 ) -> Markup {
    page(
+      theme,
       "Import accounts",
       false,
       html! {
@@ -170,7 +178,9 @@ pub(crate) fn admin(
                div class="import-field" {
                   label for="import-accounts" { "Account data" }
                   p class="import-help" id="import-help" {
-                     "Paste an account export or a Netscape cookie file. Up to "
+                     "Paste a colon- or dash-delimited account export, a Netscape cookie file, "
+                     "a JSON cookie export, or one Cookie header per line. Records missing "
+                     code { "auth_token" } " or " code { "ct0" } " are skipped. Up to "
                      (max_lines) " lines and 256 KiB. Not shown after submit."
                   }
                   textarea id="import-accounts" name="accounts" rows="12" maxlength=(max_chars)
@@ -186,8 +196,9 @@ pub(crate) fn admin(
    )
 }
 
-pub(crate) fn forbidden() -> Markup {
+pub(crate) fn forbidden(theme: &str) -> Markup {
    page(
+      theme,
       "Import accounts",
       false,
       html! {

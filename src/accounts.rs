@@ -566,22 +566,121 @@ fn parse_import(text: &str) -> (Vec<(Session, CookieJar)>, ImportSummary) {
          || line.starts_with("#HttpOnly_")
          || (!line.starts_with('#') && line.bytes().filter(|&byte| byte == b'\t').count() == 6)
    });
-   if netscape {
-      if let Some(account) = parse_netscape(text) {
-         accounts.push(account);
-      } else {
-         summary.invalid = 1;
-      }
+   let mut record = |account| match account {
+      Some(account) => accounts.push(account),
+      None => summary.invalid += 1,
+   };
+   if let Ok(value) = serde_json::from_str::<Value>(text) {
+      parse_json_import(&value, &mut record);
+   } else if netscape {
+      record(parse_netscape(text));
    } else {
       for line in lines.filter(|line| !line.is_empty() && !line.starts_with('#')) {
-         if let Some(session) = parse_export(line) {
-            accounts.push((session, CookieJar::new()));
+         if line.starts_with(['{', '[']) {
+            match serde_json::from_str::<Value>(line) {
+               Ok(value) => parse_json_import(&value, &mut record),
+               Err(_) => record(None),
+            }
+         } else if let Some(header) = cookie_header(line) {
+            record(parse_cookie_header(header));
          } else {
-            summary.invalid += 1;
+            record(parse_export(line).map(|session| (session, CookieJar::new())));
          }
       }
    }
    (accounts, summary)
+}
+
+fn cookie_header(line: &str) -> Option<&str> {
+   if let Some((name, value)) = line.split_once(':') {
+      if name.eq_ignore_ascii_case("cookie") {
+         return Some(value);
+      }
+   }
+   line.split(';')
+      .filter_map(|pair| pair.split_once('='))
+      .any(|(name, _)| matches!(name.trim(), AUTH | CSRF))
+      .then_some(line)
+}
+
+fn parse_cookie_header(header: &str) -> Option<(Session, CookieJar)> {
+   let mut jar = CookieJar::new();
+   for pair in header.split(';').map(str::trim).filter(|pair| !pair.is_empty()) {
+      let (name, value) = pair.split_once('=')?;
+      insert_import_cookie(&mut jar, name.trim(), value.trim())?;
+   }
+   finish_import_jar(jar)
+}
+
+fn parse_json_import(value: &Value, record: &mut impl FnMut(Option<(Session, CookieJar)>)) {
+   match value {
+      Value::Array(items) if !items.iter().any(|item| item.get("name").is_some()) => {
+         for item in items {
+            parse_json_import(item, record);
+         }
+      },
+      _ => record(parse_json_jar(value)),
+   }
+}
+
+fn parse_json_jar(value: &Value) -> Option<(Session, CookieJar)> {
+   let mut jar = CookieJar::new();
+   let data = value.get("cookies").unwrap_or(value);
+   match data {
+      Value::Array(entries) => {
+         for entry in entries {
+            let name = entry.get("name")?.as_str()?;
+            let value = entry.get("value")?.as_str()?;
+            if let Some(domain) = entry.get("domain") {
+               if !import_domain(domain.as_str()?) {
+                  continue;
+               }
+            }
+            if let Some(path) = entry.get("path") {
+               if path.as_str()? != "/" {
+                  continue;
+               }
+            }
+            insert_import_cookie(&mut jar, name, value)?;
+         }
+      },
+      Value::Object(cookies) if value.get("cookies").is_some() => {
+         for (name, value) in cookies {
+            insert_import_cookie(&mut jar, name, value.as_str()?)?;
+         }
+      },
+      Value::Object(cookies) => {
+         // Bare objects can be session exports with metadata, not just cookie maps.
+         for name in [AUTH, CSRF, "twid"] {
+            if let Some(value) = cookies.get(name) {
+               insert_import_cookie(&mut jar, name, value.as_str()?)?;
+            }
+         }
+      },
+      _ => return None,
+   }
+   let (mut session, jar) = finish_import_jar(jar)?;
+   if let Some(username) = value.get("username").and_then(Value::as_str) {
+      if !username.is_empty() && !username.chars().any(char::is_control) {
+         username.clone_into(&mut session.username);
+      }
+   }
+   Some((session, jar))
+}
+
+fn import_domain(domain: &str) -> bool {
+   let domain = domain.strip_prefix('.').unwrap_or(domain);
+   domain.eq_ignore_ascii_case("x.com") || domain.eq_ignore_ascii_case("twitter.com")
+}
+
+fn insert_import_cookie(jar: &mut CookieJar, name: &str, value: &str) -> Option<()> {
+   if !valid_cookie(name, value)
+      || (matches!(name, AUTH | CSRF | "twid") && jar.get(name).is_some_and(|saved| saved != value))
+   {
+      return None;
+   }
+   jar.insert(name.to_owned(), value.to_owned());
+   Some(())
 }
 
 fn is_hex(field: &str, length: usize) -> bool {
@@ -637,8 +736,7 @@ fn parse_netscape(text: &str) -> Option<(Session, CookieJar)> {
       };
       let [domain, subdomains, path, secure, expiration, name, value] =
          line.split('\t').collect::<Vec<_>>().try_into().ok()?;
-      let domain = domain.strip_prefix('.').unwrap_or(domain);
-      if !(domain.eq_ignore_ascii_case("x.com") || domain.eq_ignore_ascii_case("twitter.com")) {
+      if !import_domain(domain) {
          continue;
       }
       if !matches!(subdomains, "TRUE" | "FALSE")
@@ -652,14 +750,12 @@ fn parse_netscape(text: &str) -> Option<(Session, CookieJar)> {
       if path != "/" {
          continue;
       }
-      if !valid_cookie(name, value) {
-         return None;
-      }
-      if matches!(name, AUTH | CSRF | "twid") && jar.get(name).is_some_and(|saved| saved != value) {
-         return None;
-      }
-      jar.insert(name.to_owned(), value.to_owned());
+      insert_import_cookie(&mut jar, name, value)?;
    }
+   finish_import_jar(jar)
+}
+
+fn finish_import_jar(mut jar: CookieJar) -> Option<(Session, CookieJar)> {
    let auth_token = jar.remove(AUTH).filter(|value| !value.is_empty())?;
    let ct0 = jar.remove(CSRF).filter(|value| !value.is_empty())?;
    let username = jar
@@ -707,6 +803,25 @@ mod tests {
          assert_eq!(session.kind, SessionKind::Cookie);
          assert!(jar.is_empty());
       }
+   }
+
+   #[test]
+   fn parses_headers_and_json_without_pairing_incomplete_accounts() {
+      let text = concat!(
+         "Cookie: auth_token=fake-a; ct0=fake-b; lang=en\n",
+         "auth_token=missing-csrf\n",
+         "ct0=missing-auth\n",
+         "{\"username\":\"demo\",\"auth_token\":\"fake-c\",\"ct0\":\"fake-d\"}\n",
+         "[{\"name\":\"auth_token\",\"value\":\"fake-e\",\"domain\":\".x.com\"},",
+         "{\"name\":\"ct0\",\"value\":\"fake-f\",\"path\":\"/\"}]\n",
+         "{\"cookies\":{\"auth_token\":\"fake-g\",\"ct0\":\"\"}}\n",
+      );
+      let (accounts, summary) = parse_import(text);
+      assert_eq!(summary.invalid, 3);
+      assert_eq!(accounts.len(), 3);
+      assert_eq!(accounts[0].1["lang"], "en");
+      assert_eq!(accounts[1].0.username, "demo");
+      assert_eq!(accounts[2].0.ct0, "fake-f");
    }
 
    #[test]

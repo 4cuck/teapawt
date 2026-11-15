@@ -9,6 +9,17 @@ pub const STYLE_CSS: &str = "/css/style.css?teapawt11";
 pub const CLEAN_CSS: &str = "/css/clean.css?teapawt47";
 pub const FONTELLO_CSS: &str = "/css/fontello.css";
 
+pub(super) fn theme_stylesheet(theme: &str) -> Option<String> {
+   let name = theme.to_lowercase().replace(' ', "_");
+   if name.is_empty()
+      || name == "teapot"
+      || !name.bytes().all(|byte| byte.is_ascii_lowercase() || matches!(byte, b'_' | b'(' | b')'))
+   {
+      return None;
+   }
+   Some(format!("/css/themes/{name}.css?teapawt17"))
+}
+
 /// Builder for rendering a full page layout.
 #[expect(
    clippy::module_name_repetitions,
@@ -134,15 +145,7 @@ impl<'a> PageLayout<'a> {
 
       let body_class = if sticky_nav { "fixed-nav" } else { "" };
 
-      let theme_href = match theme {
-         Some(theme_name) if !theme_name.is_empty() && theme_name.to_lowercase() != "teapot" => {
-            Some(format!(
-               "/css/themes/{}.css?teapawt17",
-               theme_name.to_lowercase().replace(' ', "_")
-            ))
-         },
-         _ => None,
-      };
+      let theme_href = theme.and_then(theme_stylesheet);
       let mask_icon_color = if self.custom_og {
          self.theme_color
       } else {

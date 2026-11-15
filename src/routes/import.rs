@@ -20,6 +20,7 @@ use crate::{
    AppState,
    accounts::ImportSummary,
    passes::SESSION_COOKIE,
+   types::Prefs,
    utils::host::current_origin,
    views::import::{self as view, AdminNotice, Snapshot},
 };
@@ -36,6 +37,7 @@ trait Backend: Clone + Send + Sync + 'static {
    fn snapshot(&self) -> impl Future<Output = Option<Snapshot>> + Send;
    fn administrator(&self, jar: &CookieJar) -> impl Future<Output = bool> + Send;
    fn csrf_key(&self) -> &str;
+   fn theme(&self, jar: &CookieJar) -> String;
    fn origin(&self) -> String;
    fn upload(&self, text: &str, search: bool)
    -> impl Future<Output = Option<ImportSummary>> + Send;
@@ -63,6 +65,10 @@ impl Backend for AppState {
          .account(id)
          .await
          .is_ok_and(|account| account.is_some_and(|a| a.is_admin()))
+   }
+
+   fn theme(&self, jar: &CookieJar) -> String {
+      Prefs::from_cookies(jar, &self.config).theme
    }
 
    fn csrf_key(&self) -> &str {
@@ -101,9 +107,7 @@ fn admin_routes<B: Backend>() -> Router<B> {
    )
 }
 
-async fn private(request: Request, next: Next) -> Response {
-   let mut response = next.run(request).await;
-   let headers = response.headers_mut();
+fn no_store(headers: &mut HeaderMap) {
    headers.insert(
       header::CACHE_CONTROL,
       HeaderValue::from_static("private, no-store"),
@@ -113,6 +117,12 @@ async fn private(request: Request, next: Next) -> Response {
       "cloudflare-cdn-cache-control",
       HeaderValue::from_static("no-store"),
    );
+}
+
+async fn private(request: Request, next: Next) -> Response {
+   let mut response = next.run(request).await;
+   let headers = response.headers_mut();
+   no_store(headers);
    headers.insert(
       "x-robots-tag",
       HeaderValue::from_static("noindex, nofollow"),
@@ -149,8 +159,13 @@ fn public_response(
       .into_response()
 }
 
-async fn dashboard<B: Backend>(State(state): State<B>) -> Response {
-   public_response(state.snapshot().await, view::dashboard)
+async fn dashboard<B: Backend>(State(state): State<B>, jar: CookieJar) -> Response {
+   let theme = state.theme(&jar);
+   let mut response = public_response(state.snapshot().await, |snapshot| {
+      view::dashboard(&theme, snapshot)
+   });
+   no_store(response.headers_mut());
+   response
 }
 
 async fn refresh<B: Backend>(State(state): State<B>) -> Response {
@@ -210,6 +225,7 @@ fn now() -> i64 {
 
 fn form<B: Backend>(
    state: &B,
+   theme: &str,
    session: &str,
    status: StatusCode,
    notice: Option<AdminNotice>,
@@ -217,22 +233,23 @@ fn form<B: Backend>(
    let token = issue_csrf(state.csrf_key(), session, &state.origin(), now());
    (
       status,
-      view::admin(&token, MAX_TEXT_BYTES, MAX_LINES, notice.as_ref()),
+      view::admin(theme, &token, MAX_TEXT_BYTES, MAX_LINES, notice.as_ref()),
    )
       .into_response()
 }
 
 async fn admin<B: Backend>(State(state): State<B>, jar: CookieJar) -> Response {
+   let theme = state.theme(&jar);
    let Some(session) = jar
       .get(SESSION_COOKIE)
       .filter(|_| !state.csrf_key().is_empty())
    else {
-      return (StatusCode::FORBIDDEN, view::forbidden()).into_response();
+      return (StatusCode::FORBIDDEN, view::forbidden(&theme)).into_response();
    };
    if !state.administrator(&jar).await {
-      return (StatusCode::FORBIDDEN, view::forbidden()).into_response();
+      return (StatusCode::FORBIDDEN, view::forbidden(&theme)).into_response();
    }
-   form(&state, session.value(), StatusCode::OK, None)
+   form(&state, &theme, session.value(), StatusCode::OK, None)
 }
 
 async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Request) -> Response {
@@ -240,17 +257,18 @@ async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Req
    if cross_origin(request.headers(), &origin) {
       return StatusCode::FORBIDDEN.into_response();
    }
+   let theme = state.theme(&jar);
    let Some(session) = jar
       .get(SESSION_COOKIE)
       .filter(|_| !state.csrf_key().is_empty())
    else {
-      return (StatusCode::FORBIDDEN, view::forbidden()).into_response();
+      return (StatusCode::FORBIDDEN, view::forbidden(&theme)).into_response();
    };
    if !state.administrator(&jar).await {
-      return (StatusCode::FORBIDDEN, view::forbidden()).into_response();
+      return (StatusCode::FORBIDDEN, view::forbidden(&theme)).into_response();
    }
    let session = session.value();
-   let error = |status, text| form(&state, session, status, Some(AdminNotice::Error(text)));
+   let error = |status, text| form(&state, &theme, session, status, Some(AdminNotice::Error(text)));
    if request.uri().query().is_some() {
       return error(
          StatusCode::BAD_REQUEST,
@@ -350,6 +368,7 @@ async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Req
    match state.upload(&accounts, search).await {
       Some(counts) => form(
          &state,
+         &theme,
          session,
          StatusCode::OK,
          Some(AdminNotice::Saved(counts)),
@@ -409,6 +428,10 @@ mod tests {
       async fn administrator(&self, jar: &CookieJar) -> bool {
          jar.get(SESSION_COOKIE)
             .is_some_and(|cookie| matches!(cookie.value(), ADMIN | "another-admin"))
+      }
+
+      fn theme(&self, jar: &CookieJar) -> String {
+         jar.get("theme").map_or("Teapot", |cookie| cookie.value()).into()
       }
 
       fn csrf_key(&self) -> &str {
@@ -497,7 +520,7 @@ mod tests {
          assert_eq!(response.status(), StatusCode::OK);
          assert_eq!(
             response.headers()[header::CACHE_CONTROL],
-            "public, max-age=10"
+            if dashboard { "private, no-store" } else { "public, max-age=10" }
          );
          assert!(!response.headers().contains_key(header::SET_COOKIE));
          let html = body(response).await;
@@ -509,6 +532,30 @@ mod tests {
          assert!(!html.contains("<form"));
          assert!(!html.contains(ADMIN));
          assert!(!html.contains("name=\"csrf\""));
+      }
+   }
+
+   #[tokio::test]
+   async fn saved_theme_is_used_only_in_full_pages() {
+      let app = app(Fixture::default());
+      for (path, themed) in [
+         (view::PUBLIC_PATH, true),
+         (view::ADMIN_PATH, true),
+         (view::REFRESH_PATH, false),
+      ] {
+         let request = Request::builder()
+            .uri(path)
+            .header(header::COOKIE, format!("{SESSION_COOKIE}={ADMIN}; theme=Dracula"))
+            .body(Body::empty())
+            .unwrap();
+         let response = app.clone().oneshot(request).await.unwrap();
+         assert_eq!(response.status(), StatusCode::OK);
+         if themed {
+            assert_eq!(response.headers()["cloudflare-cdn-cache-control"], "no-store");
+         }
+         let html = body(response).await;
+         assert_eq!(html.contains("/css/themes/dracula.css?teapawt17"), themed);
+         assert_eq!(html.contains("/css/import.css?v=3"), themed);
       }
    }
 
