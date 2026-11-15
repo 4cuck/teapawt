@@ -75,8 +75,9 @@ pub async fn same_origin_guard(request: Request, next: Next) -> Response {
 ///
 /// A link from another site could otherwise switch off the media proxy or
 /// point redirects elsewhere, so cross-site navigations get no overrides.
+/// The import form rejects all query parameters itself and must not redirect them.
 pub async fn prefs_middleware(mut request: Request, next: Next) -> Response {
-   if is_cross_site(&request) {
+   if request.uri().path() == super::import::ADMIN_PATH || is_cross_site(&request) {
       return next.run(request).await;
    }
 

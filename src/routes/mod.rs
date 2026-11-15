@@ -10,6 +10,7 @@ mod embed;
 mod explore;
 mod game;
 pub mod helpers;
+mod import;
 mod intent;
 mod list;
 mod media;

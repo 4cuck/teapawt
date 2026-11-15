@@ -201,7 +201,10 @@ fn reason_shown(config: &ScrapeConfig, visitor: &Visitor<'_>) -> Reason {
 /// The home page costs no X call and carries the notice explaining the
 /// check, so it stays readable before the check is solved.
 fn is_open(path: &str) -> bool {
-   path == "/"
+   matches!(
+      path,
+      "/" | "/pool-counts" | super::import::PUBLIC_PATH | super::import::REFRESH_PATH | super::import::ADMIN_PATH
+   )
       || OPEN_PAGES
          .iter()
          .any(|page| path == *page || path.strip_prefix(page).is_some_and(|rest| rest.starts_with('/')))
@@ -468,6 +471,9 @@ mod tests {
          "/search-pass/login",
          "/donate",
          "/about",
+         "/import",
+         "/import/summary",
+         "/import/admin",
          "/.scrape-check",
          "/css/clean.css",
          "/pic/abc",
@@ -476,7 +482,7 @@ mod tests {
       ] {
          assert!(is_open(open), "{open}");
       }
-      for gated in ["/jack", "/contactlenses", "/donatello/rss", "/jack/status/20", "/search"] {
+      for gated in ["/jack", "/contactlenses", "/donatello/rss", "/jack/status/20", "/search", "/import/status/20"] {
          assert!(!is_open(gated), "{gated}");
       }
    }

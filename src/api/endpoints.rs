@@ -76,11 +76,8 @@ pub const API_URL: &str = "https://api.x.com/graphql";
 pub const STRATO_URL: &str = "https://x.com/i/api/1.1/strato/column/None";
 /// A cookie session's own account settings. The body is a form.
 pub const ACCOUNT_SETTINGS_URL: &str = "https://api.x.com/1.1/account/settings.json";
-pub const VERIFY_CREDENTIALS_URL: &str = "https://api.x.com/1.1/account/verify_credentials.json";
-/// `operation_name` of both is what `acquire_id` reads: "settings" is the one
-/// operation a search account is allowed to call outside search.
+/// `acquire_id` allows search accounts to use this settings operation.
 pub const ACCOUNT_SETTINGS: &str = "account/settings";
-pub const VERIFY_CREDENTIALS: &str = "account/verify_credentials";
 pub const SEARCH_SAFETY: &str = "search/searchSafety";
 pub const X_POSED_LOOKUP_URL: &str = "https://x-posed-cache.xaitax.workers.dev/lookup";
 

@@ -6,6 +6,7 @@ use std::{
 };
 
 use axum::http::header;
+use bytes::Bytes;
 use serde::{Deserialize, de::DeserializeOwned};
 use tokio::{
    sync::{Semaphore, watch},
@@ -15,6 +16,7 @@ use tokio::{
 use super::{
    ProxyPool, SessionLease, SessionPool, TidClient,
    budget::{self, ClientBudget},
+   cookies::Jar,
    endpoints,
    http::{Egress, HttpClient, ProxyConfig, Purpose},
    latency::Latency,
@@ -24,6 +26,7 @@ use super::{
    timeline_route::TimelineRoutes,
 };
 use crate::{
+   accounts::AccountStore,
    api::schema::{
       AboutAccountData, ApiError, AudioSpaceData, AudioSpaceMetadata, BroadcastMetadata,
       BroadcastsData, ConversationData, EditHistoryData, GqlResponse, ListByIdData, ListBySlugData,
@@ -75,6 +78,7 @@ const MAX_HEDGES: usize = 48;
 const LATENCY_REPORT_EVERY: Duration = Duration::from_secs(60);
 /// How often exits are ranked by how far their answers trail the fleet.
 const EXIT_RANK_EVERY: Duration = Duration::from_secs(15);
+const ACCOUNT_RECONCILE_EVERY: Duration = Duration::from_secs(10);
 
 /// An answer about the thing asked for, which a second account would give
 /// too. Anything else is the account or the path, and the other copy of a
@@ -109,14 +113,29 @@ fn search_query_of(variables: &str) -> String {
       .unwrap_or_default()
 }
 
+fn graphql_post_body(variables: &str, features: &str, field_toggles: Option<&str>) -> Result<Bytes> {
+   let parse = |field, input| {
+      serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(input)
+         .map(serde_json::Value::Object)
+         .map_err(|err| Error::Internal(format!("graphql {field}: {err}")))
+   };
+   let mut payload = serde_json::Map::new();
+   payload.insert("variables".into(), parse("variables", variables)?);
+   payload.insert("features".into(), parse("features", features)?);
+   if let Some(toggles) = field_toggles {
+      payload.insert("fieldToggles".into(), parse("fieldToggles", toggles)?);
+   }
+   serde_json::to_vec(&payload)
+      .map(Bytes::from)
+      .map_err(|err| Error::Internal(format!("graphql body: {err}")))
+}
+
 fn is_denylisted(message: &str) -> bool {
    message.contains("QueryDenylistedFailure") || message.contains("Query is denylisted")
 }
 
-/// A `SearchTimeline` body with no posts in it. A suspended account is answered
-/// with an empty 404 for the same query an account in good standing gets posts
-/// for, so the emptiness is the account's and not the query's.
-fn search_answer_is_empty(bytes: &[u8]) -> bool {
+/// A decoded search page with no post results is inconclusive about account health.
+pub(super) fn search_answer_is_empty(bytes: &[u8]) -> bool {
    #[derive(Deserialize)]
    struct SearchBody {
       data: Option<serde_json::Value>,
@@ -128,6 +147,20 @@ fn search_answer_is_empty(bytes: &[u8]) -> bool {
       return true;
    };
    serde_json::to_string(&data).is_ok_and(|text| !text.contains("tweet_results"))
+}
+
+fn search_answer_is_suspended(bytes: &[u8], errors: &[ApiError]) -> bool {
+   let timeline_failed = errors.iter().any(|err| {
+      err.path.as_slice() == ["search_by_raw_query", "search_timeline", "timeline"]
+   });
+   if !timeline_failed {
+      return false;
+   }
+   serde_json::from_slice::<serde_json::Value>(bytes).is_ok_and(|body| {
+      body.pointer("/data/search_by_raw_query/search_timeline")
+         .and_then(serde_json::Value::as_object)
+         .is_some_and(serde_json::Map::is_empty)
+   })
 }
 
 /// The errors that fail a request. X returns the page plus an error for
@@ -388,6 +421,20 @@ fn twitter_error_code(body: &str) -> Option<i64> {
       .find(|code| *code != 0)
 }
 
+fn is_settings_not_found(endpoint: &str, body: &str) -> bool {
+   endpoint == endpoints::ACCOUNT_SETTINGS && twitter_error_code(body) == Some(34)
+}
+
+#[cfg(test)]
+#[test]
+fn code_34_is_special_only_for_account_settings() {
+   let missing = r#"{"errors":[{"code":34}]}"#;
+   assert!(is_settings_not_found(endpoints::ACCOUNT_SETTINGS, missing));
+   assert!(!is_settings_not_found(endpoints::GRAPH_SEARCH_TIMELINE, missing));
+   assert!(!is_settings_not_found(endpoints::ACCOUNT_SETTINGS, ""));
+   assert!(!is_settings_not_found(endpoints::ACCOUNT_SETTINGS, r#"{"errors":[{"code":64}]}"#));
+}
+
 type InflightMap = StdMutex<HashMap<String, watch::Sender<Option<bytes::Bytes>>>>;
 
 pub(super) enum InflightTicket {
@@ -447,12 +494,13 @@ pub struct ApiClient {
 impl ApiClient {
    /// Identity headers (user agent, client hints, languages, encodings) come
    /// from each session's browser profile, so none are set here.
-   pub fn new(
+   pub async fn new(
       config: &Config,
       sessions: SessionPool,
       proxies: Option<ProxyPool>,
       fallback_proxies: Vec<ProxyConfig>,
-   ) -> Self {
+      accounts: AccountStore,
+   ) -> Result<Self> {
       // Direct first, on the server's own address. apiProxy is only the
       // residential exit used after an HTML 429.
       let mut client = HttpClient::new("", "", Purpose::Api);
@@ -471,11 +519,10 @@ impl ApiClient {
       // set on one answer is sent back on the next call instead of being
       // dropped. Nothing is fetched to fill this: it only reads the responses
       // the calls in hand already receive.
-      let cookies = super::cookies::Jar::load(
-         std::env::var("TEAPOT_COOKIES_FILE").unwrap_or_else(|_| "session-cookies.json".to_owned()),
-      );
-      cookies.spawn_flusher();
-      client = client.with_cookies(std::sync::Arc::clone(&cookies));
+      let cookies = Jar::from_store(&accounts).await?;
+      cookies.spawn_flusher(accounts.clone());
+      client = client.with_cookies(Arc::clone(&cookies));
+      Self::spawn_account_reconcile(accounts, sessions.clone(), cookies);
 
       let proxies = proxies.map(Arc::new);
       let operations = Operations::load();
@@ -498,7 +545,7 @@ impl ApiClient {
       let denylist_path = std::env::var("TEAPOT_SEARCH_DENYLIST")
          .unwrap_or_else(|_| "search-denylist.json".to_owned());
 
-      Self {
+      Ok(Self {
          client,
          sessions,
          proxies,
@@ -512,7 +559,41 @@ impl ApiClient {
          hedges: Arc::new(Semaphore::new(MAX_HEDGES)),
          timeline_routes: Arc::new(TimelineRoutes::default()),
          inflight: Arc::new(StdMutex::new(HashMap::new())),
+      })
+   }
+
+   fn spawn_account_reconcile(store: AccountStore, pool: SessionPool, cookies: Arc<Jar>) {
+      tokio::spawn(async move {
+         let mut every = interval(ACCOUNT_RECONCILE_EVERY);
+         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+         every.tick().await;
+         loop {
+            every.tick().await;
+            match Self::reconcile_accounts(&store, &pool, &cookies).await {
+               Ok(0) => {},
+               Ok(added) => tracing::info!(added, "added imported accounts to the live pool"),
+               Err(err) => tracing::warn!("could not reconcile imported accounts: {err}"),
+            }
+         }
+      });
+   }
+
+   async fn reconcile_accounts(store: &AccountStore, pool: &SessionPool, cookies: &Jar) -> Result<usize> {
+      // Inventory is append-only. Avoid fetching credentials and cookies at
+      // steady state; a count increase is enough to trigger an append pass.
+      if store.stats().await?.total <= i64::try_from(pool.len()).unwrap_or(i64::MAX) {
+         return Ok(0);
       }
+      let known = pool.session_ids().into_iter().collect::<std::collections::HashSet<_>>();
+      let mut new = store.load().await?;
+      new.retain(|session| !known.contains(&session.id));
+      if new.is_empty() {
+         return Ok(0);
+      }
+      cookies.seed_imports(&new, store.load_cookies().await?).await;
+      // ProxyPool's immutable legacy pins and deterministic mappings are
+      // already defined for these ids. No lease can see an unbound slot.
+      Ok(pool.append_sessions(new).await)
    }
 
    /// Warm the transaction ID client and live GraphQL query IDs in the
@@ -650,34 +731,6 @@ impl ApiClient {
       }
    }
 
-   /// Find out, once, whether an account that answered no search is suspended.
-   ///
-   /// One settings write decides it. A suspended account is taken out of
-   /// search for good and moved to the view pool; an account that takes the
-   /// write was simply handed an empty page, and stays where it is.
-   fn spawn_suspicion_probe(&self, session_id: i64) {
-      let client = self.clone();
-      tokio::spawn(async move {
-         if !client.sessions.claim_suspicion_check(session_id).await {
-            return;
-         }
-         match client.probe_search_suspension(session_id).await {
-            Some(true) => {
-               tracing::info!(
-                  session_id,
-                  "X refuses this account's settings write: suspended from search, moving it to the view pool"
-               );
-               client.sessions.demote_to_view(session_id).await;
-            },
-            Some(false) => tracing::debug!(
-               session_id,
-               "settings write accepted, so the empty search was the query's"
-            ),
-            None => client.sessions.release_suspicion_check(session_id).await,
-         }
-      });
-   }
-
    pub(crate) async fn bearer_and_tid(&self, api_path: &str) -> (&'static str, Option<String>) {
       self.bearer_and_tid_for("GET", api_path).await
    }
@@ -707,7 +760,7 @@ impl ApiClient {
    /// For the GraphQL path the envelope is parsed once and its `errors` go
    /// through [`map_api_errors`](Self::map_api_errors) directly; this is for
    /// bodies that are only ever inspected for an error.
-   fn check_api_errors(bytes: &[u8]) -> Result<()> {
+   pub(super) fn check_api_errors(bytes: &[u8]) -> Result<()> {
       #[derive(Deserialize)]
       struct ErrorCheck {
          #[serde(default)]
@@ -832,14 +885,15 @@ impl ApiClient {
          .await;
       session = answered_on;
 
-      // Quota failures may walk RATE_LIMIT_REPLACEMENTS accounts. The other
-      // cases stay capped at GRAPHQL_REPLACEMENTS inside the match.
+      // Quota failures and ambiguous search 404s may walk up to
+      // RATE_LIMIT_REPLACEMENTS distinct fallback accounts. Other errors
+      // keep their smaller limits inside the match.
       for replacement in 0..RATE_LIMIT_REPLACEMENTS {
          let session_id = session.id;
          if !tried_ids.contains(&session_id) {
             tried_ids.push(session_id);
          }
-         let empty = matches!(last, Err(Error::TransientUpstream));
+         let empty = matches!(last, Err(Error::TransientUpstream | Error::SearchRefused));
          let exit_fault = matches!(&last, Err(Error::IpThrottled))
             || matches!(&last, Err(Error::TwitterApi(message)) if is_gateway_blip(message))
             || matches!(&last, Err(Error::Internal(message)) if message == "API headers stalled");
@@ -851,20 +905,8 @@ impl ApiClient {
          }
          let retry = match &last {
             Err(Error::SessionRejected(_)) if replacement < GRAPHQL_REPLACEMENTS => true,
-            // An empty 404 is this account's suspension. The account is already
-            // out of search and in the view pool, so the query is asked of the
-            // next account. A handful is enough: past that the pool itself is
-            // suspended and more calls only get more accounts banned.
-            Err(Error::SearchRefused) => replacement < GRAPHQL_REPLACEMENTS,
-            Err(Error::TransientUpstream) => {
-               // A parsed page with no posts is what a query that matches
-               // nothing gets, so one other account is enough to confirm it.
-               // An empty 404 is not that page: a suspended account is handed
-               // one for every query, including "lol", and while most of the
-               // pool is suspended the second account returns one too. Keep
-               // moving until an account answers with a page.
-               endpoint.ends_with("SearchTimeline") || replacement == 0
-            },
+            Err(Error::SearchRefused) => session.kind == SessionKind::Cookie,
+            Err(Error::TransientUpstream) => replacement == 0 && session.kind == SessionKind::Cookie,
             // A 502/503/504 is the edge dropping the stream, not this account's
             // quota. Try one other session. Do not mark the first as refused:
             // that path is for an account X answers with an empty 404.
@@ -929,6 +971,10 @@ impl ApiClient {
          };
          session = match next_session {
             Ok(next) => next,
+            Err(_) if matches!(last, Err(Error::SearchRefused)) => {
+               self.refund(endpoint).await;
+               return Err(Error::SearchRefused);
+            },
             Err(err) => {
                self.refund(endpoint).await;
                return Err(err);
@@ -946,29 +992,10 @@ impl ApiClient {
             .await;
          session = answered_on;
          last = next_last;
-         if empty && last.is_ok() {
-            // Another account got posts for the same variables, so the empty
-            // page was this one's. It is still only rested: an empty page is
-            // also what a query with no matches gets, and what an account X
-            // age-gated hides, so nothing in this answer says the account is
-            // suspended. Counted, not logged: one busy minute is hundreds of
-            // these.
-            tracing::debug!(
-               session_id,
-               endpoint,
-               "X answers this account nothing for this operation while others get results"
-            );
-            self.sessions.mark_refused(session_id, endpoint).await;
-            if endpoint.ends_with("SearchTimeline") {
-               self.spawn_suspicion_probe(session_id);
-            }
-         }
       }
 
-      // Two accounts got nothing: X is answering nobody, or this query id is
-      // one it has retired. Read the live ids and resend once if it moved.
-      // The empty 404 was not charged to either account, so a retired id
-      // cannot mark a working account suspended.
+      // An ambiguous search 404 quarantines its account. Only generic
+      // transient failures can retry after refreshing the operation ID.
       if session.kind == SessionKind::Cookie && matches!(last, Err(Error::TransientUpstream)) {
          let before = self.wire_operation(&session, endpoint, features).await.0;
          self.tid.recheck_operations().await;
@@ -985,7 +1012,9 @@ impl ApiClient {
          }
       }
 
-      if last.is_ok() {
+      if last.as_ref().is_ok_and(|(_, bytes)| {
+         !endpoint.ends_with("/SearchTimeline") || !search_answer_is_empty(bytes)
+      }) {
          self.sessions.mark_verified(session.id, endpoint).await;
       }
       last
@@ -1008,6 +1037,13 @@ impl ApiClient {
       T: DeserializeOwned,
    {
       let first_id = session.id;
+      // Search already has a bounded fallback. A hedge would spend that
+      // fallback before we know if the first page is legitimately empty.
+      if endpoint.ends_with("/SearchTimeline") {
+         return self
+            .timed_attempt(session, endpoint, variables, features, field_toggles)
+            .await;
+      }
       let delay = self.latency.hedge_delay(endpoint);
       // Boxed: two request futures side by side would double the size of
       // every handler future that awaits this one.
@@ -1214,24 +1250,36 @@ impl ApiClient {
       let sent_tid = self.tid_enabled && session.kind == SessionKind::Cookie;
       let wire = self.wire_operation(session, endpoint, features).await;
       let path = format!("/i/api/graphql/{}", wire.0);
-      let refused = sent_tid && self.tid.is_refused("GET", &path).await;
+      // POST endpoints carry the method in the TID signature; key the refusal
+      // cache on the actual method so a stale GET entry never suppresses a TID
+      // on a POST request.
+      let use_post = session.kind == SessionKind::Cookie
+         && endpoint.ends_with("/SearchTimeline");
+      let method = if use_post { "POST" } else { "GET" };
+      let refused = sent_tid && self.tid.is_refused(method, &path).await;
       let mut result = self
          .graphql_attempt(session, endpoint, &wire, variables, field_toggles, !refused)
          .await;
 
       if sent_tid && matches!(result, Err(Error::TransientUpstream)) {
          if refused {
-            self.tid.clear_refused("GET", &path).await;
+            self.tid.clear_refused(method, &path).await;
          }
          result = self
             .graphql_attempt(session, endpoint, &wire, variables, field_toggles, refused)
             .await;
-         if result.is_ok() && !refused {
+         // A search without the transaction id comes back as a parsed page with
+         // no posts, which is a success here, for the same query that returns
+         // posts when the id is sent. Remembering that as "X refuses the id"
+         // made every later search go out without one, and those came back as
+         // empty 404s from accounts that search fine in a browser.
+         let search = endpoint.ends_with("SearchTimeline");
+         if result.is_ok() && !refused && !search {
             tracing::info!(
                endpoint,
                "X answers this call without a transaction id and refuses one"
             );
-            self.tid.note_refused("GET", &path).await;
+            self.tid.note_refused(method, &path).await;
          }
          if let Err(ref err) = result
             && !matches!(err, Error::TransientUpstream)
@@ -1285,15 +1333,26 @@ impl ApiClient {
          SessionKind::Cookie => endpoints::GRAPHQL_URL,
       };
 
-      // Build URL with query string (scoped to drop Serializer before await)
-      let url = {
-         let mut qs = form_urlencoded::Serializer::new(String::new());
-         qs.append_pair("variables", variables);
-         qs.append_pair("features", features);
-         if let Some(toggles) = field_toggles {
-            qs.append_pair("fieldToggles", toggles);
-         }
-         format!("{base_url}/{path}?{}", qs.finish())
+      // X's edge rejects GET on SearchTimeline for cookie sessions; POST works.
+      let use_post = session.kind == SessionKind::Cookie
+         && endpoint.ends_with("/SearchTimeline");
+
+      let (url, body) = if use_post {
+         (
+            format!("{base_url}/{path}"),
+            graphql_post_body(variables, features, field_toggles)?,
+         )
+      } else {
+         let url = {
+            let mut qs = form_urlencoded::Serializer::new(String::new());
+            qs.append_pair("variables", variables);
+            qs.append_pair("features", features);
+            if let Some(toggles) = field_toggles {
+               qs.append_pair("fieldToggles", toggles);
+            }
+            format!("{base_url}/{path}?{}", qs.finish())
+         };
+         (url, Bytes::new())
       };
       let headers = self
          .graphql_headers(
@@ -1307,18 +1366,44 @@ impl ApiClient {
          )
          .await?;
 
-      let response = match self
-         .client
-         .get_on(&url, &headers, Some(&self.egress_for(session)))
-         .await
-      {
-         Ok(response) => response,
-         Err(err) => {
-            self.sessions.refund_if_metered(session, endpoint).await;
-            return Err(err);
-         },
+      let response = if use_post {
+         match self
+            .client
+            .post_on(&url, &headers, body, Some(&self.egress_for(session)))
+            .await
+         {
+            Ok(response) => response,
+            Err(err) => {
+               self.sessions.refund_if_metered(session, endpoint).await;
+               return Err(err);
+            },
+         }
+      } else {
+         match self
+            .client
+            .get_on(&url, &headers, Some(&self.egress_for(session)))
+            .await
+         {
+            Ok(response) => response,
+            Err(err) => {
+               self.sessions.refund_if_metered(session, endpoint).await;
+               return Err(err);
+            },
+         }
       };
-      let (bytes, limit_recorded) = self.account_response(session, endpoint, variables, response).await?;
+      let (bytes, limit_recorded) = self
+         .account_response_inner(session, endpoint, Some((path, variables)), response)
+         .await?;
+
+      if endpoint.ends_with("/SearchTimeline") && bytes.iter().all(u8::is_ascii_whitespace) {
+         tracing::warn!(
+            session_id = session.id,
+            operation_id = path.rsplit_once('/').map_or("", |(id, _)| id),
+            body_bytes = bytes.len(),
+            "search succeeded at HTTP level but returned no JSON body"
+         );
+         return Err(Error::SearchRefused);
+      }
 
       // One pass over a body that can run to several megabytes: the envelope
       // carries `errors` beside `data`, so the error check no longer costs a
@@ -1331,6 +1416,12 @@ impl ApiClient {
             return Err(Error::Internal(format!("Response parse error: {err}")));
          },
       };
+
+      if use_post && search_answer_is_suspended(&bytes, &resp.errors) {
+         tracing::info!(session_id = session.id, "search refused for this account (suspended)");
+         self.sessions.demote_to_view(session.id).await;
+         return Err(Error::SearchRefused);
+      }
 
       let serious = request_errors(&resp.errors, resp.data.is_some());
       if serious.len() < resp.errors.len() {
@@ -1356,12 +1447,7 @@ impl ApiClient {
       let data = resp
          .data
          .ok_or_else(|| Error::Internal("Response parse error: missing data".into()))?;
-      // A suspended account answers search with a page that parses and holds no
-      // posts, where an account in good standing returns them. Such a page is
-      // also what a query with no matches gets, and what an account X age-gated
-      // hides. Only a caller that saw another account get posts for the same
-      // variables can tell them apart, so the verdict is left to the retry
-      // loop and nothing is recorded here.
+      // A valid empty page is a result, not a transport error or suspension signal.
       if endpoint.ends_with("/SearchTimeline") && search_answer_is_empty(&bytes) {
          tracing::info!(
             session_id = session.id,
@@ -1371,7 +1457,6 @@ impl ApiClient {
             "search came back with no posts"
          );
          log_events::note(Event::SearchEmpty);
-         return Err(Error::TransientUpstream);
       }
       Ok((data, bytes))
    }
@@ -1383,7 +1468,16 @@ impl ApiClient {
       &self,
       session: &SessionLease,
       endpoint: &str,
-      detail: &str,
+      response: super::http::Response,
+   ) -> Result<(bytes::Bytes, bool)> {
+      self.account_response_inner(session, endpoint, None, response).await
+   }
+
+   async fn account_response_inner(
+      &self,
+      session: &SessionLease,
+      endpoint: &str,
+      graphql_request: Option<(&str, &str)>,
       response: super::http::Response,
    ) -> Result<(bytes::Bytes, bool)> {
       let limit_recorded = if let Some(remaining) = response.headers().get("x-rate-limit-remaining")
@@ -1429,7 +1523,13 @@ impl ApiClient {
             .get_all(header::SET_COOKIE)
             .iter()
             .find_map(ct0_cookie);
-         let body = response.text().await.unwrap_or_default();
+         let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+         let collected = response.bytes().await;
+         let body_bytes = collected.as_ref().ok().map(bytes::Bytes::len);
+         let body = collected
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes.into()).ok())
+            .unwrap_or_default();
          let shown = log_upstream(&body);
 
          if cloudflare_ip_ban(status, &body) {
@@ -1553,24 +1653,23 @@ impl ApiClient {
          // JSON 404s can still be a real gone resource.
          if status.as_u16() == 404 {
             if body.trim().is_empty() || serde_json::from_str::<serde_json::Value>(&body).is_err() {
-               // A suspended account is handed an empty 404 for search and a
-               // normal page for everything else. Remember it so search stops
-               // picking it, and let this one search fall through to another
-               // account.
                if endpoint.ends_with("/SearchTimeline") {
-                  // A query with no matches comes back as a page with no
-                  // posts. An empty 404 is the account, and it is permanent,
-                  // so the account leaves search before another call is spent
-                  // finding that out.
-                  self.sessions.demote_to_view(session.id).await;
+                  let (wire_path, variables) = graphql_request.unwrap_or_default();
+                  let operation_id = wire_path.rsplit_once('/').map_or("", |(id, _)| id);
                   tracing::info!(
                      session_id = session.id,
                      session_user = %session.username,
                      proxy_port = self.pinned_port(session.id).unwrap_or(0),
-                     query = search_query_of(detail),
-                     "search came back as an empty 404; account out of search"
+                     query = search_query_of(variables),
+                     operation_id,
+                     browser_profile = %super::browser::identity_for(session.id),
+                     http_status = status.as_u16(),
+                     content_type = content_type.as_ref().and_then(|v| v.to_str().ok()).unwrap_or(""),
+                     ?body_bytes,
+                     "search came back as an empty 404"
                   );
                   log_events::note(Event::SearchEmpty);
+                  self.sessions.record_search_404(session.id).await;
                   self.sessions.refund_if_metered(session, endpoint).await;
                   return Err(Error::SearchRefused);
                } else {
@@ -1584,9 +1683,14 @@ impl ApiClient {
                self.sessions.refund_if_metered(session, endpoint).await;
                return Err(Error::TransientUpstream);
             }
+            if is_settings_not_found(endpoint, &body) {
+               self.sessions.disarm_meter(session);
+               return Err(Error::AccountSettingsNotFound);
+            }
             tracing::warn!(
                session_id = session.id,
                session_user = %session.username,
+               endpoint,
                "API 404: {shown}"
             );
             self.sessions.disarm_meter(session);
@@ -1781,7 +1885,7 @@ impl ApiClient {
          .get_on(url, &headers, Some(&self.egress_for(&session)))
          .await?;
       let (bytes, _) = self
-         .account_response(&session, session_key, "", response)
+         .account_response(&session, session_key, response)
          .await?;
       drop(session);
       serde_json::from_slice(&bytes)
@@ -1795,6 +1899,86 @@ pub use endpoint_methods::{OpenProfile, recheck_empty};
 #[cfg(test)]
 mod tests {
    use super::*;
+
+   #[test]
+   fn graphql_post_body_encodes_objects_and_omits_unused_toggles() {
+      let variables = r##"{"rawQuery":"#かんぱに","count":20}"##;
+      let features = r#"{"enabled":true}"#;
+      let body = graphql_post_body(variables, features, None).unwrap();
+      let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+      assert_eq!(payload, serde_json::json!({
+         "variables": {"rawQuery": "#かんぱに", "count": 20},
+         "features": {"enabled": true},
+      }));
+
+      let body = graphql_post_body(variables, features, Some(r#"{"extra":false}"#)).unwrap();
+      let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+      assert_eq!(payload["fieldToggles"], serde_json::json!({"extra": false}));
+      assert!(graphql_post_body(variables, "[]", None).is_err());
+      assert!(graphql_post_body(variables, features, Some("null")).is_err());
+   }
+
+   #[tokio::test]
+   #[ignore = "requires a fresh isolated PostgreSQL cluster on a /tmp Unix socket"]
+   async fn postgres_runtime_import_and_restart() {
+      let url = std::env::var("TEAPOT_LIMITS_DATABASE_URL").unwrap();
+      let socket = url
+         .strip_prefix("host=")
+         .and_then(|url| url.strip_suffix(" user=postgres dbname=postgres"))
+         .unwrap();
+      let suffix = socket.strip_prefix("/tmp/teapot-runtime-test-").unwrap();
+      assert!(!suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+      let store = AccountStore::connect().await.unwrap();
+      assert!(matches!(SessionPool::from_store(store.clone(), 1).await,
+         Err(Error::Internal(message)) if message.contains("migration is not complete")));
+      let file = format!("{socket}/fixture.jsonl");
+      tokio::fs::write(&file, r#"{"id":1,"username":"view","kind":"cookie","auth_token":"fixture","ct0":"old"}"#).await.unwrap();
+      store.migrate_legacy(&file, "").await.unwrap();
+      let pool = SessionPool::from_store(store.clone(), 1).await.unwrap();
+      let jar = Jar::from_store(&store).await.unwrap();
+      jar.spawn_flusher(store.clone());
+      let lease = pool.acquire("TweetDetail", None).await.unwrap();
+      let export = concat!(
+         "# Netscape HTTP Cookie File\n",
+         ".x.com\tTRUE\t/\tTRUE\t0\tauth_token\timported-token\n",
+         ".x.com\tTRUE\t/\tTRUE\t0\tct0\timported-ct0\n",
+         ".x.com\tTRUE\t/\tTRUE\t0\tguest_id\timported-guest\n",
+      );
+      assert_eq!(store.import_text(export, true).await.unwrap().imported, 1);
+      assert_eq!(store.import_text(export, false).await.unwrap().duplicates, 1);
+      assert_eq!(ApiClient::reconcile_accounts(&store, &pool, &jar).await.unwrap(), 1);
+      assert_eq!(ApiClient::reconcile_accounts(&store, &pool, &jar).await.unwrap(), 0);
+      assert!(pool.acquire_free("TweetDetail", None).await.unwrap().is_none());
+      let search = pool.acquire("SearchTimeline", None).await.unwrap();
+      let id = search.id;
+      let mut headers = axum::http::HeaderMap::new();
+      headers.insert(header::COOKIE, "ct0=imported-ct0".parse().unwrap());
+      jar.merge_into(id, &mut headers).await;
+      assert_eq!(headers[header::COOKIE], "ct0=imported-ct0; guest_id=imported-guest");
+
+      pool.hold_ct0(id, "fresh".to_owned());
+      pool.demote_to_view(id).await;
+      let mut answer = axum::http::HeaderMap::new();
+      answer.append(header::SET_COOKIE, "guest_id=deleted; Max-Age=0".parse().unwrap());
+      jar.absorb(id, &answer).await;
+      drop((search, lease));
+      timeout(Duration::from_secs(25), async {
+         loop {
+            let sessions = store.load().await.unwrap();
+            let saved = sessions.iter().find(|session| session.id == id).unwrap();
+            if saved.ct0 == "fresh" && saved.pool.is_empty()
+               && !store.load_cookies().await.unwrap().contains_key(&id)
+            {
+               break;
+            }
+            sleep(Duration::from_millis(100)).await;
+         }
+      }).await.unwrap();
+      let restart = SessionPool::from_store(store, 1).await.unwrap();
+      assert_eq!(restart.ct0(id).as_deref(), Some("fresh"));
+      assert_eq!(restart.available_for("SearchTimeline").await, 0);
+      assert_eq!(restart.available_for("TweetDetail").await, 2);
+   }
 
    #[test]
    fn a_cloudflare_block_page_is_one_log_line() {
@@ -1845,6 +2029,32 @@ mod tests {
       let metadata = data.audio_space.unwrap().metadata.unwrap();
 
       assert_eq!(audio_space_status(&metadata), "Replay available · 4 plays");
+   }
+
+   #[test]
+   fn search_timeline_refusal_requires_both_missing_timeline_and_matching_error() {
+      let suspended = br#"{"data":{"search_by_raw_query":{"search_timeline":{}}},"errors":[{"locations":[{"column":7,"line":4}],"message":"Internal server error","path":["search_by_raw_query","search_timeline","timeline"]}]}"#;
+      let empty = br#"{"data":{"search_by_raw_query":{"search_timeline":{"timeline":{"instructions":[{"type":"TimelineAddEntries","entries":[{"content":{"__typename":"TimelineTimelineCursor","cursorType":"Bottom","value":"0"}}]},{"type":"TimelineTerminateTimeline","direction":"Bottom"}]}}}}}"#;
+      let partial = br#"{"data":{"search_by_raw_query":{"search_timeline":{"timeline":{"instructions":[{"entries":[{"content":{"tweet_results":{"result":{"rest_id":"42"}}}}]}]}}}},"errors":[{"message":"Internal server error","path":["another_field","timeline"]}]}"#;
+      let classify = |body: &[u8]| {
+         let envelope: GqlResponse<SearchTimelineData> = serde_json::from_slice(body).unwrap();
+         (search_answer_is_suspended(body, &envelope.errors), search_answer_is_empty(body))
+      };
+      assert_eq!(classify(suspended), (true, true));
+      assert_eq!(classify(empty), (false, true));
+      assert_eq!(classify(partial), (false, false));
+      assert_eq!(classify(br#"{"data":{"search_by_raw_query":{"search_timeline":{}}}}"#), (false, true));
+
+      let unrelated = [ApiError {
+         code: 0,
+         message: "Internal server error".into(),
+         path: vec![serde_json::json!("another_field"), serde_json::json!("timeline")],
+      }];
+      assert!(!search_answer_is_suspended(suspended, &unrelated));
+      let envelope: GqlResponse<SearchTimelineData> = serde_json::from_slice(suspended).unwrap();
+      assert!(!search_answer_is_suspended(empty, &envelope.errors));
+      assert!(!search_answer_is_suspended(partial, &envelope.errors));
+      assert!(!search_answer_is_suspended(b"", &envelope.errors));
    }
 
    #[test]

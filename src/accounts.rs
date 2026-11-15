@@ -1,0 +1,764 @@
+//! PostgreSQL storage for the account inventory and the per-account cookie
+//! jars.
+
+use std::{
+   collections::{
+      BTreeMap,
+      HashMap,
+      HashSet,
+   },
+   env,
+   fmt,
+   io,
+   sync::Arc,
+};
+
+use serde::Serialize;
+use serde_json::Value;
+use tokio::{
+   fs,
+   sync::Mutex,
+};
+use tokio_postgres::{
+   Client,
+   NoTls,
+   Transaction,
+   types::{
+      IsNull,
+      ToSql,
+      Type,
+      to_sql_checked,
+   },
+};
+
+use crate::{
+   error::{
+      Error,
+      Result,
+   },
+   types::{
+      Session,
+      SessionKind,
+   },
+};
+
+const DEFAULT_URL: &str = "host=/var/run/postgresql user=teapot dbname=teapot";
+const LOCK_KEY: i64 = 0x7465_6170_6163_6374;
+const MIGRATION: &str = "legacy-v1";
+const SEARCH: &str = "search";
+const AUTH: &str = "auth_token";
+const CSRF: &str = "ct0";
+
+const SCHEMA: &str = "\
+   CREATE TABLE IF NOT EXISTS account_sessions (
+      id bigint PRIMARY KEY,
+      ordinal bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
+      body jsonb NOT NULL
+   );
+   CREATE INDEX IF NOT EXISTS account_sessions_auth_token_idx
+      ON account_sessions ((body->>'auth_token')) WHERE body->>'auth_token' <> '';
+   CREATE TABLE IF NOT EXISTS account_cookies (
+      account_id bigint NOT NULL REFERENCES account_sessions(id) ON DELETE CASCADE,
+      name text NOT NULL,
+      value text NOT NULL,
+      PRIMARY KEY (account_id, name)
+   );
+   CREATE TABLE IF NOT EXISTS account_migrations (name text PRIMARY KEY);
+   CREATE TABLE IF NOT EXISTS account_import_batches (
+      id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      imported_at bigint NOT NULL DEFAULT extract(epoch FROM now())::bigint,
+      imported bigint NOT NULL,
+      duplicates bigint NOT NULL,
+      invalid bigint NOT NULL
+   );";
+const INSERT_ACCOUNT: &str = "INSERT INTO account_sessions (id, body) VALUES ($1, $2)";
+const INSERT_COOKIE: &str =
+   "INSERT INTO account_cookies (account_id, name, value) VALUES ($1, $2, $3)";
+
+/// A shared store handle. One connection is serialized across clones so a
+/// transaction's statements cannot interleave with another operation.
+#[derive(Clone)]
+pub struct AccountStore {
+   client: Arc<Mutex<Client>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct Stats {
+   pub total:  i64,
+   pub search: i64,
+   pub view:   i64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ImportSummary {
+   pub imported:   usize,
+   pub duplicates: usize,
+   pub invalid:    usize,
+}
+
+type CookieJar = BTreeMap<String, String>;
+type Cookies = HashMap<i64, CookieJar>;
+
+fn store_error(message: &str) -> Error {
+   Error::Internal(message.to_owned())
+}
+
+fn count_to_db(count: usize) -> Result<i64> {
+   i64::try_from(count).map_err(|_| store_error("import batch count out of range"))
+}
+
+fn db_error(_: tokio_postgres::Error) -> Error {
+   store_error("account database operation failed")
+}
+
+// tokio-postgres prints bound parameters with Debug when debug logging is on.
+// Never pass a credential, its container, or a cookie value unwrapped.
+struct Secret<T>(T);
+
+impl<T> fmt::Debug for Secret<T> {
+   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      f.write_str("[redacted]")
+   }
+}
+
+impl<T: ToSql> ToSql for Secret<T> {
+   fn to_sql(
+      &self,
+      ty: &Type,
+      out: &mut bytes::BytesMut,
+   ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+      self.0.to_sql(ty, out)
+   }
+
+   fn accepts(ty: &Type) -> bool {
+      T::accepts(ty)
+   }
+
+   to_sql_checked!();
+}
+
+async fn lock(tx: &Transaction<'_>) -> Result<()> {
+   tx.query_one("SELECT pg_advisory_xact_lock($1)", &[&LOCK_KEY])
+      .await
+      .map_err(db_error)?;
+   Ok(())
+}
+
+async fn migrated(client: &impl tokio_postgres::GenericClient) -> Result<bool> {
+   client
+      .query_opt("SELECT 1 FROM account_migrations WHERE name = $1", &[
+         &MIGRATION,
+      ])
+      .await
+      .map(|row| row.is_some())
+      .map_err(db_error)
+}
+
+async fn require_migration(client: &impl tokio_postgres::GenericClient) -> Result<()> {
+   if !migrated(client).await? {
+      return Err(store_error(
+         "account database legacy migration is not complete",
+      ));
+   }
+   Ok(())
+}
+
+impl AccountStore {
+   pub async fn connect() -> Result<Self> {
+      let url = env::var("TEAPOT_LIMITS_DATABASE_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
+      let (mut client, connection) = tokio_postgres::connect(&url, NoTls).await.map_err(|_| {
+         Error::InvalidConfig("could not connect to the account database".to_owned())
+      })?;
+      tokio::spawn(async move {
+         if connection.await.is_err() {
+            tracing::warn!("account database connection closed");
+         }
+      });
+      let tx = client.transaction().await.map_err(db_error)?;
+      lock(&tx).await?;
+      tx.batch_execute(SCHEMA).await.map_err(db_error)?;
+      tx.commit().await.map_err(db_error)?;
+      Ok(Self {
+         client: Arc::new(Mutex::new(client)),
+      })
+   }
+
+   pub async fn load(&self) -> Result<Vec<Session>> {
+      let client = self.client.lock().await;
+      require_migration(&*client).await?;
+      let rows = client
+         .query("SELECT id, body FROM account_sessions ORDER BY ordinal", &[
+         ])
+         .await
+         .map_err(db_error)?;
+      rows
+         .into_iter()
+         .map(|row| {
+            let mut session = serde_json::from_value::<Session>(row.try_get(1).map_err(db_error)?)
+               .map_err(|_| store_error("account database contains an unreadable session"))?;
+            session.id = row.try_get(0).map_err(db_error)?;
+            Ok(session)
+         })
+         .collect()
+   }
+
+   pub async fn load_cookies(&self) -> Result<HashMap<i64, BTreeMap<String, String>>> {
+      let client = self.client.lock().await;
+      require_migration(&*client).await?;
+      let rows = client
+         .query("SELECT account_id, name, value FROM account_cookies", &[])
+         .await
+         .map_err(db_error)?;
+      let mut cookies = Cookies::new();
+      for row in rows {
+         let name: String = row.try_get(1).map_err(db_error)?;
+         if !session_cookie(&name) {
+            cookies
+               .entry(row.try_get(0).map_err(db_error)?)
+               .or_default()
+               .insert(name, row.try_get(2).map_err(db_error)?);
+         }
+      }
+      Ok(cookies)
+   }
+
+   /// Replace the jar for each supplied account. An empty jar clears its
+   /// cookies; omitted accounts (including newly imported ones) are untouched.
+   pub async fn save_cookies(
+      &self,
+      cookies: &HashMap<i64, BTreeMap<String, String>>,
+   ) -> Result<()> {
+      let mut client = self.client.lock().await;
+      let tx = client.transaction().await.map_err(db_error)?;
+      lock(&tx).await?;
+      require_migration(&tx).await?;
+      let delete = tx
+         .prepare("DELETE FROM account_cookies WHERE account_id = $1")
+         .await
+         .map_err(db_error)?;
+      let insert = tx.prepare(INSERT_COOKIE).await.map_err(db_error)?;
+      for (id, jar) in cookies {
+         tx.execute(&delete, &[id]).await.map_err(db_error)?;
+         for (name, value) in jar.iter().filter(|(name, _)| !session_cookie(name)) {
+            tx.execute(&insert, &[id, name, &Secret(value)])
+               .await
+               .map_err(db_error)?;
+         }
+      }
+      tx.commit().await.map_err(db_error)
+   }
+
+   pub async fn demote(&self, id: i64) -> Result<()> {
+      let client = self.client.lock().await;
+      require_migration(&*client).await?;
+      client
+         .execute(
+            "UPDATE account_sessions SET body = jsonb_set(body, '{pool}', '\"\"'::jsonb)
+          WHERE id = $1 AND lower(body->>'pool') = 'search'",
+            &[&id],
+         )
+         .await
+         .map_err(db_error)?;
+      Ok(())
+   }
+
+   pub async fn save_ct0(&self, updates: &[(i64, String)]) -> Result<()> {
+      let mut client = self.client.lock().await;
+      let tx = client.transaction().await.map_err(db_error)?;
+      lock(&tx).await?;
+      require_migration(&tx).await?;
+      let update = tx
+         .prepare(
+            "UPDATE account_sessions SET body = jsonb_set(body, '{ct0}', to_jsonb($2::text)) \
+             WHERE id = $1",
+         )
+         .await
+         .map_err(db_error)?;
+      for (id, ct0) in updates {
+         tx.execute(&update, &[id, &Secret(ct0)])
+            .await
+            .map_err(db_error)?;
+      }
+      tx.commit().await.map_err(db_error)
+   }
+
+   pub async fn import_text(&self, text: &str, search: bool) -> Result<ImportSummary> {
+      let (accounts, mut summary) = parse_import(text);
+      let mut client = self.client.lock().await;
+      let tx = client.transaction().await.map_err(db_error)?;
+      lock(&tx).await?;
+      require_migration(&tx).await?;
+      if !accounts.is_empty() {
+         let mut max_id = max_existing_id(&tx).await?;
+         let exists = tx
+            .prepare(
+               "SELECT 1 FROM account_sessions WHERE body->>'auth_token' <> '' AND \
+                body->>'auth_token' = $1 LIMIT 1",
+            )
+            .await
+            .map_err(db_error)?;
+         let insert_account = tx.prepare(INSERT_ACCOUNT).await.map_err(db_error)?;
+         let insert_cookie = tx.prepare(INSERT_COOKIE).await.map_err(db_error)?;
+         for (mut session, jar) in accounts {
+            if tx
+               .query_opt(&exists, &[&Secret(&session.auth_token)])
+               .await
+               .map_err(db_error)?
+               .is_some()
+            {
+               summary.duplicates += 1;
+               continue;
+            }
+            max_id = max_id
+               .checked_add(1)
+               .ok_or_else(|| store_error("account IDs are exhausted"))?;
+            session.id = max_id;
+            if search {
+               SEARCH.clone_into(&mut session.pool);
+            }
+            let body = session_body(&session)?;
+            tx.execute(&insert_account, &[&session.id, &Secret(body)])
+               .await
+               .map_err(db_error)?;
+            for (name, value) in jar {
+               tx.execute(&insert_cookie, &[&session.id, &name, &Secret(value)])
+                  .await
+                  .map_err(db_error)?;
+            }
+            summary.imported += 1;
+         }
+      }
+      let imported = count_to_db(summary.imported)?;
+      let duplicates = count_to_db(summary.duplicates)?;
+      let invalid = count_to_db(summary.invalid)?;
+      tx.execute(
+         "INSERT INTO account_import_batches (imported, duplicates, invalid) VALUES ($1, $2, $3)",
+         &[&imported, &duplicates, &invalid],
+      )
+      .await
+      .map_err(db_error)?;
+      tx.commit().await.map_err(db_error)?;
+      Ok(summary)
+   }
+
+   #[allow(dead_code, reason = "the standalone import CLI does not display recent batches")]
+   pub async fn recent_import_batches(&self) -> Result<Vec<(i64, ImportSummary)>> {
+      let client = self.client.lock().await;
+      client
+         .query(
+            "SELECT imported_at, imported, duplicates, invalid FROM account_import_batches ORDER BY id DESC LIMIT 10",
+            &[],
+         )
+         .await
+         .map_err(db_error)?
+         .into_iter()
+         .map(|row| {
+            let count = |index| -> Result<usize> {
+               let value: i64 = row.try_get(index).map_err(db_error)?;
+               usize::try_from(value).map_err(|_| store_error("invalid import batch count"))
+            };
+            Ok((row.try_get(0).map_err(db_error)?, ImportSummary {
+               imported: count(1)?, duplicates: count(2)?, invalid: count(3)?,
+            }))
+         })
+         .collect()
+   }
+
+   #[allow(dead_code, reason = "explicit offline CLI operation")]
+   pub async fn restore_batch_to_search(&self, text: &str) -> Result<usize> {
+      let (accounts, summary) = parse_import(text);
+      if accounts.is_empty() || summary.invalid != 0 || summary.duplicates != 0 {
+         return Err(store_error("restore requires a complete, unique account batch"));
+      }
+      let mut client = self.client.lock().await;
+      let tx = client.transaction().await.map_err(db_error)?;
+      lock(&tx).await?;
+      require_migration(&tx).await?;
+      let mut restored = 0;
+      for (account, _) in accounts {
+         let matched = tx.query(
+            "SELECT id FROM account_sessions WHERE body->>'auth_token' = $1",
+            &[&Secret(&account.auth_token)],
+         ).await.map_err(db_error)?;
+         let [row] = matched.as_slice() else {
+            return Err(store_error("restore batch must match exactly one stored row per account"));
+         };
+         let id: i64 = row.try_get(0).map_err(db_error)?;
+         let moved = tx.execute("UPDATE account_sessions SET body = jsonb_set(body, '{pool}', '\"search\"') WHERE id = $1 AND coalesce(body->>'pool', '') <> 'search'", &[&id]).await.map_err(db_error)?;
+         if moved != 0 {
+            tx.execute("UPDATE session_limits SET body = ((body #- '{refused_ops,SearchTimeline}'::text[]) - 'search_404_at'::text) || '{\"search_banned\":false,\"search_only\":true}'::jsonb WHERE id = $1", &[&id]).await.map_err(db_error)?;
+            restored += 1;
+         }
+      }
+      tx.commit().await.map_err(db_error)?;
+      Ok(restored)
+   }
+
+   pub async fn stats(&self) -> Result<Stats> {
+      let client = self.client.lock().await;
+      require_migration(&*client).await?;
+      let row = client
+         .query_one(
+            "SELECT count(*), count(*) FILTER (WHERE lower(body->>'pool') = 'search') FROM \
+             account_sessions",
+            &[],
+         )
+         .await
+         .map_err(db_error)?;
+      let total = row.try_get(0).map_err(db_error)?;
+      let search = row.try_get(1).map_err(db_error)?;
+      Ok(Stats {
+         total,
+         search,
+         view: total - search,
+      })
+   }
+
+   /// First boot only: import sessions in JSONL order, then attach their jars.
+   /// The marker commits with the rows; a subsequent boot never reads the
+   /// files.
+   pub async fn migrate_legacy(&self, sessions_path: &str, cookies_path: &str) -> Result<()> {
+      let mut client = self.client.lock().await;
+      let tx = client.transaction().await.map_err(db_error)?;
+      lock(&tx).await?;
+      if migrated(&tx).await? {
+         return tx.commit().await.map_err(db_error);
+      }
+      let text = fs::read_to_string(sessions_path)
+         .await
+         .map_err(|_| store_error("could not read the legacy sessions file"))?;
+      let (sessions, ids) = audit_legacy(&text)?;
+      let cookies = read_legacy_cookies(cookies_path).await?;
+      let insert_account = tx.prepare(INSERT_ACCOUNT).await.map_err(db_error)?;
+      let insert_cookie = tx.prepare(INSERT_COOKIE).await.map_err(db_error)?;
+      for session in sessions {
+         let body = session_body(&session)?;
+         tx.execute(&insert_account, &[&session.id, &Secret(body)])
+            .await
+            .map_err(db_error)?;
+      }
+      let mut orphan_jars = 0_usize;
+      for (id, jar) in cookies {
+         if !ids.contains(&id) {
+            orphan_jars += 1;
+            continue;
+         }
+         for (name, value) in jar.into_iter().filter(|(name, _)| !session_cookie(name)) {
+            tx.execute(&insert_cookie, &[&id, &name, &Secret(value)])
+               .await
+               .map_err(db_error)?;
+         }
+      }
+      tx.execute("INSERT INTO account_migrations (name) VALUES ($1)", &[
+         &MIGRATION,
+      ])
+      .await
+      .map_err(db_error)?;
+      tx.commit().await.map_err(db_error)?;
+      if orphan_jars != 0 {
+         tracing::warn!(
+            orphan_jars,
+            "ignored legacy cookie jars without matching sessions"
+         );
+      }
+      Ok(())
+   }
+}
+
+async fn max_existing_id(tx: &Transaction<'_>) -> Result<i64> {
+   let row = tx
+      .query_one("SELECT GREATEST(0, max(id)) FROM account_sessions", &[])
+      .await
+      .map_err(db_error)?;
+   let mut id: i64 = row.try_get(0).map_err(db_error)?;
+   let row = tx
+      .query_one("SELECT to_regclass('session_limits') IS NOT NULL", &[])
+      .await
+      .map_err(db_error)?;
+   if row.try_get::<_, bool>(0).map_err(db_error)? {
+      // Exclude concurrent limits writes while choosing IDs, including orphan
+      // limits belonging to accounts no longer present in the sessions file.
+      tx.batch_execute("LOCK TABLE session_limits IN SHARE MODE")
+         .await
+         .map_err(db_error)?;
+      let row = tx
+         .query_one("SELECT GREATEST(0, max(id)) FROM session_limits", &[])
+         .await
+         .map_err(db_error)?;
+      id = id.max(row.try_get(0).map_err(db_error)?);
+   }
+   Ok(id)
+}
+
+fn session_body(session: &Session) -> Result<Value> {
+   serde_json::to_value(session).map_err(|_| store_error("could not encode an account session"))
+}
+
+fn session_cookie(name: &str) -> bool {
+   name == AUTH || name == CSRF
+}
+
+async fn read_legacy_cookies(path: &str) -> Result<Cookies> {
+   if path.is_empty() {
+      return Ok(Cookies::new());
+   }
+   match fs::read_to_string(path).await {
+      Ok(text) => {
+         serde_json::from_str(&text).map_err(|_| store_error("legacy cookie data is invalid"))
+      },
+      Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Cookies::new()),
+      Err(_) => Err(store_error("could not read the legacy cookie file")),
+   }
+}
+
+fn audit_legacy(text: &str) -> Result<(Vec<Session>, HashSet<i64>)> {
+   let mut sessions = Vec::new();
+   let mut malformed = 0_usize;
+   for line in text.lines().filter(|line| !line.trim().is_empty()) {
+      match serde_json::from_str::<Session>(line) {
+         Ok(session) => sessions.push(session),
+         Err(_) => malformed += 1,
+      }
+   }
+   let mut ids = HashSet::new();
+   let mut auth_tokens = HashSet::new();
+   let mut oauth_tokens = HashSet::new();
+   let mut duplicate_ids = 0_usize;
+   let mut duplicate_auth_tokens = 0_usize;
+   let mut duplicate_oauth_tokens = 0_usize;
+   for session in &sessions {
+      duplicate_ids += usize::from(!ids.insert(session.id));
+      duplicate_auth_tokens +=
+         usize::from(!session.auth_token.is_empty() && !auth_tokens.insert(&session.auth_token));
+      duplicate_oauth_tokens +=
+         usize::from(!session.oauth_token.is_empty() && !oauth_tokens.insert(&session.oauth_token));
+   }
+   if malformed != 0
+      || duplicate_ids != 0
+      || duplicate_auth_tokens != 0
+      || duplicate_oauth_tokens != 0
+   {
+      tracing::warn!(
+         malformed,
+         duplicate_ids,
+         duplicate_auth_tokens,
+         duplicate_oauth_tokens,
+         "legacy account audit"
+      );
+   }
+   if malformed != 0 {
+      return Err(store_error("legacy sessions contain invalid rows"));
+   }
+   if duplicate_ids != 0 {
+      return Err(store_error("legacy sessions contain duplicate IDs"));
+   }
+   // Reused credentials are reported but existing IDs/pools remain intact.
+   Ok((sessions, ids))
+}
+
+fn parse_import(text: &str) -> (Vec<(Session, CookieJar)>, ImportSummary) {
+   let text = text.trim_start_matches('\u{feff}');
+   let lines = text.lines().map(str::trim);
+   let mut summary = ImportSummary::default();
+   let mut accounts = Vec::new();
+   let netscape = lines.clone().any(|line| {
+      line.eq_ignore_ascii_case("# Netscape HTTP Cookie File")
+         || line.starts_with("#HttpOnly_")
+         || (!line.starts_with('#') && line.bytes().filter(|&byte| byte == b'\t').count() == 6)
+   });
+   if netscape {
+      if let Some(account) = parse_netscape(text) {
+         accounts.push(account);
+      } else {
+         summary.invalid = 1;
+      }
+   } else {
+      for line in lines.filter(|line| !line.is_empty() && !line.starts_with('#')) {
+         if let Some(session) = parse_export(line) {
+            accounts.push((session, CookieJar::new()));
+         } else {
+            summary.invalid += 1;
+         }
+      }
+   }
+   (accounts, summary)
+}
+
+fn is_hex(field: &str, length: usize) -> bool {
+   field.len() == length && field.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn parse_export(line: &str) -> Option<Session> {
+   let fields: Vec<_> = line
+      .split(if line.contains("----") { "----" } else { ":" })
+      .map(str::trim)
+      .collect();
+   let username = *fields.first()?;
+   let credentials = fields.get(1..)?;
+   let auth_token = credentials
+      .iter()
+      .copied()
+      .rev()
+      .find(|field| is_hex(field, 40))?;
+   let ct0 = credentials
+      .iter()
+      .copied()
+      .find(|field| is_hex(field, 160))?;
+   if username.is_empty() || username.chars().any(char::is_control) {
+      return None;
+   }
+   Some(cookie_session(
+      username.to_owned(),
+      auth_token.to_owned(),
+      ct0.to_owned(),
+   ))
+}
+
+fn cookie_session(username: String, auth_token: String, ct0: String) -> Session {
+   Session {
+      username,
+      auth_token,
+      ct0,
+      kind: SessionKind::Cookie,
+      ..Session::default()
+   }
+}
+
+fn parse_netscape(text: &str) -> Option<(Session, CookieJar)> {
+   let mut jar = CookieJar::new();
+   for raw in text.lines() {
+      let raw = raw.trim_start_matches(' ');
+      let line = if let Some(line) = raw.strip_prefix("#HttpOnly_") {
+         line
+      } else if raw.starts_with('#') || raw.trim().is_empty() {
+         continue;
+      } else {
+         raw
+      };
+      let [domain, subdomains, path, secure, expiration, name, value] =
+         line.split('\t').collect::<Vec<_>>().try_into().ok()?;
+      let domain = domain.strip_prefix('.').unwrap_or(domain);
+      if !(domain.eq_ignore_ascii_case("x.com") || domain.eq_ignore_ascii_case("twitter.com")) {
+         continue;
+      }
+      if !matches!(subdomains, "TRUE" | "FALSE")
+         || !matches!(secure, "TRUE" | "FALSE")
+         || expiration.parse::<u64>().is_err()
+         || !path.starts_with('/')
+      {
+         return None;
+      }
+      // The runtime jar is shared across X endpoints, not scoped by path.
+      if path != "/" {
+         continue;
+      }
+      if !valid_cookie(name, value) {
+         return None;
+      }
+      if matches!(name, AUTH | CSRF | "twid") && jar.get(name).is_some_and(|saved| saved != value) {
+         return None;
+      }
+      jar.insert(name.to_owned(), value.to_owned());
+   }
+   let auth_token = jar.remove(AUTH).filter(|value| !value.is_empty())?;
+   let ct0 = jar.remove(CSRF).filter(|value| !value.is_empty())?;
+   let username = jar
+      .get("twid")
+      .and_then(|twid| {
+         let twid = twid.trim_matches('"');
+         let id = twid
+            .strip_prefix("u%3D")
+            .or_else(|| twid.strip_prefix("u%3d"))
+            .or_else(|| twid.strip_prefix("u="))?;
+         (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())).then(|| format!("x-{id}"))
+      })
+      .unwrap_or_default();
+   Some((cookie_session(username, auth_token, ct0), jar))
+}
+
+fn valid_cookie(name: &str, value: &str) -> bool {
+   !name.is_empty()
+      && name
+         .bytes()
+         .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+      && value.bytes().all(|b| b.is_ascii_graphic() && b != b';')
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn parses_both_export_separators_and_requires_both_tokens() {
+      let auth = "a".repeat(40);
+      let ct0 = "b".repeat(160);
+      let text = format!(
+         "# comment\n \
+          first:pass:mail:extra:{ct0}:{auth}\nsecond----pass----mail----{auth}----{ct0}\nmissing:\
+          pass:{auth}\n"
+      );
+      let (accounts, summary) = parse_import(&text);
+      assert_eq!(summary.invalid, 1);
+      assert_eq!(accounts.len(), 2);
+      for ((session, jar), name) in accounts.iter().zip(["first", "second"]) {
+         assert_eq!(session.username, name);
+         assert_eq!(session.auth_token, auth);
+         assert_eq!(session.ct0, ct0);
+         assert_eq!(session.kind, SessionKind::Cookie);
+         assert!(jar.is_empty());
+      }
+   }
+
+   #[test]
+   fn parses_one_netscape_jar_with_http_only_and_twid() {
+      let text = concat!(
+         "\u{feff}# Netscape HTTP Cookie File\r\n",
+         "#HttpOnly_.x.com\tTRUE\t/\tTRUE\t0\tauth_token\ttest-auth\r\n",
+         ".x.com\tTRUE\t/\tTRUE\t0\tct0\ttest-ct0\r\n",
+         ".x.com\tTRUE\t/\tTRUE\t0\ttwid\tu%3D123456\r\n",
+         ".x.com\tTRUE\t/\tTRUE\t0\tlang\ten\r\n",
+         ".example.org\tTRUE\t/\tTRUE\t0\tauth_token\twrong\r\n",
+      );
+      let (accounts, summary) = parse_import(text);
+      assert_eq!(summary.invalid, 0);
+      let [(session, jar)] = accounts.as_slice() else {
+         panic!("expected one account")
+      };
+      assert_eq!(session.username, "x-123456");
+      assert_eq!(session.auth_token, "test-auth");
+      assert_eq!(session.ct0, "test-ct0");
+      assert_eq!(jar.len(), 2);
+      assert_eq!(jar["lang"], "en");
+   }
+
+   #[test]
+   fn rejects_an_incomplete_or_conflicting_netscape_jar() {
+      let auth = ".twitter.com\tTRUE\t/\tTRUE\t0\tauth_token\ta";
+      let csrf = ".twitter.com\tTRUE\t/\tTRUE\t0\tct0\tc";
+      let conflict = ".x.com\tTRUE\t/\tTRUE\t0\tauth_token\tb";
+      for text in [auth.to_owned(), format!("{auth}\n{csrf}\n{conflict}")] {
+         let (accounts, summary) = parse_import(&text);
+         assert!(accounts.is_empty());
+         assert_eq!(summary.invalid, 1);
+      }
+   }
+
+   #[test]
+   fn legacy_audit_keeps_order_and_pools_but_rejects_id_collisions() {
+      let source = "{\"id\":42,\"pool\":\"Search\",\"auth_token\":\"fake\"}\n{\"id\":5,\"\
+                    auth_token\":\"fake\"}";
+      let (sessions, ids) = audit_legacy(source).unwrap();
+      assert_eq!(
+         sessions
+            .iter()
+            .map(|session| session.id)
+            .collect::<Vec<_>>(),
+         [42, 5]
+      );
+      assert_eq!(sessions[0].pool, "Search");
+      assert_eq!(sessions[1].pool, "");
+      assert_eq!(ids.len(), 2);
+      assert!(audit_legacy(&format!("{source}\n{{\"id\":42}}")).is_err());
+      assert!(audit_legacy(&format!("{source}\ninvalid")).is_err());
+   }
+}

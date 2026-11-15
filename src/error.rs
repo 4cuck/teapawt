@@ -119,11 +119,13 @@ pub enum Error {
    #[error("Upstream returned nothing")]
    TransientUpstream,
 
-   /// Search answered this account with an empty 404. A query with no matches
-   /// comes back as a normal page with no posts, so this is the account. The
-   /// account leaves search, and the query is asked of another account.
+   /// X returned an ambiguous search 404. The account is cooling down or
+   /// awaiting a settings check; do not retry this error on the same account.
    #[error("Search refused this account")]
    SearchRefused,
+
+   #[error("X account settings returned 404 (code 34)")]
+   AccountSettingsNotFound,
 
    #[error("Not found: {0}")]
    NotFound(String),
@@ -215,13 +217,12 @@ impl Error {
             "Try again",
             "X did not return a result. Refresh in a moment.",
          ),
-         // Every account asked for this search answered with an empty 404 and
-         // was moved to the view pool. The page is the same one a query with
-         // no matches shows, rather than a refresh that spends the search again.
+         // A 404 never proved the query had no matches. A valid empty page
+         // takes the normal success path instead.
          Self::SearchRefused => (
-            StatusCode::OK,
-            "No posts",
-            "X returned no posts for this search.",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Search temporarily unavailable",
+            "X did not return a search page. Try again later.",
          ),
          // Out of sessions is an operator problem, not an upstream quota one.
          Self::NoSessions | Self::SessionRejected(_) => (

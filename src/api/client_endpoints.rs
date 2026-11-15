@@ -1664,7 +1664,7 @@ impl ApiClient {
          .get_on(&url, &headers, Some(&self.egress_for(&session)))
          .await?;
       let (bytes, _) = self
-         .account_response(&session, endpoints::STRATO_TRANSLATE, "", response)
+         .account_response(&session, endpoints::STRATO_TRANSLATE, response)
          .await?;
 
       #[expect(

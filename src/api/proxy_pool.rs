@@ -1,8 +1,8 @@
 //! SOCKS5 exit pool for X API calls.
 //!
 //! Each cookie session is pinned to one `host:port` so its apparent IP stays
-//! stable across restarts. The pin file stores only session id → port; secrets
-//! stay in the proxy list.
+//! stable across restarts. Existing pins are read-only; other sessions use a
+//! deterministic port from the configured list, including after a live import.
 
 use std::{collections::BTreeMap, net::IpAddr, path::Path, time::Duration};
 
@@ -30,6 +30,7 @@ struct Endpoint {
 pub struct ProxyPool {
    connect_host: String,
    endpoints: Vec<Endpoint>,
+   fallback_ports: Vec<u16>,
    pins: BTreeMap<i64, u16>,
 }
 
@@ -87,44 +88,17 @@ impl ProxyPool {
 
       let pin_path = session_proxies_path(config);
       let pins = load_pins(&pin_path).await;
-      Ok(Some(Self {
-         connect_host,
-         endpoints,
-         pins,
-      }))
+      Ok(Some(Self::with_pins(connect_host, endpoints, pins)))
    }
 
-   /// Assign a stable port to every session and rewrite the pin file.
-   pub async fn bind_sessions(mut self, session_ids: &[i64], config: &Config) -> Result<Self> {
-      let valid: std::collections::HashSet<u16> = self
-         .endpoints
-         .iter()
-         .map(|endpoint| endpoint.port)
-         .collect();
-      self.pins.retain(|_, port| valid.contains(port));
-
-      for id in session_ids {
-         if self.pins.contains_key(id) {
-            continue;
-         }
-         let port = least_used_port(&self.endpoints, &self.pins);
-         self.pins.insert(*id, port);
-      }
-
-      let pin_path = session_proxies_path(config);
-      if !pin_path.is_empty() {
-         let body = serde_json::to_string_pretty(&self.pins)
-            .map_err(|err| Error::Internal(format!("session proxy pins: {err}")))?;
-         let tmp = format!("{pin_path}.tmp");
-         fs::write(&tmp, body).await?;
-         fs::rename(&tmp, &pin_path).await?;
-      }
-      tracing::info!(
-         sessions = session_ids.len(),
-         pins = self.pins.len(),
-         "SOCKS5 session pins saved"
-      );
-      Ok(self)
+   fn with_pins(connect_host: String, endpoints: Vec<Endpoint>, mut pins: BTreeMap<i64, u16>) -> Self {
+      // Canonical fallback order, without changing the configured order used
+      // by first() and all() for unscoped clients.
+      let mut fallback_ports = endpoints.iter().map(|endpoint| endpoint.port).collect::<Vec<_>>();
+      fallback_ports.sort_unstable();
+      fallback_ports.dedup();
+      pins.retain(|_, port| fallback_ports.binary_search(port).is_ok());
+      Self { connect_host, endpoints, fallback_ports, pins }
    }
 
    /// SOCKS5 config for this session, always the same port once pinned.
@@ -136,9 +110,11 @@ impl ProxyPool {
    /// The port this session is pinned to.
    #[must_use]
    pub fn port_for(&self, session_id: i64) -> u16 {
+      // This binding is defined for every id before any slot can become
+      // visible, including ids added while the server is running.
       self.pins.get(&session_id).copied().unwrap_or_else(|| {
-         let idx = (session_id.unsigned_abs() as usize) % self.endpoints.len();
-         self.endpoints[idx].port
+         let idx = (session_id.unsigned_abs() % self.fallback_ports.len() as u64) as usize;
+         self.fallback_ports[idx]
       })
    }
 
@@ -172,6 +148,31 @@ impl ProxyPool {
          username: Some(endpoint.username.clone()),
          password: Some(endpoint.password.clone()),
       }
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn live_and_restart_pins_preserve_legacy_ports_and_ignore_file_order() {
+      fn pool(ports: [u16; 3]) -> ProxyPool {
+         let endpoints = ports.into_iter().map(|port| Endpoint {
+            port,
+            username: String::new(),
+            password: String::new(),
+         }).collect();
+         ProxyPool::with_pins("localhost".into(), endpoints, BTreeMap::from([(1, 1000), (2, 9999)]))
+      }
+      let live = pool([3000, 1000, 2000]);
+      let restart = pool([2000, 3000, 1000]);
+      assert_eq!(live.port_for(1), 1000);
+      assert_eq!(live.port_for(2), 3000); // Invalid legacy pin falls back.
+      for id in [1, 2, 100, 101, 102, i64::MIN, i64::MAX] {
+         assert_eq!(live.port_for(id), restart.port_for(id));
+      }
+      assert_eq!(live.first().port, 3000);
    }
 }
 
@@ -351,19 +352,6 @@ async fn load_pins(path: &str) -> BTreeMap<i64, u16> {
    }
 }
 
-fn least_used_port(endpoints: &[Endpoint], pins: &BTreeMap<i64, u16>) -> u16 {
-   let mut counts: BTreeMap<u16, usize> = endpoints.iter().map(|ep| (ep.port, 0)).collect();
-   for port in pins.values() {
-      if let Some(count) = counts.get_mut(port) {
-         *count += 1;
-      }
-   }
-   counts
-      .into_iter()
-      .min_by_key(|(port, count)| (*count, *port))
-      .map(|(port, _)| port)
-      .unwrap_or(endpoints[0].port)
-}
 
 /// Resolve `hostname` and pick the A record with the lowest ping.
 async fn pick_fastest_host(hostname: &str, probe_port: u16) -> String {

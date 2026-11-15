@@ -24,7 +24,11 @@ use crate::{
 
 /// "Display media that may contain sensitive content", the toggle on
 /// x.com/settings/content_you_see.
-const DISPLAY_SENSITIVE_BODY: &str = "display_sensitive_media=true";
+const DISPLAY_SENSITIVE_BODY: &str = concat!(
+   "include_mention_filter=true&include_nsfw_user_flag=true&include_nsfw_admin_flag=true",
+   "&include_ranked_timeline=true&include_alt_text_compose=true",
+   "&include_ext_dm_av_call_settings=true&display_sensitive_media=true",
+);
 
 /// The two toggles under that page's search settings: `optInFiltering` is
 /// "Hide sensitive content", `optInBlocking` is "Remove blocked and muted
@@ -36,6 +40,26 @@ const SEARCH_SAFETY_BODY: &str = r#"{"optInFiltering":false,"optInBlocking":fals
 /// seconds is about what a person changing their own settings produces, and
 /// twelve at once is a pattern no browser makes.
 const GAP: Duration = Duration::from_secs(5);
+
+/// The importer names accounts `x-<id>` when it has a `twid` cookie.
+fn imported_user_id(username: &str) -> Option<&str> {
+   username
+      .strip_prefix("x-")
+      .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+#[cfg(test)]
+mod tests {
+   use super::imported_user_id;
+
+   #[test]
+   fn only_imported_numeric_user_ids_are_used_for_search_safety() {
+      assert_eq!(imported_user_id("x-1989161722440216577"), Some("1989161722440216577"));
+      for username in ["legacy123", "x-", "x-123/4", "x-１２３"] {
+         assert_eq!(imported_user_id(username), None);
+      }
+   }
+}
 
 #[expect(
    clippy::multiple_inherent_impl,
@@ -59,17 +83,17 @@ impl ApiClient {
 
       let total = ids.len();
       let mut ok = 0_usize;
+      let mut missing_user_id = 0_usize;
       let mut first_error = None;
       for id in ids {
          match self.clear_session_filters(id).await {
-            Ok(()) => {
+            Ok(true) => {
                self.sessions.mark_filters_cleared(id).await;
                ok += 1;
             },
+            Ok(false) => missing_user_id += 1,
             Err(Error::UserSuspended(msg)) => {
-               // X answers a suspended account's settings write with "not
-               // permitted to access this feature". Nothing about waiting
-               // changes that, so this account is not written again.
+               // A settings rejection says nothing conclusive about search access.
                self.sessions.mark_filters_failed(id).await;
                first_error.get_or_insert(msg);
             }
@@ -84,91 +108,33 @@ impl ApiClient {
       // One line per run rather than one per account: a start where X refuses
       // every write is a single fact, and thousands of warnings buried the
       // rest of the log the last time it happened.
-      let failed = total - ok;
-      tracing::info!(ok, failed, "account settings done");
+      let failed = total - ok - missing_user_id;
+      tracing::info!(ok, missing_user_id, failed, "account settings done");
       if let Some(err) = first_error {
          tracing::warn!(failed, "X refused some account settings: {err}");
       }
    }
 
-   /// Both writes for one account. A session that is not a cookie has no
-   /// settings to change.
-   async fn clear_session_filters(&self, session_id: i64) -> Result<()> {
+   /// Apply the media setting even if the import didn't have an X user ID.
+   /// `false` means `searchSafety` was skipped, not that both writes succeeded.
+   async fn clear_session_filters(&self, session_id: i64) -> Result<bool> {
       let session = self
          .sessions
          .acquire_id(session_id, endpoints::ACCOUNT_SETTINGS)
          .await?;
       if session.kind != SessionKind::Cookie {
-         return Ok(());
+         return Ok(true);
       }
 
-      let user_id = self.session_user_id(&session).await?;
       self.set_display_sensitive_media(&session).await?;
-      self.set_search_safety(&session, &user_id).await
+      let Some(user_id) = imported_user_id(&session.username) else {
+         return Ok(false);
+      };
+      self.set_search_safety(&session, user_id).await?;
+      Ok(true)
    }
 
-   /// The numeric id in the `searchSafety` path. Imported accounts are named
-   /// `x-<id>`, so most never ask; the rest are told by x.com.
-   async fn session_user_id(&self, session: &SessionLease) -> Result<String> {
-      if let Some(rest_id) = session.username.strip_prefix("x-")
-         && rest_id.chars().all(|ch| ch.is_ascii_digit())
-         && !rest_id.is_empty()
-      {
-         return Ok(rest_id.to_owned());
-      }
-
-      let path = "/1.1/account/verify_credentials.json";
-      let headers = self
-         .settings_headers(session, "GET", path, "application/json")
-         .await?;
-      let response = self
-         .client
-         .get_on(
-            endpoints::VERIFY_CREDENTIALS_URL,
-            &headers,
-            Some(&self.egress_for(session)),
-         )
-         .await?;
-      let (bytes, _) = self
-         .account_response(session, endpoints::VERIFY_CREDENTIALS, "", response)
-         .await?;
-
-      #[derive(Deserialize)]
-      struct Verify {
-         id_str: Option<String>,
-      }
-      let verify: Verify = serde_json::from_slice(&bytes)
-         .map_err(|err| Error::Internal(format!("verify_credentials parse: {err}")))?;
-      verify
-         .id_str
-         .filter(|id| !id.is_empty())
-         .ok_or_else(|| Error::Internal("verify_credentials missing id_str".into()))
-   }
-
-   /// Ask X whether this account is suspended, by writing one setting.
-   ///
-   /// An empty search page is also what a query with no matches and an
-   /// age-gated account produce, so it cannot be read as a verdict. A settings
-   /// write can: a suspended account is answered "not permitted to access this
-   /// feature", a working one takes the write. `None` means the answer said
-   /// nothing either way and the account should be asked again later.
-   pub(crate) async fn probe_search_suspension(&self, session_id: i64) -> Option<bool> {
-      let session = self
-         .sessions
-         .acquire_id(session_id, endpoints::ACCOUNT_SETTINGS)
-         .await
-         .ok()?;
-      match self.set_display_sensitive_media(&session).await {
-         Ok(()) => Some(false),
-         Err(Error::UserSuspended(_)) => Some(true),
-         Err(err) => {
-            tracing::debug!(session_id, "suspension probe inconclusive: {err}");
-            None
-         },
-      }
-   }
-
-   async fn set_display_sensitive_media(&self, session: &SessionLease) -> Result<()> {
+   async fn post_account_settings(&self, session: &SessionLease, form: &'static str) -> Result<Bytes> {
       let path = "/1.1/account/settings.json";
       let mut headers = self
          .settings_headers(
@@ -187,22 +153,26 @@ impl ApiClient {
          .post_on(
             endpoints::ACCOUNT_SETTINGS_URL,
             &headers,
-            Bytes::from_static(DISPLAY_SENSITIVE_BODY.as_bytes()),
+            Bytes::from_static(form.as_bytes()),
             Some(&self.egress_for(session)),
          )
          .await?;
       let (bytes, _) = self
-         .account_response(session, endpoints::ACCOUNT_SETTINGS, "", response)
+         .account_response(session, endpoints::ACCOUNT_SETTINGS, response)
          .await?;
+      Self::check_api_errors(&bytes)?;
+      Ok(bytes)
+   }
 
-      // The reply carries the whole settings object. A refusal that still
-      // answers 200 would otherwise look like success and never be retried.
+   async fn set_display_sensitive_media(&self, session: &SessionLease) -> Result<()> {
+      let bytes = self.post_account_settings(session, DISPLAY_SENSITIVE_BODY).await?;
+
       #[derive(Deserialize)]
       struct Settings {
-         display_sensitive_media: Option<bool>,
+         display_sensitive_media: bool,
       }
-      if let Ok(settings) = serde_json::from_slice::<Settings>(&bytes)
-         && settings.display_sensitive_media != Some(true)
+      if !serde_json::from_slice::<Settings>(&bytes)
+         .is_ok_and(|settings| settings.display_sensitive_media)
       {
          return Err(Error::Internal(
             "account settings did not enable display_sensitive_media".into(),
@@ -231,7 +201,7 @@ impl ApiClient {
          )
          .await?;
       let _ = self
-         .account_response(session, endpoints::SEARCH_SAFETY, "", response)
+         .account_response(session, endpoints::SEARCH_SAFETY, response)
          .await?;
       Ok(())
    }

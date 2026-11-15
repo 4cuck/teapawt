@@ -112,10 +112,29 @@ const DONATION_ADDRESSES: &[(&str, &str)] = &[
 pub fn router() -> Router<AppState> {
    Router::new()
       .route("/", get(home))
+      .route("/pool-counts", get(pool_counts))
       .route("/about", get(about))
       .route("/contact", get(contact))
       .route("/support", get(|| async { Redirect::to("/contact") }))
       .route("/help", get(|| async { Redirect::to("/about") }))
+}
+
+async fn pool_counts(State(state): State<AppState>) -> impl IntoResponse {
+   use axum::http::StatusCode;
+   use axum::Json;
+   match state.accounts.stats().await {
+      Ok(stats) => (
+         StatusCode::OK,
+         [(header::CACHE_CONTROL, "public, max-age=60")],
+         Json(serde_json::json!({
+            "search": stats.search,
+            "view": stats.view,
+            "total": stats.total,
+         })),
+      )
+         .into_response(),
+      Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+   }
 }
 
 async fn contact(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
@@ -142,7 +161,18 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
    let warning_hidden = jar
       .get("hideFirefoxWarning")
       .is_some_and(|cookie| cookie.value() == "on");
+   let pool_counts = state.accounts.stats().await.ok();
    let hub = html! {
+       @if let Some(stats) = pool_counts {
+           section class="pool-counter" aria-label="Account inventory" {
+               span class="pool-counter-item" title="Accounts in the search pool" { (stats.search) " search" }
+               span class="pool-counter-sep" aria-hidden="true" { "·" }
+               span class="pool-counter-item" title="Accounts in the view pool" { (stats.view) " view" }
+               span class="pool-counter-sep" aria-hidden="true" { "·" }
+               span class="pool-counter-item pool-counter-total" { (stats.total) " accounts" }
+               a class="pool-counter-link" href="/import" { "details" }
+           }
+       }
        section class="landing-hub" aria-label="Popular profiles" {
            h2 { "Browse public profiles" }
            p { "Every public timeline is crawlable. Start with these, or search any @username." }
@@ -233,11 +263,6 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
 fn search_turnstile_warning() -> maud::Markup {
    html! {
        aside class="home-announce" {
-           strong { "Search is back, on 500+ accounts" }
-           p {
-               "Profiles, posts, and the rest of the site are working. About 2,100 accounts were added for viewing, and over 500 for search, so the rate-limit errors should mostly be gone. "
-               "The search accounts X had been suspending are fixed. More are being added over the next two days while the error rate is watched."
-           }
            p {
                "Search still asks for a Cloudflare Turnstile checkbox that lasts five minutes while the pool is this size. "
                "An automatic system that creates thousands of accounts a day replaces it for good once X's whole anti-bot system is worked out. "

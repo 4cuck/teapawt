@@ -1,9 +1,7 @@
 use std::{
-   collections::{BTreeMap, HashMap},
-   env,
+   collections::{HashMap, HashSet},
    fmt::Write as _,
    ops::Deref,
-   path::Path,
    result::Result as StdResult,
    sync::{
       Arc,
@@ -16,13 +14,15 @@ use data_encoding::BASE64;
 use ring::hmac;
 use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
+#[cfg(test)]
+use tokio::fs;
 use tokio::{
-   fs,
-   sync::{Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore},
+   sync::{Notify, OwnedSemaphorePermit, RwLock, Semaphore},
    time::sleep,
 };
 
 use crate::{
+   accounts::AccountStore,
    error::{Error, Result},
    types::{
       Headroom, RateLimit, Session, SessionCredentials, SessionKind, SessionLimits, Spend,
@@ -79,38 +79,48 @@ pub struct SessionDetail {
 /// Pool of authentication sessions for Twitter API.
 #[derive(Clone)]
 pub struct SessionPool {
-   /// One shared slice: the pool is cloned into every request's state, and a
-   /// `Vec<Arc<_>>` made each clone and drop touch every account's refcount.
-   sessions: Arc<[SessionSlot]>,
+   /// Requests clone an immutable snapshot, not all of its slots. Publishing
+   /// an import swaps the snapshot without replacing existing slot identities.
+   sessions: Arc<std::sync::RwLock<SessionSlots>>,
+   max_concurrency: usize,
    limits: Arc<RwLock<HashMap<i64, SessionLimits>>>,
    cursor: Arc<AtomicUsize>,
-   state: Option<Arc<LimitState>>,
-   /// `sessions.jsonl` this pool was loaded from.
+   limit_writer: Option<limits_db::LimitsDb>,
+   account_store: Option<AccountStore>,
+   #[cfg(test)]
    source_path: String,
-   /// `ct0`s x.com issued on a rejection, waiting to be written back.
-   pending_ct0: Arc<std::sync::Mutex<Vec<(i64, String)>>>,
+   #[cfg(test)]
+   source_write: Arc<tokio::sync::Mutex<()>>,
+   writes: Arc<AccountWrites>,
    /// Calls parked until an account frees up, for the minute report.
    waiting: Arc<AtomicUsize>,
    /// Time each call spent getting an account, reported every minute.
    queue: Arc<AccountQueue>,
 }
 
-/// Writes one account at a time. The JSON path remains only for a deployment
-/// that has no Postgres, and as the file imported on the first boot.
-struct LimitState {
-   path: String,
-   dirty: Notify,
-   /// A change worth a restart, written within [`URGENT_FLUSH_DELAY`].
-   urgent: Notify,
-   writing: Mutex<()>,
-   db: Option<limits_db::LimitsDb>,
+type SessionSlots = Arc<[Arc<SessionSlot>]>;
+
+#[derive(Default)]
+struct PendingAccountWrites {
+   ct0s: HashMap<i64, String>,
+   demotions: HashSet<i64>,
 }
 
-const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(15);
-/// Changes worth a restart wait this long, so a burst of them is one write.
-/// The whole JSON file is rewritten each time, and a request must not wait
-/// on that.
-const URGENT_FLUSH_DELAY: Duration = Duration::from_secs(1);
+#[derive(Default)]
+struct AccountWrites {
+   pending: std::sync::Mutex<PendingAccountWrites>,
+   ready: Notify,
+}
+
+impl AccountWrites {
+   fn retry_demotion(&self, id: i64) {
+      self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).demotions.insert(id);
+      self.ready.notify_one();
+   }
+}
+
+/// Coalesce account writes without making an upstream response await the DB.
+const ACCOUNT_WRITE_DELAY: Duration = Duration::from_secs(2);
 /// How long an account's pooled HTTP/2 connection to X stays open while idle.
 const WARM_CONNECTION_SECS: u64 = 900;
 /// An account on an exit that trails the fleet ranks as if it had this
@@ -197,8 +207,8 @@ struct SessionSlot {
    credentials: Arc<SessionCredentials>,
    /// A `ct0` x.com issued on a rejection, sent in place of the stored one.
    /// The credentials are shared and loaded once, so the fresh value lives
-   /// here and is written back to the sessions file for the next start.
-   fresh_ct0: Arc<std::sync::RwLock<Option<String>>>,
+   /// here and is written back to the account store for the next start.
+   fresh_ct0: std::sync::RwLock<Option<String>>,
    permits: Arc<Semaphore>,
    max_concurrency: usize,
    /// Signaled when a lease on this account returns its permit, waking one
@@ -212,14 +222,21 @@ struct SessionSlot {
    slow_exit: AtomicBool,
 }
 
+impl SessionSlot {
+   fn ct0(&self) -> String {
+      self.fresh_ct0.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+         .clone().unwrap_or_else(|| self.credentials.ct0.clone())
+   }
+}
+
 /// A parked call's claim on the accounts it listens on, given up on drop.
-struct Wanted<'a> {
-   sessions: &'a [SessionSlot],
+struct Wanted {
+   sessions: SessionSlots,
    indices: Vec<usize>,
 }
 
-impl<'a> Wanted<'a> {
-   fn claim(sessions: &'a [SessionSlot], indices: Vec<usize>) -> Self {
+impl Wanted {
+   fn claim(sessions: SessionSlots, indices: Vec<usize>) -> Self {
       for &index in &indices {
          sessions[index].wanted.fetch_add(1, Ordering::Relaxed);
       }
@@ -231,7 +248,7 @@ impl<'a> Wanted<'a> {
 /// the next call parked on it. Without this, a call that parked on an account
 /// already free but held for others sleeps until its rescan, and a call
 /// dropped right after its wake-up takes that wake-up with it.
-impl Drop for Wanted<'_> {
+impl Drop for Wanted {
    fn drop(&mut self) {
       for &index in &self.indices {
          let slot = &self.sessions[index];
@@ -289,230 +306,115 @@ impl Deref for SessionLease {
 }
 
 impl SessionPool {
-   /// Load sessions from a JSONL file.
-   #[expect(
-      clippy::cognitive_complexity,
-      reason = "session loading has inherent branching"
-   )]
-   pub async fn load(path: &str, max_concurrent_requests: u32) -> Result<Self> {
-      let parsed = if Path::new(path).exists() {
-         let content = fs::read_to_string(path).await?;
-         let mut parsed = Vec::new();
-
-         for line in content.lines() {
-            if line.trim().is_empty() {
-               continue;
-            }
-            match serde_json::from_str::<Session>(line) {
-               Ok(session) => parsed.push(session),
-               Err(err) => {
-                  tracing::warn!("Failed to parse session: {err}");
-               },
+   /// The store refuses to load until the offline migration has completed.
+   pub async fn from_store(store: AccountStore, max_concurrent_requests: u32) -> Result<Self> {
+      let sessions = store.load().await?;
+      let mut pool = Self::empty(max_concurrent_requests);
+      pool.append_sessions(sessions).await;
+      // Keep the existing PostgreSQL limit history, but never bootstrap it
+      // from a legacy file in the web process.
+      let db = limits_db::Connected::connect().await?;
+      let saved = db.load().await?;
+      let mut restored = 0;
+      {
+         let mut limits = pool.limits.write().await;
+         for (id, mut previous) in saved {
+            if let Some(current) = limits.get_mut(&id) {
+               previous.search_only = current.search_only;
+               *current = previous;
+               restored += 1;
             }
          }
+      }
+      tracing::info!(sessions = pool.len(), restored, "loaded account pool from PostgreSQL");
+      pool.limit_writer = Some(db.spawn(Arc::clone(&pool.limits)));
+      pool.account_store = Some(store.clone());
+      pool.spawn_account_writer(store);
+      Ok(pool)
+   }
 
-         tracing::info!("Loaded {} sessions", parsed.len());
-         parsed
-      } else {
-         tracing::warn!("Sessions file not found: {path}");
-         Vec::new()
-      };
+   #[cfg(test)]
+   async fn load(path: &str, max_concurrent_requests: u32) -> Result<Self> {
+      let content = fs::read_to_string(path).await?;
+      let mut pool = Self::empty(max_concurrent_requests);
+      pool.source_path = path.to_owned();
+      pool.append_sessions(
+         content.lines().filter_map(|line| serde_json::from_str(line).ok()).collect(),
+      )
+      .await;
+      Ok(pool)
+   }
 
-      let max_concurrency = usize::try_from(max_concurrent_requests.max(1)).unwrap_or(usize::MAX);
-      let mut sessions = Vec::with_capacity(parsed.len());
-      let mut limits = HashMap::with_capacity(parsed.len());
+   fn empty(max_concurrent_requests: u32) -> Self {
+      Self {
+         sessions: Arc::default(),
+         max_concurrency: usize::try_from(max_concurrent_requests.max(1)).unwrap_or(usize::MAX),
+         limits: Arc::default(),
+         cursor: Arc::default(),
+         limit_writer: None,
+         account_store: None,
+         #[cfg(test)]
+         source_path: String::new(),
+         #[cfg(test)]
+         source_write: Arc::default(),
+         writes: Arc::default(),
+         waiting: Arc::default(),
+         queue: Arc::default(),
+      }
+   }
 
-      for session in parsed {
+   fn slots(&self) -> SessionSlots {
+      Arc::clone(&self.sessions.read().unwrap_or_else(std::sync::PoisonError::into_inner))
+   }
+
+   /// Append accounts only. Existing slots, credentials, limits and leases
+   /// retain their identity even if a caller holds the previous snapshot.
+   pub(super) async fn append_sessions(&self, sessions: Vec<Session>) -> usize {
+      // Check before taking the shared limits write lock: reconciliation
+      // normally starts with a snapshot containing mostly existing accounts.
+      if sessions.is_empty() {
+         return 0;
+      }
+      let mut limits = self.limits.write().await;
+      let mut new_slots = Vec::new();
+      for session in sessions {
+         if limits.contains_key(&session.id) {
+            continue;
+         }
          let search_account = session.pool.eq_ignore_ascii_case("search");
          let (creds, mut lims) = session.into_credentials_and_limits();
          if search_account {
             lims.reserve_for_search();
          }
-         let id = creds.id;
-         sessions.push(SessionSlot {
+         limits.insert(creds.id, lims);
+         new_slots.push(Arc::new(SessionSlot {
             credentials: Arc::new(creds),
-            fresh_ct0: Arc::new(std::sync::RwLock::new(None)),
-            permits: Arc::new(Semaphore::new(max_concurrency)),
-            max_concurrency,
+            fresh_ct0: std::sync::RwLock::new(None),
+            permits: Arc::new(Semaphore::new(self.max_concurrency)),
+            max_concurrency: self.max_concurrency,
             freed: Arc::new(Notify::new()),
             wanted: AtomicUsize::new(0),
             last_active: AtomicU64::new(0),
             slow_exit: AtomicBool::new(false),
-         });
-         limits.insert(id, lims);
+         }));
       }
-
-      let state_path =
-         env::var("TEAPOT_SESSION_STATE_FILE").unwrap_or_else(|_| "session-limits.json".to_owned());
-      let state = if state_path.is_empty() {
-         None
-      } else {
-         match limits_db::Connected::connect().await {
-            Ok(mut db) => match db.load().await {
-               Ok(saved) if !saved.is_empty() => {
-                  let restored = Self::overlay(&mut limits, saved);
-                  tracing::info!("Restored rate-limit state for {restored} sessions from postgres");
-                  Some((state_path, Some(db)))
-               },
-               Ok(_) => {
-                  Self::restore(&state_path, &mut limits).await;
-                  if let Err(err) = db.import(&limits).await {
-                     tracing::warn!("could not import session limits into postgres: {err}");
-                  } else {
-                     tracing::info!(
-                        sessions = limits.len(),
-                        "imported session limits into postgres"
-                     );
-                  }
-                  Some((state_path, Some(db)))
-               },
-               Err(err) => {
-                  tracing::warn!("postgres limits unreadable, using the JSON file: {err}");
-                  Self::restore(&state_path, &mut limits).await;
-                  Some((state_path, None))
-               },
-            },
-            Err(err) => {
-               tracing::warn!("postgres limits store unavailable, keeping the JSON file: {err}");
-               Self::restore(&state_path, &mut limits).await;
-               Some((state_path, None))
-            },
-         }
-      };
-
-      let limits = Arc::new(RwLock::new(limits));
-      let state = state.map(|(path, ready)| {
-         let db = ready.map(|ready| ready.spawn(Arc::clone(&limits)));
-         Arc::new(LimitState {
-            path,
-            dirty: Notify::new(),
-            urgent: Notify::new(),
-            writing: Mutex::new(()),
-            db,
-         })
-      });
-
-      let pool = Self {
-         sessions: sessions.into(),
-         limits,
-         cursor: Arc::new(AtomicUsize::new(0)),
-         state,
-         source_path: path.to_owned(),
-         waiting: Arc::default(),
-         pending_ct0: Arc::default(),
-         queue: Arc::default(),
-      };
-      pool.spawn_flusher();
-
-      Ok(pool)
-   }
-
-   async fn restore(path: &str, limits: &mut HashMap<i64, SessionLimits>) {
-      let Ok(content) = fs::read_to_string(path).await else {
-         return;
-      };
-      match serde_json::from_str::<BTreeMap<i64, SessionLimits>>(&content) {
-         Ok(saved) => {
-            let mut restored = 0_usize;
-            for (id, mut saved_limits) in saved {
-               if let Some(slot) = limits.get_mut(&id) {
-                  saved_limits.search_only = slot.search_only;
-                  *slot = saved_limits;
-                  restored += 1;
-               }
-            }
-            tracing::info!("Restored rate-limit state for {restored} sessions");
-         },
-         Err(err) => tracing::warn!("Ignoring unreadable session state: {err}"),
+      let count = new_slots.len();
+      if count > 0 {
+         let mut slots = self.slots().to_vec();
+         slots.extend(new_slots);
+         *self.sessions.write().unwrap_or_else(std::sync::PoisonError::into_inner) = slots.into();
       }
-   }
-
-   fn overlay(
-      limits: &mut HashMap<i64, SessionLimits>,
-      saved: HashMap<i64, SessionLimits>,
-   ) -> usize {
-      let mut restored = 0_usize;
-      for (id, mut saved_limits) in saved {
-         if let Some(slot) = limits.get_mut(&id) {
-            // The sessions file is the assignment. A saved row from before
-            // the split must not pull a search account back into views, and
-            // must not reserve a view account that was never proven.
-            saved_limits.search_only = slot.search_only;
-            *slot = saved_limits;
-            restored += 1;
-         }
-      }
-      restored
-   }
-
-   fn spawn_flusher(&self) {
-      let Some(state) = self.state.clone() else {
-         return;
-      };
-      // Postgres writes the one account that changed. The JSON rewrite is
-      // only the fallback when that database is not there.
-      if state.db.is_some() {
-         return;
-      }
-      let limits = Arc::clone(&self.limits);
-      tokio::spawn(async move {
-         loop {
-            let urgent = tokio::select! {
-               () = state.urgent.notified() => true,
-               () = state.dirty.notified() => false,
-            };
-            if urgent {
-               sleep(URGENT_FLUSH_DELAY).await;
-            } else {
-               // Coalesce, since update_session_limit fires on every response.
-               tokio::select! {
-                  () = sleep(STATE_FLUSH_INTERVAL) => {},
-                  () = state.urgent.notified() => sleep(URGENT_FLUSH_DELAY).await,
-               }
-            }
-
-            if let Err(err) = Self::store(&state, &limits).await {
-               tracing::warn!("Failed to store session state: {err}");
-               state.dirty.notify_one();
-            }
-         }
-      });
-   }
-
-   async fn store(state: &LimitState, limits: &RwLock<HashMap<i64, SessionLimits>>) -> Result<()> {
-      let _writing = state.writing.lock().await;
-      // Copy under the lock, then encode after releasing it. Encoding the
-      // whole pool is the slow part, and every call to X needs this same lock.
-      let snapshot = limits.read().await.clone();
-      let body = serde_json::to_string(&snapshot)?;
-      let temporary = format!("{}.tmp", state.path);
-      fs::write(&temporary, body).await?;
-      fs::rename(&temporary, &state.path).await?;
-      Ok(())
+      count
    }
 
    fn mark_dirty(&self, session_id: i64) {
-      let Some(state) = self.state.as_ref() else {
-         return;
-      };
-      if let Some(db) = &state.db {
+      if let Some(db) = &self.limit_writer {
          db.save(session_id);
-      } else {
-         state.dirty.notify_one();
       }
    }
 
-   /// Write the one account straight away, for the transitions worth a
-   /// restart. The caller is a visitor's request, so it does not wait.
    fn persist_soon(&self, session_id: i64) {
-      let Some(state) = self.state.as_ref() else {
-         return;
-      };
-      if let Some(db) = &state.db {
-         db.save(session_id);
-      } else {
-         state.urgent.notify_one();
-      }
+      self.mark_dirty(session_id);
    }
 
    /// Acquire an available session for an API request.
@@ -581,10 +483,10 @@ impl SessionPool {
       excluded_id: i64,
    ) -> bool {
       let limits = self.limits.read().await;
-      self.sessions.iter().any(|slot| {
+      self.slots().iter().any(|slot| {
          slot.credentials.id != excluded_id
             && required_kind.is_none_or(|kind| slot.credentials.kind == kind)
-            && self.serves(&limits, slot.credentials.id, api)
+            && self.serves_visitor(&limits, slot.credentials.id, api)
       })
    }
 
@@ -602,13 +504,19 @@ impl SessionPool {
          && session_limits.search_only == search
    }
 
+   fn serves_visitor(&self, limits: &HashMap<i64, SessionLimits>, id: i64, api: &str) -> bool {
+      self.serves(limits, id, api)
+         && (operation_name(api) != "SearchTimeline"
+            || limits.get(&id).is_some_and(|lim| lim.verified(api)))
+   }
+
    async fn acquire_with_filter<'a>(
       &self,
       api_for: impl Fn(SessionKind) -> &'a str + Send,
       required_kind: Option<SessionKind>,
       accept: impl Fn(i64) -> bool + Send,
    ) -> Result<SessionLease> {
-      if self.sessions.is_empty() {
+      if self.is_empty() {
          return Err(Error::NoSessions);
       }
 
@@ -618,12 +526,13 @@ impl SessionPool {
       let mut parked = None;
       // This call's claim on the accounts it listened on, let go after the
       // next scan so the accounts it did not take go to the next in line.
-      let mut claim: Option<Wanted<'_>> = None;
+      let mut claim: Option<Wanted> = None;
       loop {
          let caller = if claim.is_some() { Caller::Queued } else { Caller::Fresh };
          let mut busy = Vec::new();
          let mut limits = self.limits.write().await;
-         let pass = self.scan(&mut limits, &api_for, required_kind, &accept, caller, Some(&mut busy));
+         let sessions = self.slots();
+         let pass = self.scan(&sessions, &mut limits, &api_for, required_kind, &accept, caller, Some(&mut busy));
          drop(claim.take());
          match pass {
             Ok(lease) => {
@@ -631,7 +540,7 @@ impl SessionPool {
                note(Outcome::Leased);
                return Ok(lease);
             },
-            Err(Miss::Busy) if !self.should_shed(started, &busy) => {},
+            Err(Miss::Busy) if !Self::should_shed(&sessions, started, &busy) => {},
             Err(Miss::Busy) => {
                drop(limits);
                note(Outcome::Shed);
@@ -642,8 +551,7 @@ impl SessionPool {
                // serve it looked like at that instant. Without this the 503
                // says only "rate limited", which is equally consistent with a
                // burst, a wave of parked accounts, and an exhausted window.
-               let refused = self
-                  .sessions
+               let refused = sessions
                   .iter()
                   .filter(|slot| {
                      limits
@@ -651,7 +559,7 @@ impl SessionPool {
                         .is_some_and(|lim| lim.refuses(api_for(slot.credentials.kind)))
                   })
                   .count();
-               let total = self.sessions.len();
+               let total = sessions.len();
                let reason = format!("{miss:?}");
                let (outcome, err) = miss.settle();
                drop(limits);
@@ -671,14 +579,14 @@ impl SessionPool {
          parked.get_or_insert_with(|| Parked::new(&self.waiting));
          let mut waiters = busy
             .iter()
-            .map(|&index| Box::pin(self.sessions[index].freed.notified()))
+            .map(|&index| Box::pin(sessions[index].freed.notified()))
             .collect::<Vec<_>>();
          // Register before leaving the lock so a release during the handoff
          // is still observed.
          for waiter in &mut waiters {
             waiter.as_mut().enable();
          }
-         claim = Some(Wanted::claim(&self.sessions, busy.clone()));
+         claim = Some(Wanted::claim(Arc::clone(&sessions), busy));
          drop(limits);
          let freed = std::future::poll_fn(|cx| {
             if waiters.iter_mut().any(|waiter| waiter.as_mut().poll(cx).is_ready()) {
@@ -700,18 +608,18 @@ impl SessionPool {
    /// calls wait on those accounts than their slots clear in about a second.
    /// The line is read from the busiest account, since a parked call listens
    /// on all of them.
-   fn should_shed(&self, started: Instant, busy: &[usize]) -> bool {
+   fn should_shed(sessions: &[Arc<SessionSlot>], started: Instant, busy: &[usize]) -> bool {
       if started.elapsed() >= MAX_PARK {
          return true;
       }
       let ahead = busy
          .iter()
-         .map(|&index| self.sessions[index].wanted.load(Ordering::Relaxed))
+         .map(|&index| sessions[index].wanted.load(Ordering::Relaxed))
          .max()
          .unwrap_or(0);
       let slots: usize = busy
          .iter()
-         .map(|&index| self.sessions[index].max_concurrency)
+         .map(|&index| sessions[index].max_concurrency)
          .sum();
       ahead >= slots.max(1) * QUEUE_PER_SLOT
    }
@@ -725,12 +633,12 @@ impl SessionPool {
       api: &str,
       required_kind: Option<SessionKind>,
    ) -> Result<Option<SessionLease>> {
-      if self.sessions.is_empty() {
+      if self.is_empty() {
          return Err(Error::NoSessions);
       }
       let started = Instant::now();
       let mut limits = self.limits.write().await;
-      let pass = self.scan(&mut limits, &|_| api, required_kind, &|_| true, Caller::Fresh, None);
+      let pass = self.scan(&self.slots(), &mut limits, &|_| api, required_kind, &|_| true, Caller::Fresh, None);
       drop(limits);
       match pass {
          Ok(lease) => {
@@ -760,12 +668,12 @@ impl SessionPool {
       required_kind: Option<SessionKind>,
       accept: impl Fn(i64) -> bool,
    ) -> Option<SessionLease> {
-      if self.sessions.is_empty() {
+      if self.is_empty() {
          return None;
       }
       let mut limits = self.limits.try_write().ok()?;
       self
-         .scan(&mut limits, &|_| api, required_kind, &accept, Caller::Hedge, None)
+         .scan(&self.slots(), &mut limits, &|_| api, required_kind, &accept, Caller::Hedge, None)
          .ok()
    }
 
@@ -790,14 +698,14 @@ impl SessionPool {
    fn pool_line(&self, limits: &HashMap<i64, SessionLimits>, api: &str, now: i64) -> String {
       let op_name = crate::types::operation_name(api);
       let mut count = PoolCount::default();
-      for slot in self.sessions.iter() {
+      for slot in self.slots().iter() {
          let lim = limits.get(&slot.credentials.id);
          let state = match lim {
             Some(lim)
                if lim.rejected
                   || lim.is_globally_limited_at(now)
                   || lim.refuses_at(op_name, now)
-                  || (op_name == "SearchTimeline" && !lim.search_only)
+                  || (op_name == "SearchTimeline" && (!lim.search_only || !lim.verified_op(op_name)))
                   || (op_name != "SearchTimeline" && lim.search_only) =>
             {
                &mut count.out
@@ -827,7 +735,7 @@ impl SessionPool {
    /// picked after the others. Returns how many are flagged.
    pub(crate) fn mark_slow_exits(&self, slow: impl Fn(i64) -> bool) -> usize {
       self
-         .sessions
+         .slots()
          .iter()
          .map(|slot| {
             let flagged = slow(slot.credentials.id);
@@ -846,6 +754,7 @@ impl SessionPool {
    /// once they free up, for a caller that is about to park.
    fn scan<'a>(
       &self,
+      sessions: &[Arc<SessionSlot>],
       limits: &mut HashMap<i64, SessionLimits>,
       api_for: &impl Fn(SessionKind) -> &'a str,
       required_kind: Option<SessionKind>,
@@ -855,7 +764,7 @@ impl SessionPool {
    ) -> StdResult<SessionLease, Miss> {
       let prefer_warm = caller == Caller::Hedge;
       let start = self.cursor.fetch_add(1, Ordering::Relaxed);
-      let count = self.sessions.len();
+      let count = sessions.len();
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
       let now_u64 = u64::try_from(now).unwrap_or(0);
       let mut best: Option<Candidate> = None;
@@ -865,7 +774,7 @@ impl SessionPool {
       let mut busy = false;
       for offset in 0..count {
          let index = start.wrapping_add(offset) % count;
-         let slot = &self.sessions[index];
+         let slot = &sessions[index];
          if !accept(slot.credentials.id)
             || required_kind.is_some_and(|kind| slot.credentials.kind != kind)
          {
@@ -877,10 +786,10 @@ impl SessionPool {
          if session_limits.is_some_and(|lim| lim.rejected) {
             continue;
          }
-         // Search uses only the search pool. A view account is not a candidate,
-         // even when it has never been searched, so a search cannot park
-         // behind accounts it must not touch.
-         if op_name == "SearchTimeline" && session_limits.is_none_or(|lim| !lim.search_only) {
+         // Only the background audit may try unchecked search accounts.
+         if op_name == "SearchTimeline"
+            && session_limits.is_none_or(|lim| !lim.search_only || !lim.verified_op(op_name))
+         {
             continue;
          }
          // A search account is not a candidate for anything else. `refuses`
@@ -964,7 +873,7 @@ impl SessionPool {
          } else {
             Miss::Spent
          })?;
-      let slot = &self.sessions[index];
+      let slot = &sessions[index];
       let api = api_for(slot.credentials.kind);
       let spent = match limits.get_mut(&slot.credentials.id) {
          Some(session_limits) => session_limits.try_spend(api),
@@ -991,9 +900,9 @@ impl SessionPool {
    /// How many sessions can still call `api`.
    pub(crate) async fn available_for(&self, api: &str) -> usize {
       let limits = self.limits.read().await;
-      self.sessions
+      self.slots()
          .iter()
-         .filter(|slot| self.serves(&limits, slot.credentials.id, api))
+         .filter(|slot| self.serves_visitor(&limits, slot.credentials.id, api))
          .count()
    }
 
@@ -1016,7 +925,7 @@ impl SessionPool {
    fn touch(&self, session_id: i64, now: i64) {
       let now_u64 = u64::try_from(now).unwrap_or(0);
       if let Some(slot) = self
-         .sessions
+         .slots()
          .iter()
          .find(|slot| slot.credentials.id == session_id)
       {
@@ -1082,7 +991,7 @@ impl SessionPool {
       drop(limits);
       if let Some(damage) = damage {
          let username = self
-            .sessions
+            .slots()
             .iter()
             .find(|slot| slot.credentials.id == session_id)
             .map(|slot| slot.credentials.username.clone())
@@ -1130,6 +1039,10 @@ impl SessionPool {
       }
       let mut limits = self.limits.write().await;
       if let Some(lim) = limits.get_mut(&session_id) {
+         if operation_name(api) == "SearchTimeline" && lim.refuses(api) {
+            // A response from a lease issued before quarantine cannot undo it.
+            return;
+         }
          lim.verify(api);
          if operation_name(api) == "SearchTimeline" {
             lim.reserve_for_search();
@@ -1139,12 +1052,26 @@ impl SessionPool {
       self.mark_dirty(session_id);
    }
 
+   /// Cookie accounts that still need a successful search for visitor admission.
+   pub(super) async fn search_audit_ids(&self, api: &str) -> Vec<i64> {
+      let limits = self.limits.read().await;
+      self.slots()
+         .iter()
+         .filter(|slot| slot.credentials.kind == SessionKind::Cookie)
+         .map(|slot| slot.credentials.id)
+         .filter(|&id| {
+            self.serves(&limits, id, api) && limits.get(&id).is_some_and(|lim| !lim.verified(api))
+         })
+         .collect()
+   }
+
    /// Cookie sessions reserved for search that have not yet returned a result
    /// or been refused.
+   #[cfg(test)]
    pub async fn unchecked_for(&self, api: &str) -> Vec<i64> {
       let limits = self.limits.read().await;
       self
-         .sessions
+         .slots()
          .iter()
          .filter(|slot| slot.credentials.kind == SessionKind::Cookie)
          .filter(|slot| {
@@ -1165,7 +1092,7 @@ impl SessionPool {
    /// mixed back into profile reads. Other refusals expire after a day.
    pub async fn mark_refused(&self, session_id: i64, api: &str) {
       let username = self
-         .sessions
+         .slots()
          .iter()
          .find(|slot| slot.credentials.id == session_id)
          .map(|slot| slot.credentials.username.clone())
@@ -1189,52 +1116,51 @@ impl SessionPool {
       self.persist_soon(session_id);
    }
 
-   /// Take this account out of search for good and back into the view pool.
-   ///
-   /// X answering a settings write with "not permitted to access this feature"
-   /// is a suspension, not an empty search page. Reading profiles is a
-   /// different gate, so the account is moved to the view pool rather than
-   /// dropped, and the sessions file is rewritten so a restart keeps it there.
-   pub async fn demote_to_view(&self, session_id: i64) {
+   /// Persist a viewing-only assignment for an account refused by search.
+   pub(super) async fn demote_to_view(&self, session_id: i64) {
       let mut limits = self.limits.write().await;
       if let Some(lim) = limits.get_mut(&session_id) {
          lim.search_banned = true;
          lim.search_only = false;
-         lim.suspicion_checked = true;
          lim.refuse("SearchTimeline");
+
       }
       drop(limits);
       self.persist_soon(session_id);
-      match demote_session_line(&self.source_path, session_id).await {
-         Ok(true) => tracing::info!(
-            session_id,
-            "moved to the view pool; it can still read profiles"
-         ),
-         Ok(false) => {},
-         Err(err) => tracing::warn!(session_id, "could not move it to the view pool: {err}"),
+      if let Some(store) = &self.account_store {
+         match store.demote(session_id).await {
+            Ok(()) => tracing::info!(session_id, "moved to the view pool"),
+            Err(err) => {
+               tracing::warn!(session_id, "could not persist view assignment; will retry: {err}");
+               self.writes.retry_demotion(session_id);
+            },
+         }
+         return;
+      }
+      #[cfg(test)]
+      {
+         let _write = self.source_write.lock().await;
+         if let Err(err) = demote_session_line(&self.source_path, session_id).await {
+            tracing::warn!(session_id, "could not move it to the view pool: {err}");
+         }
       }
    }
 
-   /// Claim the one settings probe that decides whether this account is
-   /// suspended. `true` means run it; `false` means another call already has.
-   pub async fn claim_suspicion_check(&self, session_id: i64) -> bool {
+   /// Rest an account after an ambiguous 404 without initiating a settings write.
+   pub(super) async fn record_search_404(&self, session_id: i64) -> bool {
       let mut limits = self.limits.write().await;
-      match limits.get_mut(&session_id) {
-         Some(lim) if !lim.suspicion_checked => {
-            lim.suspicion_checked = true;
-            true
-         },
-         _ => false,
+      let Some(lim) = limits.get_mut(&session_id) else {
+         return false;
+      };
+      if lim.refuses("SearchTimeline") {
+         return false;
       }
-   }
-
-   /// Give the claim back when the probe told us nothing, so a later empty
-   /// search can ask again.
-   pub async fn release_suspicion_check(&self, session_id: i64) {
-      let mut limits = self.limits.write().await;
-      if let Some(lim) = limits.get_mut(&session_id) {
-         lim.suspicion_checked = false;
-      }
+      lim.search_404_at = Some(time::OffsetDateTime::now_utc().unix_timestamp());
+      lim.refuse("SearchTimeline");
+      drop(limits);
+      log_events::note(Event::SearchRested);
+      self.persist_soon(session_id);
+      true
    }
 
    /// Mark a session's credentials as refused, taking it out of rotation until
@@ -1261,14 +1187,14 @@ impl SessionPool {
 
    /// Get session count.
    pub fn len(&self) -> usize {
-      self.sessions.len()
+      self.slots().len()
    }
 
-   /// Session ids in load order, used to pin SOCKS5 exits.
+   /// Session ids in load order, used to detect new accounts.
    #[must_use]
    pub fn session_ids(&self) -> Vec<i64> {
       self
-         .sessions
+         .slots()
          .iter()
          .map(|slot| slot.credentials.id)
          .collect()
@@ -1276,7 +1202,7 @@ impl SessionPool {
 
    /// Check if pool is empty.
    pub fn is_empty(&self) -> bool {
-      self.sessions.is_empty()
+      self.slots().is_empty()
    }
 
    /// Cookie sessions whose hiding settings are not off yet. Only they are
@@ -1285,7 +1211,7 @@ impl SessionPool {
    pub async fn pending_filter_sync_ids(&self) -> Vec<i64> {
       let limits = self.limits.read().await;
       self
-         .sessions
+         .slots()
          .iter()
          .filter(|slot| slot.credentials.kind == SessionKind::Cookie)
          .filter(|slot| {
@@ -1326,22 +1252,18 @@ impl SessionPool {
    /// One account's credentials, without taking a concurrency slot or checking
    /// whether it may be used. For work that only needs to know who it is.
    pub fn credentials(&self, session_id: i64) -> Option<Arc<SessionCredentials>> {
-      self.sessions
+      self.slots()
          .iter()
          .find(|slot| slot.credentials.id == session_id)
          .map(|slot| Arc::clone(&slot.credentials))
    }
 
    /// The `ct0` to send: one x.com issued on a rejection since startup, or the
-   /// one loaded from the sessions file.
+   /// one loaded from the account store.
    pub fn ct0(&self, session_id: i64) -> Option<String> {
-      let slot = self.sessions.iter().find(|slot| slot.credentials.id == session_id)?;
-      let fresh = slot
-         .fresh_ct0
-         .read()
-         .unwrap_or_else(std::sync::PoisonError::into_inner)
-         .clone();
-      Some(fresh.unwrap_or_else(|| slot.credentials.ct0.clone()))
+      let slots = self.slots();
+      let slot = slots.iter().find(|slot| slot.credentials.id == session_id)?;
+      Some(slot.ct0())
    }
 
    /// Keep a `ct0` x.com just issued and write it back for the next start.
@@ -1350,35 +1272,47 @@ impl SessionPool {
    /// token in its own `set-cookie`, so the account recovers on the call that
    /// failed instead of costing a page load of x.com.
    pub fn hold_ct0(&self, session_id: i64, ct0: String) {
-      let Some(slot) = self.sessions.iter().find(|slot| slot.credentials.id == session_id) else {
+      let slots = self.slots();
+      let Some(slot) = slots.iter().find(|slot| slot.credentials.id == session_id) else {
          return;
       };
-      *slot
-         .fresh_ct0
-         .write()
-         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ct0.clone());
-      self
-         .pending_ct0
-         .lock()
-         .unwrap_or_else(std::sync::PoisonError::into_inner)
-         .push((session_id, ct0));
-      let pool = self.clone();
-      tokio::spawn(async move {
-         sleep(Duration::from_secs(2)).await;
-         if let Err(err) = pool.flush_ct0().await {
-            tracing::warn!("could not store the fresh ct0s: {err}");
+      {
+         let mut pending = self.writes.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+         *slot.fresh_ct0.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ct0.clone());
+         if self.account_store.is_some() {
+            pending.ct0s.insert(session_id, ct0);
          }
-      });
+      }
+      self.writes.ready.notify_one();
    }
 
-   async fn flush_ct0(&self) -> Result<()> {
-      let pending = std::mem::take(
-         &mut *self.pending_ct0.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
-      );
-      if pending.is_empty() {
-         return Ok(());
-      }
-      store_session_ct0s(&self.source_path, &pending).await.map(|_| ())
+   fn spawn_account_writer(&self, store: AccountStore) {
+      let writes = Arc::clone(&self.writes);
+      tokio::spawn(async move {
+         loop {
+            writes.ready.notified().await;
+            sleep(ACCOUNT_WRITE_DELAY).await;
+            let PendingAccountWrites { ct0s, demotions } = std::mem::take(
+               &mut *writes.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            let ct0s = ct0s.into_iter().collect::<Vec<_>>();
+            if !ct0s.is_empty() && let Err(err) = store.save_ct0(&ct0s).await {
+               tracing::warn!("could not store the fresh ct0s; will retry: {err}");
+               let mut pending = writes.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+               for (id, ct0) in ct0s {
+                  // An update received during the flush supersedes the retry.
+                  pending.ct0s.entry(id).or_insert(ct0);
+               }
+               writes.ready.notify_one();
+            }
+            for id in demotions {
+               if let Err(err) = store.demote(id).await {
+                  tracing::warn!(session_id = id, "could not persist view assignment; will retry: {err}");
+                  writes.retry_demotion(id);
+               }
+            }
+         }
+      });
    }
 
    /// Put a retired account back in rotation: x.com issued it a token again.
@@ -1391,8 +1325,8 @@ impl SessionPool {
       self.persist_soon(session_id);
    }
 
-   /// X rejected this account's `ct0`, so every csrf-protected call it makes
-   /// will be refused until the account is imported again.
+   /// X rejected this account's `ct0`, so it cannot serve csrf-protected calls
+   /// without a fresh token. Ordinary imports skip existing accounts.
    ///
    /// Nothing is fetched to replace it. A refresh meant a full page load of
    /// x.com per rejection — the one request a browser makes that an API client
@@ -1408,7 +1342,7 @@ impl SessionPool {
          self.persist_soon(session_id);
          tracing::info!(
             session_id,
-            "ct0 is stale; out of rotation until it is imported again"
+            "ct0 is stale; account is out of rotation"
          );
       }
    }
@@ -1417,8 +1351,8 @@ impl SessionPool {
    /// A search account is handed out only for search, and for the one settings
    /// write that turns its own search filter off.
    pub async fn acquire_id(&self, session_id: i64, api: &str) -> Result<SessionLease> {
-      let slot = self
-         .sessions
+      let slots = self.slots();
+      let slot = slots
          .iter()
          .find(|slot| slot.credentials.id == session_id)
          .ok_or(Error::NoSessions)?;
@@ -1449,25 +1383,19 @@ impl SessionPool {
    /// pages are outside the per-session API rate limits. The id lets the fetch
    /// go out as that account's browser, on its proxy.
    pub(crate) fn cookie_header(&self) -> Option<(i64, String)> {
-      self
-         .sessions
-         .iter()
-         .map(|slot| &slot.credentials)
-         .find(|creds| {
-            creds.kind == SessionKind::Cookie
-               && !creds.auth_token.is_empty()
-               && !creds.ct0.is_empty()
-               && !self
-                  .limits
-                  .try_read()
-                  .ok()
-                  .and_then(|limits| limits.get(&creds.id).map(|lim| lim.search_only))
-                  .unwrap_or(false)
-         })
-         .map(|creds| {
-            let ct0 = creds.ct0.clone();
-            (creds.id, format!("auth_token={}; ct0={ct0}", creds.auth_token))
-         })
+      let limits = self.limits.try_read().ok()?;
+      let slots = self.slots();
+      slots.iter().find_map(|slot| {
+         let creds = &slot.credentials;
+         if creds.kind != SessionKind::Cookie
+            || creds.auth_token.is_empty()
+            || limits.get(&creds.id).is_some_and(|limit| limit.search_only)
+         {
+            return None;
+         }
+         let ct0 = slot.ct0();
+         (!ct0.is_empty()).then(|| (creds.id, format!("auth_token={}; ct0={ct0}", creds.auth_token)))
+      })
    }
 
    /// Get health statistics about the session pool.
@@ -1498,19 +1426,17 @@ impl SessionPool {
             *by_api.entry(api.clone()).or_default() += used;
          }
       }
+      let total = self.len();
       drop(limits);
 
       HealthResponse {
          sessions: SessionStats {
-            total: self.sessions.len(),
+            total,
             limited: limited_count,
             rejected: rejected_count,
             // Endpoint budgets are per API, so this counts only sessions that
             // are unusable for every endpoint.
-            available: self
-               .sessions
-               .len()
-               .saturating_sub(limited_count + rejected_count),
+            available: total.saturating_sub(limited_count + rejected_count),
          },
          requests: RequestStats {
             total: total_requests,
@@ -1525,7 +1451,7 @@ impl SessionPool {
       let limits = self.limits.read().await;
 
       let sessions = self
-         .sessions
+         .slots()
          .iter()
          .map(|slot| {
             let sess = &slot.credentials;
@@ -1550,7 +1476,7 @@ impl SessionPool {
 
       DebugResponse {
          sessions,
-         count: self.sessions.len(),
+         count: self.slots().len(),
          timestamp: time::OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
       }
    }
@@ -1620,56 +1546,7 @@ pub fn oauth1_sign(
    format!("OAuth {auth_header}")
 }
 
-/// Replace the `ct0` stored for each of these accounts, in one rewrite.
-async fn store_session_ct0s(path: &str, fresh: &[(i64, String)]) -> Result<usize> {
-   if fresh.is_empty() {
-      return Ok(0);
-   }
-   let ct0s: HashMap<i64, &str> = fresh.iter().map(|(id, ct0)| (*id, ct0.as_str())).collect();
-   let content = fs::read_to_string(path).await?;
-   let mut kept = String::with_capacity(content.len());
-   let mut changed = 0_usize;
-   for line in content.lines() {
-      if line.trim().is_empty() {
-         continue;
-      }
-      let Some(id) = session_line_id(line) else {
-         kept.push_str(line);
-         kept.push('\n');
-         continue;
-      };
-      let Some(ct0) = ct0s.get(&id) else {
-         kept.push_str(line);
-         kept.push('\n');
-         continue;
-      };
-      match retarget_ct0(line, ct0) {
-         Some(updated) => {
-            changed += 1;
-            kept.push_str(&updated);
-         },
-         None => kept.push_str(line),
-      }
-      kept.push('\n');
-   }
-   if changed == 0 {
-      return Ok(0);
-   }
-   let tmp = format!("{path}.tmp");
-   fs::write(&tmp, kept).await?;
-   fs::rename(&tmp, path).await?;
-   Ok(changed)
-}
-
-fn retarget_ct0(line: &str, ct0: &str) -> Option<String> {
-   let mut value: serde_json::Value = serde_json::from_str(line).ok()?;
-   if value.get("ct0").and_then(|item| item.as_str()) == Some(ct0) {
-      return None;
-   }
-   value["ct0"] = serde_json::Value::String(ct0.to_owned());
-   serde_json::to_string(&value).ok()
-}
-
+#[cfg(test)]
 /// Drop `pool` from one account's line, so the next start loads it into the
 /// view pool. `false` when the line carried no pool already.
 async fn demote_session_line(path: &str, session_id: i64) -> Result<bool> {
@@ -1697,8 +1574,6 @@ async fn demote_session_line(path: &str, session_id: i64) -> Result<bool> {
    if !changed {
       return Ok(false);
    }
-   // Several accounts are moved at once, so a shared name is renamed out
-   // from under the next write.
    let tmp = format!(
       "{path}.{}.{}.tmp",
       std::process::id(),
@@ -1709,6 +1584,7 @@ async fn demote_session_line(path: &str, session_id: i64) -> Result<bool> {
    Ok(true)
 }
 
+#[cfg(test)]
 fn session_line_id(line: &str) -> Option<i64> {
    let value: serde_json::Value = serde_json::from_str(line).ok()?;
    value.get("id")?.as_i64()
@@ -1781,8 +1657,42 @@ mod tests {
    }
 
    #[tokio::test]
+   async fn appending_preserves_credentials_leases_and_parked_calls() {
+      let pool = SessionPool::empty(1);
+      let session = |line| serde_json::from_str(line).unwrap();
+      assert_eq!(pool.append_sessions(vec![session(
+         r#"{"id":1,"username":"first","kind":"cookie","auth_token":"a","ct0":"initial"}"#,
+      )]).await, 1);
+      let first = pool.acquire("TweetDetail", None).await.unwrap();
+      let original = pool.slots();
+      let queued = pool.acquire_where("TweetDetail", None, |id| id == 1);
+      tokio::pin!(queued);
+      std::future::poll_fn(|cx| {
+         assert!(queued.as_mut().poll(cx).is_pending());
+         std::task::Poll::Ready(())
+      }).await;
+      assert_eq!(original[0].wanted.load(super::Ordering::Relaxed), 1);
+      pool.hold_ct0(1, "fresh".to_owned());
+
+      assert_eq!(pool.append_sessions(vec![
+         session(r#"{"id":1,"username":"replacement","pool":"search","ct0":"stale"}"#),
+         session(r#"{"id":2,"username":"second","kind":"cookie","auth_token":"b","ct0":"initial"}"#),
+      ]).await, 1);
+      let after = pool.slots();
+      assert!(std::sync::Arc::ptr_eq(&original[0], &after[0]));
+      assert_eq!(pool.credentials(1).unwrap().username, "first");
+      assert_eq!(pool.ct0(1).as_deref(), Some("fresh"));
+      assert_eq!(after[0].permits.available_permits(), 0);
+      assert_eq!(after[0].wanted.load(super::Ordering::Relaxed), 1);
+      let second = pool.acquire("TweetDetail", None).await.unwrap();
+      assert_eq!(second.id, 2);
+      drop(first);
+      assert_eq!(timeout(Duration::from_millis(200), queued).await.unwrap().unwrap().id, 1);
+      assert_eq!(after[0].wanted.load(super::Ordering::Relaxed), 0);
+   }
+
+   #[tokio::test]
    async fn a_full_account_hands_the_next_call_over_immediately() {
-      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!(
          "teapot-session-pool-spread-{}.jsonl",
          process::id()
@@ -1828,7 +1738,6 @@ mod tests {
 
    #[tokio::test]
    async fn the_account_with_the_most_remaining_goes_next() {
-      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!(
          "teapot-session-pool-richest-{}.jsonl",
          process::id()
@@ -1871,7 +1780,6 @@ mod tests {
 
    #[tokio::test]
    async fn a_full_pool_takes_whichever_account_frees() {
-      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!(
          "teapot-session-pool-frees-{}.jsonl",
          process::id()
@@ -1921,7 +1829,6 @@ mod tests {
 
    /// Two accounts, one slot each. Account 1 cannot look up profiles.
    async fn profile_pool(name: &str) -> (SessionPool, std::path::PathBuf) {
-      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!("teapot-session-pool-{name}-{}.jsonl", process::id()));
       fs::write(
          &path,
@@ -2011,7 +1918,6 @@ mod tests {
 
    #[tokio::test]
    async fn a_free_pick_steps_aside_instead_of_queueing() {
-      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!(
          "teapot-session-pool-free-{}.jsonl",
          process::id()
@@ -2048,7 +1954,6 @@ mod tests {
 
    #[tokio::test]
    async fn a_call_stuck_behind_a_held_account_is_turned_away_not_kept() {
-      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!(
          "teapot-session-pool-shed-wait-{}.jsonl",
          process::id()
@@ -2081,7 +1986,6 @@ mod tests {
 
    #[tokio::test]
    async fn a_line_too_long_to_clear_is_not_joined() {
-      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!(
          "teapot-session-pool-shed-line-{}.jsonl",
          process::id()
@@ -2131,7 +2035,6 @@ mod tests {
 
    #[tokio::test]
    async fn pool_filters_kinds_rotates_and_enforces_concurrency() {
-      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!("teapot-session-pool-{}.jsonl", process::id()));
       let sessions = concat!(
          r#"{"id":1,"username":"cookie","kind":"cookie","auth_token":"a","ct0":"c"}"#,
@@ -2178,7 +2081,6 @@ mod tests {
    async fn a_spent_window_is_not_handed_out_again() {
       // Keep the test from flushing into the live session-limits file.
       // The setter is process-global; this binary is the test run, not teapot.
-      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!("teapot-session-pool-spend-{}.jsonl", process::id()));
       fs::write(
          &path,
@@ -2229,7 +2131,6 @@ mod tests {
 
    #[tokio::test]
    async fn a_refused_operation_skips_that_account_only() {
-      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!(
          "teapot-session-pool-refused-{}.jsonl",
          process::id()
@@ -2266,7 +2167,6 @@ mod tests {
 
    #[tokio::test]
    async fn accounts_known_to_search_go_first() {
-      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!(
          "teapot-session-pool-verified-{}.jsonl",
          process::id()
@@ -2340,8 +2240,57 @@ mod tests {
    }
 
    #[tokio::test]
+   async fn ambiguous_search_404_quarantines_once_and_only_confirmation_moves_the_account() {
+      let path = env::temp_dir().join(format!("teapot-search-404-{}.jsonl", process::id()));
+      let search = "id/SearchTimeline";
+      fs::write(
+         &path,
+         concat!(
+            r#"{"id":1,"username":"first","kind":"cookie","auth_token":"a","ct0":"c","pool":"search"}"#,
+            "\n",
+            r#"{"id":2,"username":"second","kind":"cookie","auth_token":"b","ct0":"d","pool":"search"}"#,
+            "\n"
+         ),
+      )
+      .await
+      .unwrap();
+      let pool = SessionPool::load(path.to_str().unwrap(), 4).await.unwrap();
+      let (first, duplicate) = tokio::join!(pool.record_search_404(1), pool.record_search_404(1));
+      assert_ne!(first, duplicate);
+      pool.mark_verified(1, search).await;
+      assert!(pool.acquire_id(1, search).await.is_err());
+      assert!(pool.acquire_id(1, "id/UserTweets").await.is_err());
+      assert!(pool.acquire_id(1, "account/settings").await.is_ok());
+      assert_eq!(pool.acquire_id(2, search).await.unwrap().id, 2);
+      assert!(pool.acquire(search, None).await.is_err());
+      assert!(pool.acquire_free(search, None).await.is_err());
+      assert!(pool.try_acquire_where(search, None, |_| true).is_none());
+      pool.mark_verified(2, search).await;
+      assert_eq!(pool.acquire(search, None).await.unwrap().id, 2);
+      pool.demote_to_view(2).await;
+      assert!(pool.acquire(search, None).await.is_err());
+      assert!(pool.acquire_id(2, search).await.is_err());
+
+      assert!(pool.acquire_id(1, search).await.is_err());
+      assert!(pool.acquire_id(1, "id/UserTweets").await.is_err());
+      pool.limits.write().await.get_mut(&1).unwrap().search_404_at = Some(0);
+      pool.limits.write().await.get_mut(&1).unwrap().refused_ops.clear();
+      assert!(pool.acquire_id(1, search).await.is_ok());
+      pool.demote_to_view(1).await;
+      assert!(pool.limits.read().await.values().all(|lim| lim.search_banned));
+
+      let reloaded = SessionPool::load(path.to_str().unwrap(), 4).await.unwrap();
+      for pool in [&pool, &reloaded] {
+         for id in [1, 2] {
+            assert!(pool.acquire_id(id, search).await.is_err());
+            assert!(pool.acquire_id(id, "id/UserTweets").await.is_ok());
+         }
+      }
+      fs::remove_file(path).await.unwrap();
+   }
+
+   #[tokio::test]
    async fn a_spare_account_is_not_waited_for_behind_a_queued_first_copy() {
-      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!(
          "teapot-session-pool-spare-{}.jsonl",
          process::id()
@@ -2390,7 +2339,6 @@ mod tests {
 
    #[tokio::test]
    async fn accounts_on_a_slow_exit_go_after_the_quick_ones() {
-      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!(
          "teapot-session-pool-slow-exit-{}.jsonl",
          process::id()
@@ -2432,8 +2380,8 @@ mod tests {
 
       // No window yet: the slow exit's warm connection loses to a quick exit.
       pool.update_session_limit(1, "Other", 50, 50, 0).await;
-      pool.sessions[1].last_active.store(0, super::Ordering::Relaxed);
-      pool.sessions[2].last_active.store(0, super::Ordering::Relaxed);
+      pool.slots()[1].last_active.store(0, super::Ordering::Relaxed);
+      pool.slots()[2].last_active.store(0, super::Ordering::Relaxed);
       for _ in 0..4 {
          let unmeasured = pool
             .acquire("TweetDetail", Some(SessionKind::Cookie))
@@ -2464,7 +2412,6 @@ mod tests {
 
    #[tokio::test]
    async fn a_warm_account_beats_a_cold_one_for_a_new_endpoint_and_hedge() {
-      unsafe { env::set_var("TEAPOT_SESSION_STATE_FILE", "") };
       let path = env::temp_dir().join(format!(
          "teapot-session-pool-warm-{}.jsonl",
          process::id()
@@ -2500,7 +2447,7 @@ mod tests {
       pool
          .update_session_limit(1, "TweetDetail", 150, 140, reset)
          .await;
-      pool.sessions[0]
+      pool.slots()[0]
          .last_active
          .store(0, super::Ordering::Relaxed);
       pool

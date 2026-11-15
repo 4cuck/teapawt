@@ -2589,6 +2589,37 @@ mod tests {
       assert!(started.elapsed() < API_HEADER_DEADLINE * 2, "{:?}", started.elapsed());
    }
 
+   #[tokio::test]
+   async fn account_transport_sends_csrf_cookie_and_matching_header() {
+      use tokio::{io::{AsyncReadExt as _, AsyncWriteExt as _}, net::TcpListener};
+
+      let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let uri = format!("http://{}/", listener.local_addr().unwrap());
+      let server = tokio::spawn(async move {
+         let (mut socket, _) = listener.accept().await.unwrap();
+         let mut request = Vec::new();
+         let mut buf = [0; 1024];
+         while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            let len = socket.read(&mut buf).await.unwrap();
+            assert_ne!(len, 0);
+            request.extend_from_slice(&buf[..len]);
+         }
+         socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+         String::from_utf8(request).unwrap()
+      });
+      let jar = super::super::cookies::Jar::memory();
+      let client = HttpClient::new("", "", Purpose::Api).with_cookies(jar);
+      let mut headers = HeaderMap::new();
+      headers.insert(header::COOKIE, HeaderValue::from_static("auth_token=fake-auth; ct0=fake-csrf"));
+      headers.insert("x-csrf-token", HeaderValue::from_static("fake-csrf"));
+      let egress = Egress { session: 5089, proxy: None };
+      tokio::time::timeout(Duration::from_secs(5), client.get_on(&uri, &headers, Some(&egress)))
+         .await.unwrap().unwrap();
+      let request = server.await.unwrap().to_ascii_lowercase();
+      assert!(request.lines().any(|l| l == "cookie: auth_token=fake-auth; ct0=fake-csrf"));
+      assert!(request.lines().any(|l| l == "x-csrf-token: fake-csrf"));
+   }
+
    #[test]
    fn safari_gets_no_fetch_metadata_it_never_sends() {
       let mut headers = HeaderMap::new();

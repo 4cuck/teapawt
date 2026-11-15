@@ -65,6 +65,9 @@ pub struct SessionLimits {
    /// Kept out of profile pages. Search is tracked separately in `refused_ops`.
    #[serde(default)]
    pub profile_banned: bool,
+   /// Most recent ambiguous search 404. It warrants a rest, not a ban.
+   #[serde(default)]
+   pub search_404_at: Option<i64>,
    /// Reserved for search. Set when the account has returned search results,
    /// or when it was imported as a search account. View calls never take it,
    /// so a search suspension cannot spread through profile traffic.
@@ -84,12 +87,6 @@ pub struct SessionLimits {
    /// re-imported with a fresh token later.
    #[serde(default)]
    pub ct0_dead: bool,
-   /// The settings write has been used to find out whether this account is
-   /// suspended rather than merely out of matches. Asked once, so an account
-   /// that answers search with nothing does not cost a settings POST every
-   /// time it comes back from its rest.
-   #[serde(default)]
-   pub suspicion_checked: bool,
    /// Calls X refused this account with a bare 429, by endpoint. Kept apart
    /// from `apis`, which holds X's real window.
    #[serde(skip)]
@@ -136,6 +133,9 @@ const REFUSED_OP_SECS: i64 = 24 * 60 * 60;
 /// back empty. A ban is a separate decision: only a settings write that X
 /// refuses sets one.
 const SEARCH_REFUSED_SECS: i64 = 3 * 60;
+
+/// Keep repeated ambiguous 404s from cycling through the pool every few minutes.
+const SEARCH_404_COOLDOWN_SECS: i64 = 30 * 60;
 
 /// `SearchTimeline` from `ph2fARFabkwfxqmSKQ1OPw/SearchTimeline`, so a mark
 /// outlives a change of query id.
@@ -277,7 +277,12 @@ impl SessionLimits {
       if self.search_only && name != "SearchTimeline" {
          return true;
       }
-      if self.search_banned && name == "SearchTimeline" {
+      if name == "SearchTimeline"
+         && (self.search_banned
+            || self
+               .search_404_at
+               .is_some_and(|at| now - at < SEARCH_404_COOLDOWN_SECS))
+      {
          return true;
       }
       if self.profile_banned && is_profile_op(name) {
@@ -334,10 +339,7 @@ impl SessionLimits {
       self.verified_ops.insert(name.to_owned(), now);
    }
 
-   /// Whether it is still unknown if X lets this account call `api`.
-   /// Search is not probed across the view pool: an account joins search only
-   /// after it has returned results, or because it was imported for search.
-   #[must_use]
+   #[cfg(test)]
    pub fn unchecked(&self, api: &str) -> bool {
       if operation_name(api) == "SearchTimeline" && !self.search_only {
          return false;
@@ -494,10 +496,10 @@ impl Session {
             verified_ops: HashMap::new(),
             profile_strikes: 0,
             profile_banned: false,
+            search_404_at: None,
             search_only: self.pool.eq_ignore_ascii_case("search"),
             search_banned: false,
             ct0_dead: false,
-            suspicion_checked: false,
             resting: HashMap::new(),
          },
       )

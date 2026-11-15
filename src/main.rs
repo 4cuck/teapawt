@@ -1,3 +1,4 @@
+mod accounts;
 mod api;
 mod cache;
 mod config;
@@ -43,6 +44,7 @@ use tracing_appender::non_blocking::NonBlockingBuilder;
 use tracing_subscriber::{fmt, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 use crate::{
+   accounts::AccountStore,
    api::{ApiClient, HttpClient, ProxyPool, SessionPool},
    cache::Cache,
    config::{Config, GifTranscodingMode},
@@ -58,6 +60,7 @@ pub struct AppState {
    pub config: Arc<Config>,
    pub cache: Cache,
    pub api: ApiClient,
+   pub accounts: AccountStore,
    pub http_client: HttpClient,
    pub gif_transcoder: Option<Arc<GifTranscoder>>,
    pub translation_limiter: Arc<translation::TranslationLimiter>,
@@ -123,6 +126,11 @@ async fn main() -> eyre::Result<()> {
       internal_error: config.config.internal_error_message.clone(),
    });
 
+   // Require the offline migration before starting background work; never
+   // import account files from the web process.
+   let accounts = AccountStore::connect().await?;
+   let sessions = SessionPool::from_store(accounts.clone(), config.config.max_concurrent_reqs).await?;
+
    // Cloudflare caches the HTML (`s-maxage`). This process does not keep a
    // second copy: that map served timelines after new posts and, full, made
    // every request wait on the cache lock. Numeric ids are not pages; they
@@ -132,14 +140,7 @@ async fn main() -> eyre::Result<()> {
    let cache = Cache::disabled();
    tokio::spawn(cache::ids::load());
 
-   // Initialize session pool
-   let sessions_path =
-      env::var("TEAPOT_SESSIONS_FILE").unwrap_or_else(|_| "sessions.jsonl".to_owned());
-   let sessions = SessionPool::load(&sessions_path, config.config.max_concurrent_reqs).await?;
-   let mut proxies = ProxyPool::load(&config).await?;
-   if let Some(pool) = proxies.take() {
-      proxies = Some(pool.bind_sessions(&sessions.session_ids(), &config).await?);
-   }
+   let proxies = ProxyPool::load(&config).await?;
 
    // Find the newest browser version per engine that X's edge accepts, so
    // every session client built from here on presents one X will talk to.
@@ -152,7 +153,7 @@ async fn main() -> eyre::Result<()> {
    let exits = proxies.as_ref().map(ProxyPool::all).unwrap_or_default();
 
    // Initialize API client
-   let api = ApiClient::new(&config, sessions, proxies, fallback_proxies);
+   let api = ApiClient::new(&config, sessions, proxies, fallback_proxies, accounts.clone()).await?;
    api.spawn_tid_warmup();
    api.spawn_filter_sync();
    api.spawn_search_check();
@@ -207,6 +208,7 @@ async fn main() -> eyre::Result<()> {
       config: Arc::clone(&config),
       cache,
       api,
+      accounts,
       http_client,
       gif_transcoder,
       translation_limiter: Arc::new(translation::TranslationLimiter::new()),

@@ -12,17 +12,23 @@
 //! what a browser does with the same header.
 
 use std::{
-   collections::{BTreeMap, HashMap},
-   path::PathBuf,
-   sync::{
-      Arc,
-      atomic::{AtomicBool, Ordering},
-   },
+   collections::{BTreeMap, HashMap, HashSet},
+   sync::Arc,
    time::Duration,
 };
 
 use axum::http::{HeaderMap, header};
 use tokio::sync::{Notify, RwLock};
+
+use crate::{accounts::AccountStore, error::Result, types::Session};
+
+type CookieBags = HashMap<i64, BTreeMap<String, String>>;
+
+#[derive(Default)]
+struct JarState {
+   cookies: CookieBags,
+   dirty: HashSet<i64>,
+}
 
 /// How long the jar may sit dirty before it is written out.
 const FLUSH_EVERY: Duration = Duration::from_secs(15);
@@ -37,44 +43,55 @@ const SESSION_OWNED: [&str; 2] = ["auth_token", "ct0"];
 
 /// Every account's cookies, keyed by session id.
 pub struct Jar {
-   path: PathBuf,
-   cookies: RwLock<HashMap<i64, BTreeMap<String, String>>>,
-   dirty: AtomicBool,
+   state: RwLock<JarState>,
    flush: Notify,
 }
 
 impl Jar {
-   /// Open the jar at `path`, keeping whatever a previous run stored.
-   pub fn load(path: impl Into<PathBuf>) -> Arc<Self> {
-      let path = path.into();
-      let cookies = std::fs::read_to_string(&path)
-         .ok()
-         .and_then(|text| serde_json::from_str::<HashMap<i64, BTreeMap<String, String>>>(&text).ok())
-         .unwrap_or_default();
-      if !cookies.is_empty() {
-         tracing::info!(accounts = cookies.len(), file = %path.display(), "cookie jar loaded");
-      }
+   pub async fn from_store(store: &AccountStore) -> Result<Arc<Self>> {
+      Ok(Self::new(store.load_cookies().await?))
+   }
+
+   #[cfg(test)]
+   pub(super) fn memory() -> Arc<Self> {
+      Self::new(CookieBags::new())
+   }
+
+   fn new(cookies: CookieBags) -> Arc<Self> {
       Arc::new(Self {
-         path,
-         cookies: RwLock::new(cookies),
-         dirty: AtomicBool::new(false),
+         state: RwLock::new(JarState { cookies, dirty: HashSet::new() }),
          flush: Notify::new(),
       })
    }
 
-   /// Write the jar out on a timer, and once more when the process stops.
-   pub fn spawn_flusher(self: &Arc<Self>) {
+   /// Seed only unpublished accounts, leaving existing runtime jars alone.
+   pub async fn seed_imports(&self, sessions: &[Session], mut cookies: CookieBags) {
+      let mut state = self.state.write().await;
+      for session in sessions {
+         if let Some(bag) = cookies.remove(&session.id) {
+            state.cookies.entry(session.id).or_insert(bag);
+         }
+      }
+   }
+
+   /// Flush only dirty account jars, including empty jars for deletions.
+   pub fn spawn_flusher(self: &Arc<Self>, store: AccountStore) {
       let jar = Arc::clone(self);
       tokio::spawn(async move {
          loop {
             jar.flush.notified().await;
             tokio::time::sleep(FLUSH_EVERY).await;
-            if !jar.dirty.swap(false, Ordering::Relaxed) {
-               continue;
-            }
-            if let Err(err) = jar.write().await {
-               jar.dirty.store(true, Ordering::Relaxed);
-               tracing::warn!(file = %jar.path.display(), "cookie jar not written: {err}");
+            let pending = {
+               let mut state = jar.state.write().await;
+               let ids = std::mem::take(&mut state.dirty);
+               ids.into_iter().map(|id| (id, state.cookies[&id].clone())).collect::<CookieBags>()
+            };
+            if !pending.is_empty() && let Err(err) = store.save_cookies(&pending).await {
+               // Re-mark ids, not stale snapshots: the next flush will read
+               // the newest jar, including changes made during this write.
+               jar.state.write().await.dirty.extend(pending.into_keys());
+               jar.flush.notify_one();
+               tracing::warn!("cookie jars not written; will retry: {err}");
             }
          }
       });
@@ -84,8 +101,8 @@ impl Jar {
    /// rather than stored, so a cleared cookie stops being sent.
    pub async fn absorb(&self, session: i64, headers: &HeaderMap) {
       let mut changed = false;
-      let mut limits = self.cookies.write().await;
-      let jar = limits.entry(session).or_default();
+      let mut state = self.state.write().await;
+      let jar = state.cookies.entry(session).or_default();
       for value in headers.get_all(header::SET_COOKIE) {
          let Ok(line) = value.to_str() else {
             continue;
@@ -106,9 +123,8 @@ impl Jar {
             None => changed |= jar.remove(&name).is_some(),
          }
       }
-      drop(limits);
       if changed {
-         self.dirty.store(true, Ordering::Relaxed);
+         state.dirty.insert(session);
          self.flush.notify_one();
       }
    }
@@ -125,8 +141,8 @@ impl Jar {
          .filter_map(|pair| pair.split('=').next())
          .map(str::trim)
          .collect();
-      let jar = self.cookies.read().await;
-      let Some(cookies) = jar.get(&session) else {
+      let state = self.state.read().await;
+      let Some(cookies) = state.cookies.get(&session) else {
          return;
       };
       let mut merged = existing.to_owned();
@@ -145,19 +161,9 @@ impl Jar {
       }
    }
 
-   /// The bag this account holds, for tests and for seeding from an import.
-   pub async fn cookies_for(&self, session: i64) -> BTreeMap<String, String> {
-      self.cookies.read().await.get(&session).cloned().unwrap_or_default()
-   }
-
-   async fn write(&self) -> std::io::Result<()> {
-      let body = {
-         let cookies = self.cookies.read().await;
-         serde_json::to_string(&*cookies).map_err(std::io::Error::other)?
-      };
-      let tmp = format!("{}.tmp", self.path.display());
-      tokio::fs::write(&tmp, body).await?;
-      tokio::fs::rename(&tmp, &self.path).await
+   #[cfg(test)]
+   async fn cookies_for(&self, session: i64) -> BTreeMap<String, String> {
+      self.state.read().await.cookies.get(&session).cloned().unwrap_or_default()
    }
 }
 
@@ -197,7 +203,7 @@ mod tests {
 
    #[tokio::test]
    async fn a_response_replaces_the_value_it_names() {
-      let jar = Jar::load("/tmp/teapot-jar-test.json");
+      let jar = Jar::new(HashMap::new());
       jar.absorb(7, &header_map(&["guest_id=v1%3D1; Path=/; Domain=.x.com"]))
          .await;
       jar.absorb(7, &header_map(&["guest_id=v1%3D2; Path=/; Domain=.x.com"]))
@@ -207,7 +213,7 @@ mod tests {
 
    #[tokio::test]
    async fn a_deleted_cookie_stops_being_kept() {
-      let jar = Jar::load("/tmp/teapot-jar-test.json");
+      let jar = Jar::new(HashMap::new());
       jar.absorb(7, &header_map(&["att=1; Path=/", "gt=2; Path=/"])).await;
       jar.absorb(7, &header_map(&["att=deleted; Path=/; Max-Age=0"])).await;
       let held = jar.cookies_for(7).await;
@@ -217,7 +223,7 @@ mod tests {
 
    #[tokio::test]
    async fn the_session_cookies_win_over_the_jar() {
-      let jar = Jar::load("/tmp/teapot-jar-test.json");
+      let jar = Jar::new(HashMap::new());
       jar.absorb(7, &header_map(&["twid=u%3D42; Path=/", "ct0=stale; Path=/"]))
          .await;
       let mut headers = HeaderMap::new();
@@ -229,7 +235,7 @@ mod tests {
 
    #[tokio::test]
    async fn an_account_keeps_its_own_bag() {
-      let jar = Jar::load("/tmp/teapot-jar-test.json");
+      let jar = Jar::new(HashMap::new());
       jar.absorb(1, &header_map(&["twid=u%3D1"])).await;
       jar.absorb(2, &header_map(&["twid=u%3D2"])).await;
       assert_eq!(jar.cookies_for(1).await["twid"], "u%3D1");
@@ -238,7 +244,7 @@ mod tests {
 
    #[tokio::test]
    async fn the_csrf_pair_is_never_kept_or_replayed() {
-      let jar = Jar::load("/tmp/teapot-jar-test.json");
+      let jar = Jar::new(HashMap::new());
       // A refresh visit sends `auth_token` alone so x.com hands back a new
       // ct0; replaying a stored one is what made every refresh fail.
       jar.absorb(7, &header_map(&["auth_token=t; Path=/", "ct0=stale; Path=/"]))
