@@ -851,8 +851,19 @@ impl ApiClient {
          }
          let retry = match &last {
             Err(Error::SessionRejected(_)) if replacement < GRAPHQL_REPLACEMENTS => true,
+            // An empty 404 is this account's suspension. The account is already
+            // out of search and in the view pool, so the query is asked of the
+            // next account. A handful is enough: past that the pool itself is
+            // suspended and more calls only get more accounts banned.
+            Err(Error::SearchRefused) => replacement < GRAPHQL_REPLACEMENTS,
             Err(Error::TransientUpstream) => {
-               replacement == 0 && session.kind == SessionKind::Cookie
+               // A parsed page with no posts is what a query that matches
+               // nothing gets, so one other account is enough to confirm it.
+               // An empty 404 is not that page: a suspended account is handed
+               // one for every query, including "lol", and while most of the
+               // pool is suspended the second account returns one too. Keep
+               // moving until an account answers with a page.
+               endpoint.ends_with("SearchTimeline") || replacement == 0
             },
             // A 502/503/504 is the edge dropping the stream, not this account's
             // quota. Try one other session. Do not mark the first as refused:
@@ -1547,21 +1558,21 @@ impl ApiClient {
                // picking it, and let this one search fall through to another
                // account.
                if endpoint.ends_with("/SearchTimeline") {
-                  // An empty 404 is also what a retired query id gets. The
-                  // caller reads the live id and resends before deciding the
-                  // account is at fault. The settings write is the one check
-                  // that tells a suspension apart from that, and it does not
-                  // need another account to have gotten posts first: while
-                  // most of the pool is suspended, no second account does.
-                  self.spawn_suspicion_probe(session.id);
+                  // A query with no matches comes back as a page with no
+                  // posts. An empty 404 is the account, and it is permanent,
+                  // so the account leaves search before another call is spent
+                  // finding that out.
+                  self.sessions.demote_to_view(session.id).await;
                   tracing::info!(
                      session_id = session.id,
                      session_user = %session.username,
                      proxy_port = self.pinned_port(session.id).unwrap_or(0),
                      query = search_query_of(detail),
-                     "search came back as an empty 404"
+                     "search came back as an empty 404; account out of search"
                   );
                   log_events::note(Event::SearchEmpty);
+                  self.sessions.refund_if_metered(session, endpoint).await;
+                  return Err(Error::SearchRefused);
                } else {
                   tracing::trace!(
                      session_id = session.id,

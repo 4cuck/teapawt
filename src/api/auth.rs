@@ -1697,7 +1697,13 @@ async fn demote_session_line(path: &str, session_id: i64) -> Result<bool> {
    if !changed {
       return Ok(false);
    }
-   let tmp = format!("{path}.tmp");
+   // Several accounts are moved at once, so a shared name is renamed out
+   // from under the next write.
+   let tmp = format!(
+      "{path}.{}.{}.tmp",
+      std::process::id(),
+      time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+   );
    fs::write(&tmp, kept).await?;
    fs::rename(&tmp, path).await?;
    Ok(true)

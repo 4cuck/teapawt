@@ -1149,6 +1149,7 @@ impl ApiClient {
             if matches!(err, Error::TransientUpstream) {
                let shown: String = query.chars().take(120).collect();
                tracing::info!(query = %shown, product, "search came back empty");
+               return Ok(Timeline::default());
             }
             Err(err)
          },

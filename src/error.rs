@@ -119,6 +119,12 @@ pub enum Error {
    #[error("Upstream returned nothing")]
    TransientUpstream,
 
+   /// Search answered this account with an empty 404. A query with no matches
+   /// comes back as a normal page with no posts, so this is the account. The
+   /// account leaves search, and the query is asked of another account.
+   #[error("Search refused this account")]
+   SearchRefused,
+
    #[error("Not found: {0}")]
    NotFound(String),
 
@@ -209,6 +215,14 @@ impl Error {
             "Try again",
             "X did not return a result. Refresh in a moment.",
          ),
+         // Every account asked for this search answered with an empty 404 and
+         // was moved to the view pool. The page is the same one a query with
+         // no matches shows, rather than a refresh that spends the search again.
+         Self::SearchRefused => (
+            StatusCode::OK,
+            "No posts",
+            "X returned no posts for this search.",
+         ),
          // Out of sessions is an operator problem, not an upstream quota one.
          Self::NoSessions | Self::SessionRejected(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -228,7 +242,7 @@ impl IntoResponse for Error {
    fn into_response(self) -> Response {
       let (status, _, msg) = self.presentation();
 
-      if matches!(self, Error::TransientUpstream) {
+      if matches!(self, Error::TransientUpstream | Error::SearchRefused) {
          tracing::trace!(error = ?self, "upstream empty");
       } else if status.is_server_error() {
          tracing::error!(error = ?self, "request failed");
