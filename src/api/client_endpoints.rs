@@ -1084,10 +1084,10 @@ impl ApiClient {
    /// Search tweets.
    ///
    /// A query X has already rejected is rewritten before the request. A new
-   /// rejection is saved and retried once with that rewrite. A page X answers
-   /// with no posts is returned as that page: it is what a query with no
-   /// matches gets, and showing it as a failure invites a refresh that spends
-   /// the search again.
+   /// rejection is saved and retried once with that rewrite. A bodyless 404
+   /// stays an error: it is also what a retired query id and a refused
+   /// account get, and showing it as an empty page invites a refresh that
+   /// spends the search again.
    pub async fn search(
       &self,
       query: &str,
@@ -1108,11 +1108,9 @@ impl ApiClient {
                   self.denylist.remember(&retry);
                   Err(Error::SearchDenylisted)
                },
-               Err(Error::TransientUpstream) => Ok(Timeline::default()),
                other => other,
             }
          },
-         Err(Error::TransientUpstream) => Ok(Timeline::default()),
          other => other,
       }
    }
@@ -1123,27 +1121,38 @@ impl ApiClient {
       cursor: Option<&str>,
       product: &str,
    ) -> Result<Timeline> {
-      let data = self
+      let vars = endpoints::search_vars(query, cursor, product);
+      match self
          .graphql_request::<SearchTimelineData>(
             endpoints::GRAPH_SEARCH_TIMELINE,
-            &endpoints::search_vars(query, cursor, product),
+            &vars,
             endpoints::SEARCH_FEATURES,
             None,
          )
-         .await?;
-      let mut timeline = parser::parse_search_timeline(&data);
-
-      // The same cursor cannot advance. Do not stop merely because a page is
-      // duplicates of one viral post: X still supplies a new cursor after
-      // those pages, and its own client skips the duplicates and continues.
-      if let Some(after) = cursor
-         && timeline.bottom.as_deref() == Some(after)
+         .await
       {
-         timeline.content.clear();
-         timeline.bottom = None;
+         Ok(data) => {
+            let mut timeline = parser::parse_search_timeline(&data);
+            // The same cursor cannot advance. Do not stop merely because a page
+            // is duplicates of one viral post: X still supplies a new cursor
+            // after those pages, and its own client skips the duplicates and
+            // continues.
+            if let Some(after) = cursor
+               && timeline.bottom.as_deref() == Some(after)
+            {
+               timeline.content.clear();
+               timeline.bottom = None;
+            }
+            Ok(timeline)
+         },
+         Err(err) => {
+            if matches!(err, Error::TransientUpstream) {
+               let shown: String = query.chars().take(120).collect();
+               tracing::info!(query = %shown, product, "search came back empty");
+            }
+            Err(err)
+         },
       }
-
-      Ok(timeline)
    }
 
    /// Search users. A denylisted string is remembered and rewritten the same
@@ -1654,7 +1663,7 @@ impl ApiClient {
          .get_on(&url, &headers, Some(&self.egress_for(&session)))
          .await?;
       let (bytes, _) = self
-         .account_response(&session, endpoints::STRATO_TRANSLATE, response)
+         .account_response(&session, endpoints::STRATO_TRANSLATE, "", response)
          .await?;
 
       #[expect(

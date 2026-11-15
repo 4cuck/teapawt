@@ -99,6 +99,16 @@ fn is_gateway_blip(message: &str) -> bool {
       || message.starts_with("Status 504")
 }
 
+/// The `rawQuery` inside a SearchTimeline variables string, trimmed so a
+/// pasted query cannot flood the log.
+fn search_query_of(variables: &str) -> String {
+   serde_json::from_str::<serde_json::Value>(variables)
+      .ok()
+      .and_then(|value| value.get("rawQuery")?.as_str().map(str::to_owned))
+      .map(|query| query.chars().take(120).collect())
+      .unwrap_or_default()
+}
+
 fn is_denylisted(message: &str) -> bool {
    message.contains("QueryDenylistedFailure") || message.contains("Query is denylisted")
 }
@@ -1206,6 +1216,10 @@ impl ApiClient {
             .graphql_attempt(session, endpoint, &wire, variables, field_toggles, refused)
             .await;
          if result.is_ok() && !refused {
+            tracing::info!(
+               endpoint,
+               "X answers this call without a transaction id and refuses one"
+            );
             self.tid.note_refused("GET", &path).await;
          }
          if let Err(ref err) = result
@@ -1293,7 +1307,7 @@ impl ApiClient {
             return Err(err);
          },
       };
-      let (bytes, limit_recorded) = self.account_response(session, endpoint, response).await?;
+      let (bytes, limit_recorded) = self.account_response(session, endpoint, variables, response).await?;
 
       // One pass over a body that can run to several megabytes: the envelope
       // carries `errors` beside `data`, so the error check no longer costs a
@@ -1338,10 +1352,12 @@ impl ApiClient {
       // variables can tell them apart, so the verdict is left to the retry
       // loop and nothing is recorded here.
       if endpoint.ends_with("/SearchTimeline") && search_answer_is_empty(&bytes) {
-         tracing::debug!(
+         tracing::info!(
             session_id = session.id,
             session_user = %session.username,
-            "search came back empty; not blaming the account yet"
+            proxy_port = self.pinned_port(session.id).unwrap_or(0),
+            query = search_query_of(variables),
+            "search came back with no posts"
          );
          log_events::note(Event::SearchEmpty);
          return Err(Error::TransientUpstream);
@@ -1356,6 +1372,7 @@ impl ApiClient {
       &self,
       session: &SessionLease,
       endpoint: &str,
+      detail: &str,
       response: super::http::Response,
    ) -> Result<(bytes::Bytes, bool)> {
       let limit_recorded = if let Some(remaining) = response.headers().get("x-rate-limit-remaining")
@@ -1532,11 +1549,17 @@ impl ApiClient {
                if endpoint.ends_with("/SearchTimeline") {
                   // An empty 404 is also what a retired query id gets. The
                   // caller reads the live id and resends before deciding the
-                  // account is at fault, so nothing is recorded here.
-                  tracing::debug!(
+                  // account is at fault. The settings write is the one check
+                  // that tells a suspension apart from that, and it does not
+                  // need another account to have gotten posts first: while
+                  // most of the pool is suspended, no second account does.
+                  self.spawn_suspicion_probe(session.id);
+                  tracing::info!(
                      session_id = session.id,
                      session_user = %session.username,
-                     "search came back as an empty 404; not blaming the account yet"
+                     proxy_port = self.pinned_port(session.id).unwrap_or(0),
+                     query = search_query_of(detail),
+                     "search came back as an empty 404"
                   );
                   log_events::note(Event::SearchEmpty);
                } else {
@@ -1747,7 +1770,7 @@ impl ApiClient {
          .get_on(url, &headers, Some(&self.egress_for(&session)))
          .await?;
       let (bytes, _) = self
-         .account_response(&session, session_key, response)
+         .account_response(&session, session_key, "", response)
          .await?;
       drop(session);
       serde_json::from_slice(&bytes)

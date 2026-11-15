@@ -130,7 +130,7 @@ impl ApiClient {
          )
          .await?;
       let (bytes, _) = self
-         .account_response(session, endpoints::VERIFY_CREDENTIALS, response)
+         .account_response(session, endpoints::VERIFY_CREDENTIALS, "", response)
          .await?;
 
       #[derive(Deserialize)]
@@ -192,7 +192,7 @@ impl ApiClient {
          )
          .await?;
       let (bytes, _) = self
-         .account_response(session, endpoints::ACCOUNT_SETTINGS, response)
+         .account_response(session, endpoints::ACCOUNT_SETTINGS, "", response)
          .await?;
 
       // The reply carries the whole settings object. A refusal that still
@@ -231,7 +231,7 @@ impl ApiClient {
          )
          .await?;
       let _ = self
-         .account_response(session, endpoints::SEARCH_SAFETY, response)
+         .account_response(session, endpoints::SEARCH_SAFETY, "", response)
          .await?;
       Ok(())
    }
