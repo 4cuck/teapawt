@@ -12,22 +12,37 @@
 //! what a browser does with the same header.
 
 use std::{
-   collections::{BTreeMap, HashMap, HashSet},
+   collections::{
+      BTreeMap,
+      HashMap,
+      HashSet,
+   },
    sync::Arc,
    time::Duration,
 };
 
-use axum::http::{HeaderMap, header};
-use tokio::sync::{Notify, RwLock};
+use axum::http::{
+   HeaderMap,
+   header,
+};
+use serde::Serialize;
+use tokio::sync::{
+   Notify,
+   RwLock,
+};
 
-use crate::{accounts::AccountStore, error::Result, types::Session};
+use crate::{
+   accounts::AccountStore,
+   error::Result,
+   types::Session,
+};
 
 type CookieBags = HashMap<i64, BTreeMap<String, String>>;
 
 #[derive(Default)]
 struct JarState {
    cookies: CookieBags,
-   dirty: HashSet<i64>,
+   dirty:   HashSet<i64>,
 }
 
 /// How long the jar may sit dirty before it is written out.
@@ -59,7 +74,10 @@ impl Jar {
 
    fn new(cookies: CookieBags) -> Arc<Self> {
       Arc::new(Self {
-         state: RwLock::new(JarState { cookies, dirty: HashSet::new() }),
+         state: RwLock::new(JarState {
+            cookies,
+            dirty: HashSet::new(),
+         }),
          flush: Notify::new(),
       })
    }
@@ -84,9 +102,13 @@ impl Jar {
             let pending = {
                let mut state = jar.state.write().await;
                let ids = std::mem::take(&mut state.dirty);
-               ids.into_iter().map(|id| (id, state.cookies[&id].clone())).collect::<CookieBags>()
+               ids.into_iter()
+                  .map(|id| (id, state.cookies[&id].clone()))
+                  .collect::<CookieBags>()
             };
-            if !pending.is_empty() && let Err(err) = store.save_cookies(&pending).await {
+            if !pending.is_empty()
+               && let Err(err) = store.save_cookies(&pending).await
+            {
                // Re-mark ids, not stale snapshots: the next flush will read
                // the newest jar, including changes made during this write.
                jar.state.write().await.dirty.extend(pending.into_keys());
@@ -163,8 +185,60 @@ impl Jar {
 
    #[cfg(test)]
    async fn cookies_for(&self, session: i64) -> BTreeMap<String, String> {
-      self.state.read().await.cookies.get(&session).cloned().unwrap_or_default()
+      self.snapshot(session).await
    }
+
+   pub async fn snapshot(&self, session: i64) -> BTreeMap<String, String> {
+      self
+         .state
+         .read()
+         .await
+         .cookies
+         .get(&session)
+         .cloned()
+         .unwrap_or_default()
+   }
+}
+
+#[derive(Serialize)]
+pub struct EditorCookie {
+   pub name:      String,
+   pub value:     String,
+   pub domain:    &'static str,
+   pub path:      &'static str,
+   pub secure:    bool,
+   #[serde(rename = "httpOnly")]
+   pub http_only: bool,
+   #[serde(rename = "sameSite")]
+   pub same_site: &'static str,
+   pub session:   bool,
+}
+
+pub(super) fn export_cookies(
+   cookies: BTreeMap<String, String>,
+   auth_token: String,
+   ct0: String,
+) -> Vec<EditorCookie> {
+   std::iter::once(("auth_token".to_owned(), auth_token))
+      .chain(std::iter::once(("ct0".to_owned(), ct0)))
+      .chain(
+         cookies
+            .into_iter()
+            .filter(|(name, _)| !SESSION_OWNED.contains(&name.as_str())),
+      )
+      .map(|(name, value)| {
+         EditorCookie {
+            http_only: name == "auth_token",
+            name,
+            value,
+            domain: ".x.com",
+            path: "/",
+            secure: true,
+            same_site: "no_restriction",
+            session: true,
+         }
+      })
+      .collect()
 }
 
 /// `name=value; Path=/; Max-Age=0` → the name, and the value to keep, or
@@ -179,14 +253,11 @@ fn parse(line: &str) -> Option<(String, Option<String>)> {
    }
    let gone = value.trim().eq_ignore_ascii_case("deleted")
       || parts.any(|attr| {
-         attr.trim()
-            .split_once('=')
-            .is_some_and(|(key, val)| key.trim().eq_ignore_ascii_case("max-age") && val.trim() == "0")
+         attr.trim().split_once('=').is_some_and(|(key, val)| {
+            key.trim().eq_ignore_ascii_case("max-age") && val.trim() == "0"
+         })
       });
-   Some((
-      name.to_owned(),
-      (!gone).then(|| value.trim().to_owned()),
-   ))
+   Some((name.to_owned(), (!gone).then(|| value.trim().to_owned())))
 }
 
 #[cfg(test)]
@@ -214,8 +285,10 @@ mod tests {
    #[tokio::test]
    async fn a_deleted_cookie_stops_being_kept() {
       let jar = Jar::new(HashMap::new());
-      jar.absorb(7, &header_map(&["att=1; Path=/", "gt=2; Path=/"])).await;
-      jar.absorb(7, &header_map(&["att=deleted; Path=/; Max-Age=0"])).await;
+      jar.absorb(7, &header_map(&["att=1; Path=/", "gt=2; Path=/"]))
+         .await;
+      jar.absorb(7, &header_map(&["att=deleted; Path=/; Max-Age=0"]))
+         .await;
       let held = jar.cookies_for(7).await;
       assert!(!held.contains_key("att"));
       assert_eq!(held["gt"], "2");
@@ -224,8 +297,11 @@ mod tests {
    #[tokio::test]
    async fn the_session_cookies_win_over_the_jar() {
       let jar = Jar::new(HashMap::new());
-      jar.absorb(7, &header_map(&["twid=u%3D42; Path=/", "ct0=stale; Path=/"]))
-         .await;
+      jar.absorb(
+         7,
+         &header_map(&["twid=u%3D42; Path=/", "ct0=stale; Path=/"]),
+      )
+      .await;
       let mut headers = HeaderMap::new();
       headers.insert(header::COOKIE, "auth_token=t; ct0=fresh".parse().unwrap());
       jar.merge_into(7, &mut headers).await;
@@ -247,8 +323,11 @@ mod tests {
       let jar = Jar::new(HashMap::new());
       // A refresh visit sends `auth_token` alone so x.com hands back a new
       // ct0; replaying a stored one is what made every refresh fail.
-      jar.absorb(7, &header_map(&["auth_token=t; Path=/", "ct0=stale; Path=/"]))
-         .await;
+      jar.absorb(
+         7,
+         &header_map(&["auth_token=t; Path=/", "ct0=stale; Path=/"]),
+      )
+      .await;
       assert!(jar.cookies_for(7).await.is_empty());
 
       let mut headers = HeaderMap::new();

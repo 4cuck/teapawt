@@ -1,43 +1,108 @@
 use std::{
    collections::HashMap,
    iter,
-   sync::{Arc, Mutex as StdMutex},
-   time::{Duration, Instant},
+   sync::{
+      Arc,
+      Mutex as StdMutex,
+   },
+   time::{
+      Duration,
+      Instant,
+   },
 };
 
 use axum::http::header;
 use bytes::Bytes;
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{
+   Deserialize,
+   de::DeserializeOwned,
+};
 use tokio::{
-   sync::{Semaphore, watch},
-   time::{interval, sleep, timeout},
+   sync::{
+      Semaphore,
+      watch,
+   },
+   time::{
+      interval,
+      sleep,
+      timeout,
+   },
 };
 
 use super::{
-   ProxyPool, SessionLease, SessionPool, TidClient,
-   budget::{self, ClientBudget},
+   ProxyPool,
+   SessionLease,
+   SessionPool,
+   SuspensionProbe,
+   TidClient,
+   budget::{
+      self,
+      ClientBudget,
+   },
    cookies::Jar,
    endpoints,
-   http::{Egress, HttpClient, ProxyConfig, Purpose},
+   http::{
+      Egress,
+      HttpClient,
+      ProxyConfig,
+      Purpose,
+   },
    latency::Latency,
-   log_events::{self, Event},
+   log_events::{
+      self,
+      Event,
+   },
    operations::Operations,
    parser,
    timeline_route::TimelineRoutes,
 };
 use crate::{
    accounts::AccountStore,
-   api::schema::{
-      AboutAccountData, ApiError, AudioSpaceData, AudioSpaceMetadata, BroadcastMetadata,
-      BroadcastsData, ConversationData, EditHistoryData, GqlResponse, ListByIdData, ListBySlugData,
-      ListMembersData, ListTimelineData, LiveStreamStatus, RetweetersData, SearchTimelineData,
-      TweetData, UserResultData, UserTimelineData,
+   api::{
+      cookies::EditorCookie,
+      schema::{
+         AboutAccountData,
+         ApiError,
+         AudioSpaceData,
+         AudioSpaceMetadata,
+         BroadcastMetadata,
+         BroadcastsData,
+         ConversationData,
+         EditHistoryData,
+         GqlResponse,
+         ListByIdData,
+         ListBySlugData,
+         ListMembersData,
+         ListTimelineData,
+         LiveStreamStatus,
+         RetweetersData,
+         SearchTimelineData,
+         TweetData,
+         UserResultData,
+         UserTimelineData,
+      },
    },
    config::Config,
-   error::{Error, Result, TwitterError},
+   error::{
+      Error,
+      Result,
+      TwitterError,
+   },
    types::{
-      AccountContext, Article, CardKind, Conversation, EditHistory, List, PaginatedResult,
-      PhotoRail, Profile, SessionKind, Timeline, Translation, Tweet, User,
+      AccountContext,
+      Article,
+      CardKind,
+      Conversation,
+      EditHistory,
+      List,
+      PaginatedResult,
+      PhotoRail,
+      Profile,
+      SessionKind,
+      Timeline,
+      Translation,
+      Tweet,
+      User,
    },
    utils::formatters,
 };
@@ -113,7 +178,11 @@ fn search_query_of(variables: &str) -> String {
       .unwrap_or_default()
 }
 
-fn graphql_post_body(variables: &str, features: &str, field_toggles: Option<&str>) -> Result<Bytes> {
+fn graphql_post_body(
+   variables: &str,
+   features: &str,
+   field_toggles: Option<&str>,
+) -> Result<Bytes> {
    let parse = |field, input| {
       serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(input)
          .map(serde_json::Value::Object)
@@ -134,7 +203,8 @@ fn is_denylisted(message: &str) -> bool {
    message.contains("QueryDenylistedFailure") || message.contains("Query is denylisted")
 }
 
-/// A decoded search page with no post results is inconclusive about account health.
+/// A decoded search page with no post results is inconclusive about account
+/// health.
 pub(super) fn search_answer_is_empty(bytes: &[u8]) -> bool {
    #[derive(Deserialize)]
    struct SearchBody {
@@ -150,14 +220,15 @@ pub(super) fn search_answer_is_empty(bytes: &[u8]) -> bool {
 }
 
 fn search_answer_is_suspended(bytes: &[u8], errors: &[ApiError]) -> bool {
-   let timeline_failed = errors.iter().any(|err| {
-      err.path.as_slice() == ["search_by_raw_query", "search_timeline", "timeline"]
-   });
+   let timeline_failed = errors
+      .iter()
+      .any(|err| err.path.as_slice() == ["search_by_raw_query", "search_timeline", "timeline"]);
    if !timeline_failed {
       return false;
    }
    serde_json::from_slice::<serde_json::Value>(bytes).is_ok_and(|body| {
-      body.pointer("/data/search_by_raw_query/search_timeline")
+      body
+         .pointer("/data/search_by_raw_query/search_timeline")
          .and_then(serde_json::Value::as_object)
          .is_some_and(serde_json::Map::is_empty)
    })
@@ -175,10 +246,12 @@ fn request_errors(errors: &[ApiError], has_data: bool) -> Vec<ApiError> {
          let one_field = !err.path.is_empty() || err.message.contains("DecodeException");
          !(has_data && one_field && !is_denylisted(&err.message))
       })
-      .map(|err| ApiError {
-         code: err.code,
-         message: err.message.clone(),
-         path: err.path.clone(),
+      .map(|err| {
+         ApiError {
+            code:    err.code,
+            message: err.message.clone(),
+            path:    err.path.clone(),
+         }
       })
       .collect()
 }
@@ -205,25 +278,29 @@ fn millis_to_time(milliseconds: i64) -> Option<time::OffsetDateTime> {
 
 fn audio_space_status(metadata: &AudioSpaceMetadata) -> String {
    match metadata.state.as_deref() {
-      Some("NotStarted") => metadata
-         .scheduled_start
-         .and_then(millis_to_time)
-         .map_or_else(
-            || "Scheduled".to_owned(),
-            |time| format!("Scheduled · {}", formatters::format_tweet_time(time)),
-         ),
-      Some("Running") => metadata
-         .total_live_listeners
-         .filter(|count| *count > 0)
-         .map_or_else(
-            || "Live now".to_owned(),
-            |count| {
-               format!(
-                  "Live now · {} listening",
-                  formatters::abbreviate_number(count)
-               )
-            },
-         ),
+      Some("NotStarted") => {
+         metadata
+            .scheduled_start
+            .and_then(millis_to_time)
+            .map_or_else(
+               || "Scheduled".to_owned(),
+               |time| format!("Scheduled · {}", formatters::format_tweet_time(time)),
+            )
+      },
+      Some("Running") => {
+         metadata
+            .total_live_listeners
+            .filter(|count| *count > 0)
+            .map_or_else(
+               || "Live now".to_owned(),
+               |count| {
+                  format!(
+                     "Live now · {} listening",
+                     formatters::abbreviate_number(count)
+                  )
+               },
+            )
+      },
       Some("Ended" | "TimedOut") if metadata.is_space_available_for_replay.unwrap_or(false) => {
          metadata
             .total_replay_watched
@@ -292,42 +369,48 @@ fn broadcast_id_from_url(url: &str) -> Option<&str> {
 
 fn broadcast_status(metadata: &BroadcastMetadata) -> String {
    match metadata.state.as_str() {
-      "RUNNING" => metadata
-         .total_watching
-         .filter(|count| *count > 0)
-         .map_or_else(
-            || "Live now".to_owned(),
-            |count| {
-               format!(
-                  "Live now · {} watching",
-                  formatters::abbreviate_number(count)
-               )
-            },
-         ),
-      "ENDED" if metadata.available_for_replay => metadata
-         .total_watched
-         .filter(|count| *count > 0)
-         .map_or_else(
-            || "Replay available".to_owned(),
-            |count| {
-               format!(
-                  "Replay available · {} views",
-                  formatters::abbreviate_number(count)
-               )
-            },
-         ),
-      "ENDED" => metadata
-         .total_watched
-         .filter(|count| *count > 0)
-         .map_or_else(
-            || "Broadcast ended".to_owned(),
-            |count| {
-               format!(
-                  "Broadcast ended · {} views",
-                  formatters::abbreviate_number(count)
-               )
-            },
-         ),
+      "RUNNING" => {
+         metadata
+            .total_watching
+            .filter(|count| *count > 0)
+            .map_or_else(
+               || "Live now".to_owned(),
+               |count| {
+                  format!(
+                     "Live now · {} watching",
+                     formatters::abbreviate_number(count)
+                  )
+               },
+            )
+      },
+      "ENDED" if metadata.available_for_replay => {
+         metadata
+            .total_watched
+            .filter(|count| *count > 0)
+            .map_or_else(
+               || "Replay available".to_owned(),
+               |count| {
+                  format!(
+                     "Replay available · {} views",
+                     formatters::abbreviate_number(count)
+                  )
+               },
+            )
+      },
+      "ENDED" => {
+         metadata
+            .total_watched
+            .filter(|count| *count > 0)
+            .map_or_else(
+               || "Broadcast ended".to_owned(),
+               |count| {
+                  format!(
+                     "Broadcast ended · {} views",
+                     formatters::abbreviate_number(count)
+                  )
+               },
+            )
+      },
       _ => String::new(),
    }
 }
@@ -356,7 +439,8 @@ fn article_tweet_data<'a>(data: &'a ConversationData, tweet_id: &str) -> Option<
    raw.tweet.as_deref().or(Some(raw))
 }
 
-/// Cloudflare's "you have been blocked" page. That is the exit IP, not the account.
+/// Cloudflare's "you have been blocked" page. That is the exit IP, not the
+/// account.
 fn cloudflare_ip_ban(status: axum::http::StatusCode, body: &str) -> bool {
    if status.as_u16() != 403 {
       return false;
@@ -383,14 +467,22 @@ fn cloudflare_ray(body: &str) -> Option<String> {
    None
 }
 
-/// What to write in a log. A Cloudflare HTML page is one line, not the document.
+/// What to write in a log. A Cloudflare HTML page is one line, not the
+/// document.
+///
+/// Only a body that actually starts with markup is called HTML. Reporting
+/// every long body as an "HTML error page" described X's own JSON refusals as
+/// edge blocks, which sent a search for a 403 in the wrong direction.
 fn log_upstream(body: &str) -> String {
    let trimmed = body.trim_start();
-   if trimmed.starts_with('<') || body.len() > 240 {
+   if trimmed.starts_with('<') {
       if let Some(ray) = cloudflare_ray(body) {
          return format!("Cloudflare block page, ray {ray}");
       }
       return format!("HTML error page, {} bytes", body.len());
+   }
+   if body.len() > 240 {
+      return format!("{} bytes: {}", body.len(), &body[..240.min(body.len())]);
    }
    body.to_owned()
 }
@@ -403,7 +495,7 @@ fn ct0_cookie(value: &header::HeaderValue) -> Option<String> {
    (name.trim() == "ct0" && !cookie.trim().is_empty()).then(|| cookie.trim().to_owned())
 }
 
-fn twitter_error_code(body: &str) -> Option<i64> {
+pub(super) fn twitter_error_code(body: &str) -> Option<i64> {
    #[derive(Deserialize)]
    struct ErrorCheck {
       errors: Option<Vec<CodeOnly>>,
@@ -430,9 +522,15 @@ fn is_settings_not_found(endpoint: &str, body: &str) -> bool {
 fn code_34_is_special_only_for_account_settings() {
    let missing = r#"{"errors":[{"code":34}]}"#;
    assert!(is_settings_not_found(endpoints::ACCOUNT_SETTINGS, missing));
-   assert!(!is_settings_not_found(endpoints::GRAPH_SEARCH_TIMELINE, missing));
+   assert!(!is_settings_not_found(
+      endpoints::GRAPH_SEARCH_TIMELINE,
+      missing
+   ));
    assert!(!is_settings_not_found(endpoints::ACCOUNT_SETTINGS, ""));
-   assert!(!is_settings_not_found(endpoints::ACCOUNT_SETTINGS, r#"{"errors":[{"code":64}]}"#));
+   assert!(!is_settings_not_found(
+      endpoints::ACCOUNT_SETTINGS,
+      r#"{"errors":[{"code":64}]}"#
+   ));
 }
 
 type InflightMap = StdMutex<HashMap<String, watch::Sender<Option<bytes::Bytes>>>>;
@@ -445,7 +543,7 @@ pub(super) enum InflightTicket {
 pub(super) struct InflightGuard {
    map: Arc<InflightMap>,
    key: String,
-   tx: Option<watch::Sender<Option<bytes::Bytes>>>,
+   tx:  Option<watch::Sender<Option<bytes::Bytes>>>,
 }
 
 impl InflightGuard {
@@ -472,23 +570,28 @@ impl Drop for InflightGuard {
 /// Twitter/X API client.
 #[derive(Clone)]
 pub struct ApiClient {
-   pub(crate) client: HttpClient,
+   pub(crate) client:   HttpClient,
    pub(crate) sessions: SessionPool,
-   proxies: Option<Arc<ProxyPool>>,
-   tid: TidClient,
-   operations: Operations,
-   budget: ClientBudget,
+   proxies:             Option<Arc<ProxyPool>>,
+   tid:                 TidClient,
+   operations:          Operations,
+   budget:              ClientBudget,
    /// Retweeter lists per caller, on whatever `clientBudget` says.
-   list_budget: ClientBudget,
-   tid_enabled: bool,
-   denylist: super::search_denylist::SearchDenylist,
-   latency: Arc<Latency>,
-   hedges: Arc<Semaphore>,
+   list_budget:         ClientBudget,
+   pub(crate) tid_enabled: bool,
+   denylist:            super::search_denylist::SearchDenylist,
+   latency:             Arc<Latency>,
+   hedges:              Arc<Semaphore>,
    /// Which call served each first profile page, reported every minute.
-   timeline_routes: Arc<TimelineRoutes>,
+   timeline_routes:     Arc<TimelineRoutes>,
    /// Coalesces identical concurrent in-flight GraphQL calls; entries live
    /// only while the upstream request is in flight and are removed on drop.
-   inflight: Arc<InflightMap>,
+   inflight:            Arc<InflightMap>,
+   telemetry:           Option<crate::stats::StatsStore>,
+   pub(crate) cookies:  Arc<Jar>,
+   /// Set when accounts arrive through `/import`, so their filters are turned
+   /// off as soon as they are in the pool instead of on the next rescan.
+   pub(crate) filter_wakeup: Arc<tokio::sync::Notify>,
 }
 
 impl ApiClient {
@@ -522,7 +625,6 @@ impl ApiClient {
       let cookies = Jar::from_store(&accounts).await?;
       cookies.spawn_flusher(accounts.clone());
       client = client.with_cookies(Arc::clone(&cookies));
-      Self::spawn_account_reconcile(accounts, sessions.clone(), cookies);
 
       let proxies = proxies.map(Arc::new);
       let operations = Operations::load();
@@ -544,6 +646,15 @@ impl ApiClient {
 
       let denylist_path = std::env::var("TEAPOT_SEARCH_DENYLIST")
          .unwrap_or_else(|_| "search-denylist.json".to_owned());
+      // Accounts that arrive through `/import` are reconciled into the pool
+      // every ten seconds; this is what tells the filter sync they are there.
+      let filter_wakeup = Arc::new(tokio::sync::Notify::new());
+      Self::spawn_account_reconcile(
+         accounts,
+         sessions.clone(),
+         Arc::clone(&cookies),
+         Arc::clone(&filter_wakeup),
+      );
 
       Ok(Self {
          client,
@@ -559,10 +670,37 @@ impl ApiClient {
          hedges: Arc::new(Semaphore::new(MAX_HEDGES)),
          timeline_routes: Arc::new(TimelineRoutes::default()),
          inflight: Arc::new(StdMutex::new(HashMap::new())),
+         telemetry: None,
+         cookies,
+         filter_wakeup,
       })
    }
 
-   fn spawn_account_reconcile(store: AccountStore, pool: SessionPool, cookies: Arc<Jar>) {
+   pub(crate) fn with_telemetry(mut self, telemetry: Option<crate::stats::StatsStore>) -> Self {
+      self.telemetry = telemetry;
+      self
+   }
+
+   pub(crate) async fn cookie_snapshot(&self, session_id: i64) -> Option<Vec<EditorCookie>> {
+      let (auth_token, ct0) = self.sessions.cookie_credentials(session_id)?;
+      if auth_token.is_empty() || ct0.is_empty() {
+         return None;
+      }
+      let cookies = self.cookies.snapshot(session_id).await;
+      Some(super::cookies::export_cookies(cookies, auth_token, ct0))
+   }
+
+   pub(crate) async fn search_budget_estimate(&self) -> f64 {
+      // The documented SearchTimeline budget is 50 calls in 15 minutes.
+      self.sessions.available_for("SearchTimeline").await as f64 * (50.0 / 15.0)
+   }
+
+   fn spawn_account_reconcile(
+      store: AccountStore,
+      pool: SessionPool,
+      cookies: Arc<Jar>,
+      filter_wakeup: Arc<tokio::sync::Notify>,
+   ) {
       tokio::spawn(async move {
          let mut every = interval(ACCOUNT_RECONCILE_EVERY);
          every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -571,26 +709,41 @@ impl ApiClient {
             every.tick().await;
             match Self::reconcile_accounts(&store, &pool, &cookies).await {
                Ok(0) => {},
-               Ok(added) => tracing::info!(added, "added imported accounts to the live pool"),
+               Ok(added) => {
+                  tracing::info!(added, "added imported accounts to the live pool");
+                  // New accounts hide NSFW media until their settings are
+                  // written, so the sync is woken instead of waiting for the
+                  // next rescan.
+                  filter_wakeup.notify_one();
+               },
                Err(err) => tracing::warn!("could not reconcile imported accounts: {err}"),
             }
          }
       });
    }
 
-   async fn reconcile_accounts(store: &AccountStore, pool: &SessionPool, cookies: &Jar) -> Result<usize> {
+   async fn reconcile_accounts(
+      store: &AccountStore,
+      pool: &SessionPool,
+      cookies: &Jar,
+   ) -> Result<usize> {
       // Inventory is append-only. Avoid fetching credentials and cookies at
       // steady state; a count increase is enough to trigger an append pass.
       if store.stats().await?.total <= i64::try_from(pool.len()).unwrap_or(i64::MAX) {
          return Ok(0);
       }
-      let known = pool.session_ids().into_iter().collect::<std::collections::HashSet<_>>();
+      let known = pool
+         .session_ids()
+         .into_iter()
+         .collect::<std::collections::HashSet<_>>();
       let mut new = store.load().await?;
       new.retain(|session| !known.contains(&session.id));
       if new.is_empty() {
          return Ok(0);
       }
-      cookies.seed_imports(&new, store.load_cookies().await?).await;
+      cookies
+         .seed_imports(&new, store.load_cookies().await?)
+         .await;
       // ProxyPool's immutable legacy pins and deterministic mappings are
       // already defined for these ids. No lease can see an unbound slot.
       Ok(pool.append_sessions(new).await)
@@ -727,7 +880,10 @@ impl ApiClient {
    pub(crate) fn egress_for_id(&self, session_id: i64) -> Egress {
       Egress {
          session: session_id,
-         proxy: self.proxies.as_ref().map(|pool| pool.for_session(session_id)),
+         proxy:   self
+            .proxies
+            .as_ref()
+            .map(|pool| pool.for_session(session_id)),
       }
    }
 
@@ -906,7 +1062,9 @@ impl ApiClient {
          let retry = match &last {
             Err(Error::SessionRejected(_)) if replacement < GRAPHQL_REPLACEMENTS => true,
             Err(Error::SearchRefused) => session.kind == SessionKind::Cookie,
-            Err(Error::TransientUpstream) => replacement == 0 && session.kind == SessionKind::Cookie,
+            Err(Error::TransientUpstream) => {
+               replacement == 0 && session.kind == SessionKind::Cookie
+            },
             // A 502/503/504 is the edge dropping the stream, not this account's
             // quota. Try one other session. Do not mark the first as refused:
             // that path is for an account X answers with an empty 404.
@@ -1235,7 +1393,6 @@ impl ApiClient {
    /// account on it. The refusal is kept only when the call then works without
    /// an ID, and dropped when it works with one again, so an empty answer
    /// that has nothing to do with the ID cannot pin a path to one form.
-   ///
    pub(super) async fn graphql_request_inner<T>(
       &self,
       session: &SessionLease,
@@ -1253,8 +1410,7 @@ impl ApiClient {
       // POST endpoints carry the method in the TID signature; key the refusal
       // cache on the actual method so a stale GET entry never suppresses a TID
       // on a POST request.
-      let use_post = session.kind == SessionKind::Cookie
-         && endpoint.ends_with("/SearchTimeline");
+      let use_post = session.kind == SessionKind::Cookie && endpoint.ends_with("/SearchTimeline");
       let method = if use_post { "POST" } else { "GET" };
       let refused = sent_tid && self.tid.is_refused(method, &path).await;
       let mut result = self
@@ -1334,8 +1490,7 @@ impl ApiClient {
       };
 
       // X's edge rejects GET on SearchTimeline for cookie sessions; POST works.
-      let use_post = session.kind == SessionKind::Cookie
-         && endpoint.ends_with("/SearchTimeline");
+      let use_post = session.kind == SessionKind::Cookie && endpoint.ends_with("/SearchTimeline");
 
       let (url, body) = if use_post {
          (
@@ -1418,8 +1573,22 @@ impl ApiClient {
       };
 
       if use_post && search_answer_is_suspended(&bytes, &resp.errors) {
-         tracing::info!(session_id = session.id, "search refused for this account (suspended)");
-         self.sessions.demote_to_view(session.id).await;
+         tracing::info!(
+            session_id = session.id,
+            "search refused for this account (suspended)"
+         );
+         // X says the account is suspended. It leaves search for the view pool,
+         // where its cookie may still read profiles. That is the only attempt it
+         // gets: a second suspension verdict retires it for good.
+         self
+            .sessions
+            .note_suspended(
+               session.id,
+               SuspensionProbe::Data,
+               Some(crate::stats::Restriction::Suspended),
+               "Search refused for this account: suspended",
+            )
+            .await;
          return Err(Error::SearchRefused);
       }
 
@@ -1470,7 +1639,9 @@ impl ApiClient {
       endpoint: &str,
       response: super::http::Response,
    ) -> Result<(bytes::Bytes, bool)> {
-      self.account_response_inner(session, endpoint, None, response).await
+      self
+         .account_response_inner(session, endpoint, None, response)
+         .await
    }
 
    async fn account_response_inner(
@@ -1603,13 +1774,28 @@ impl ApiClient {
          // 401 is a dead token. 403 + code 326 is a locked cookie session.
          // Anything else 403 is a resource denial and must not sideline the
          // session or the next reader will think the *profile* is gone.
+         //
+         // A 403 with an HTML body and no X error code is the edge refusing
+         // this request, not the account: Cloudflare answers a 269-byte block
+         // page this way, and reading it as dead credentials benched healthy
+         // accounts for good. Only a JSON 403 can carry X's own verdict.
          if status.as_u16() == 401
-            || (status.as_u16() == 403 && twitter_error_code(&body) == Some(326))
+            || (status.as_u16() == 403
+               && twitter_error_code(&body) == Some(326))
          {
             tracing::error!(
                session_id = session.id,
                session_user = %session.username,
                "API request failed: {status} - {shown}"
+            );
+            self.sessions.record_event(
+               crate::stats::AccountEvent::new(
+                  session.id,
+                  crate::stats::Restriction::CredentialsRejected,
+                  endpoint,
+                  "Upstream rejected account credentials",
+               )
+               .upstream(status.as_u16(), twitter_error_code(&body)),
             );
             self.sessions.disarm_meter(session);
             self.sessions.mark_rejected(session.id).await;
@@ -1634,11 +1820,23 @@ impl ApiClient {
          }
 
          // 403 + code 64 is X refusing this account itself ("not permitted to
-         // access this feature"), which is how a suspended account is told
-         // apart from a resource denial. Nothing about waiting changes it, so
-         // it is reported apart from the generic 403 below and the caller can
-         // stop writing to the account.
-         if status.as_u16() == 403 && twitter_error_code(&body) == Some(64) {
+         // access this feature"): the account is suspended. A suspended account
+         // cannot search, so one reserved for search joins the view pool, where
+         // its cookie may still read profiles. The view attempt is the only one
+         // it gets: if that comes back suspended too, the account is retired and
+         // nothing is asked of it again — no search, no view, and no daily
+         // settings probe to re-learn a verdict already known.
+         let code = twitter_error_code(&body);
+         if status.as_u16() == 403 && code == Some(64) {
+            self.sessions.record_event(
+               crate::stats::AccountEvent::new(
+                  session.id,
+                  crate::stats::Restriction::Suspended,
+                  endpoint,
+                  "Upstream reports account suspension or access refusal",
+               )
+               .upstream(status.as_u16(), code),
+            );
             tracing::debug!(
                session_id = session.id,
                session_user = %session.username,
@@ -1646,6 +1844,11 @@ impl ApiClient {
                "X refuses this account: {shown}"
             );
             self.sessions.disarm_meter(session);
+            // `None` because the event above already recorded the suspension;
+            // counting it again here would double the census.
+            self.sessions
+               .note_suspended(session.id, SuspensionProbe::Data, None, "Account suspended")
+               .await;
             return Err(Error::UserSuspended(format!("Status {status}: {shown}")));
          }
 
@@ -1781,7 +1984,10 @@ impl ApiClient {
                "x-twitter-auth-type",
                header::HeaderValue::from_static("OAuth2Session"),
             );
-            let ct0 = self.sessions.ct0(session.id).unwrap_or_else(|| session.ct0.clone());
+            let ct0 = self
+               .sessions
+               .ct0(session.id)
+               .unwrap_or_else(|| session.ct0.clone());
             headers.insert(
                "x-csrf-token",
                ct0.parse()
@@ -1850,7 +2056,10 @@ impl ApiClient {
          "x-twitter-auth-type",
          header::HeaderValue::from_static("OAuth2Session"),
       );
-      let ct0 = self.sessions.ct0(session.id).unwrap_or_else(|| session.ct0.clone());
+      let ct0 = self
+         .sessions
+         .ct0(session.id)
+         .unwrap_or_else(|| session.ct0.clone());
       headers.insert(
          "x-csrf-token",
          ct0.parse()
@@ -1893,9 +2102,11 @@ impl ApiClient {
    }
 }
 
-#[path = "client_endpoints.rs"]
-mod endpoint_methods;
-pub use endpoint_methods::{OpenProfile, recheck_empty};
+#[path = "client_endpoints.rs"] mod endpoint_methods;
+pub use endpoint_methods::{
+   OpenProfile,
+   recheck_empty,
+};
 #[cfg(test)]
 mod tests {
    use super::*;
@@ -1906,10 +2117,13 @@ mod tests {
       let features = r#"{"enabled":true}"#;
       let body = graphql_post_body(variables, features, None).unwrap();
       let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-      assert_eq!(payload, serde_json::json!({
-         "variables": {"rawQuery": "#かんぱに", "count": 20},
-         "features": {"enabled": true},
-      }));
+      assert_eq!(
+         payload,
+         serde_json::json!({
+            "variables": {"rawQuery": "#かんぱに", "count": 20},
+            "features": {"enabled": true},
+         })
+      );
 
       let body = graphql_post_body(variables, features, Some(r#"{"extra":false}"#)).unwrap();
       let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1932,7 +2146,12 @@ mod tests {
       assert!(matches!(SessionPool::from_store(store.clone(), 1).await,
          Err(Error::Internal(message)) if message.contains("migration is not complete")));
       let file = format!("{socket}/fixture.jsonl");
-      tokio::fs::write(&file, r#"{"id":1,"username":"view","kind":"cookie","auth_token":"fixture","ct0":"old"}"#).await.unwrap();
+      tokio::fs::write(
+         &file,
+         r#"{"id":1,"username":"view","kind":"cookie","auth_token":"fixture","ct0":"old"}"#,
+      )
+      .await
+      .unwrap();
       store.migrate_legacy(&file, "").await.unwrap();
       let pool = SessionPool::from_store(store.clone(), 1).await.unwrap();
       let jar = Jar::from_store(&store).await.unwrap();
@@ -1945,35 +2164,65 @@ mod tests {
          ".x.com\tTRUE\t/\tTRUE\t0\tguest_id\timported-guest\n",
       );
       assert_eq!(store.import_text(export, true).await.unwrap().imported, 1);
-      assert_eq!(store.import_text(export, false).await.unwrap().duplicates, 1);
-      assert_eq!(ApiClient::reconcile_accounts(&store, &pool, &jar).await.unwrap(), 1);
-      assert_eq!(ApiClient::reconcile_accounts(&store, &pool, &jar).await.unwrap(), 0);
-      assert!(pool.acquire_free("TweetDetail", None).await.unwrap().is_none());
+      assert_eq!(
+         store.import_text(export, false).await.unwrap().duplicates,
+         1
+      );
+      assert_eq!(
+         ApiClient::reconcile_accounts(&store, &pool, &jar)
+            .await
+            .unwrap(),
+         1
+      );
+      assert_eq!(
+         ApiClient::reconcile_accounts(&store, &pool, &jar)
+            .await
+            .unwrap(),
+         0
+      );
+      assert!(
+         pool
+            .acquire_free("TweetDetail", None)
+            .await
+            .unwrap()
+            .is_none()
+      );
       let search = pool.acquire("SearchTimeline", None).await.unwrap();
       let id = search.id;
       let mut headers = axum::http::HeaderMap::new();
       headers.insert(header::COOKIE, "ct0=imported-ct0".parse().unwrap());
       jar.merge_into(id, &mut headers).await;
-      assert_eq!(headers[header::COOKIE], "ct0=imported-ct0; guest_id=imported-guest");
+      assert_eq!(
+         headers[header::COOKIE],
+         "ct0=imported-ct0; guest_id=imported-guest"
+      );
 
       pool.hold_ct0(id, "fresh".to_owned());
-      pool.demote_to_view(id).await;
+      pool
+         .demote_to_view(id, Some(crate::stats::Restriction::SearchBanned), "search refused")
+         .await;
       let mut answer = axum::http::HeaderMap::new();
-      answer.append(header::SET_COOKIE, "guest_id=deleted; Max-Age=0".parse().unwrap());
+      answer.append(
+         header::SET_COOKIE,
+         "guest_id=deleted; Max-Age=0".parse().unwrap(),
+      );
       jar.absorb(id, &answer).await;
       drop((search, lease));
       timeout(Duration::from_secs(25), async {
          loop {
             let sessions = store.load().await.unwrap();
             let saved = sessions.iter().find(|session| session.id == id).unwrap();
-            if saved.ct0 == "fresh" && saved.pool.is_empty()
+            if saved.ct0 == "fresh"
+               && saved.pool.is_empty()
                && !store.load_cookies().await.unwrap().contains_key(&id)
             {
                break;
             }
             sleep(Duration::from_millis(100)).await;
          }
-      }).await.unwrap();
+      })
+      .await
+      .unwrap();
       let restart = SessionPool::from_store(store, 1).await.unwrap();
       assert_eq!(restart.ct0(id).as_deref(), Some("fresh"));
       assert_eq!(restart.available_for("SearchTimeline").await, 0);
@@ -1982,9 +2231,8 @@ mod tests {
 
    #[test]
    fn a_cloudflare_block_page_is_one_log_line() {
-      let page = "<html><title>Attention Required! | Cloudflare</title>\
-         <h1>Sorry, you have been blocked</h1>\
-         Cloudflare Ray ID: <strong>a5267bf16cead69c</strong></html>";
+      let page = "<html><title>Attention Required! | Cloudflare</title><h1>Sorry, you have been \
+                  blocked</h1>Cloudflare Ray ID: <strong>a5267bf16cead69c</strong></html>";
       assert!(cloudflare_ip_ban(axum::http::StatusCode::FORBIDDEN, page));
       assert!(!cloudflare_ip_ban(
          axum::http::StatusCode::FORBIDDEN,
@@ -2038,17 +2286,26 @@ mod tests {
       let partial = br#"{"data":{"search_by_raw_query":{"search_timeline":{"timeline":{"instructions":[{"entries":[{"content":{"tweet_results":{"result":{"rest_id":"42"}}}}]}]}}}},"errors":[{"message":"Internal server error","path":["another_field","timeline"]}]}"#;
       let classify = |body: &[u8]| {
          let envelope: GqlResponse<SearchTimelineData> = serde_json::from_slice(body).unwrap();
-         (search_answer_is_suspended(body, &envelope.errors), search_answer_is_empty(body))
+         (
+            search_answer_is_suspended(body, &envelope.errors),
+            search_answer_is_empty(body),
+         )
       };
       assert_eq!(classify(suspended), (true, true));
       assert_eq!(classify(empty), (false, true));
       assert_eq!(classify(partial), (false, false));
-      assert_eq!(classify(br#"{"data":{"search_by_raw_query":{"search_timeline":{}}}}"#), (false, true));
+      assert_eq!(
+         classify(br#"{"data":{"search_by_raw_query":{"search_timeline":{}}}}"#),
+         (false, true)
+      );
 
       let unrelated = [ApiError {
-         code: 0,
+         code:    0,
          message: "Internal server error".into(),
-         path: vec![serde_json::json!("another_field"), serde_json::json!("timeline")],
+         path:    vec![
+            serde_json::json!("another_field"),
+            serde_json::json!("timeline"),
+         ],
       }];
       assert!(!search_answer_is_suspended(suspended, &unrelated));
       let envelope: GqlResponse<SearchTimelineData> = serde_json::from_slice(suspended).unwrap();
@@ -2059,7 +2316,9 @@ mod tests {
 
    #[test]
    fn a_search_page_without_posts_is_empty_and_one_with_posts_is_not() {
-      assert!(search_answer_is_empty(br#"{"data":{"search_by_raw_query":{}}}"#));
+      assert!(search_answer_is_empty(
+         br#"{"data":{"search_by_raw_query":{}}}"#
+      ));
       assert!(search_answer_is_empty(br#"{"data":null}"#));
       assert!(!search_answer_is_empty(
          br#"{"data":{"search_by_raw_query":{"tweet_results":{}}}}"#
@@ -2128,7 +2387,10 @@ mod tests {
 
    #[test]
    fn empty_429_with_an_account_window_is_not_an_ip_block() {
-      use axum::http::{HeaderMap, HeaderValue};
+      use axum::http::{
+         HeaderMap,
+         HeaderValue,
+      };
 
       let mut window = HeaderMap::new();
       window.insert("x-rate-limit-remaining", HeaderValue::from_static("0"));
@@ -2166,7 +2428,7 @@ mod tests {
       let guard = InflightGuard {
          map: Arc::clone(&map),
          key: key.clone(),
-         tx: Some(tx),
+         tx:  Some(tx),
       };
       let mut follower = map.lock().unwrap().get(&key).unwrap().subscribe();
       assert_eq!(map.lock().unwrap().len(), 1);

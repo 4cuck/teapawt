@@ -1,7 +1,15 @@
 use axum::{
    Router,
-   extract::{Path, Query, State},
-   response::{Html, IntoResponse as _, Response},
+   extract::{
+      Path,
+      Query,
+      State,
+   },
+   response::{
+      Html,
+      IntoResponse as _,
+      Response,
+   },
    routing::get,
 };
 use axum_extra::extract::CookieJar;
@@ -14,7 +22,11 @@ use crate::{
    error::Result,
    types::Prefs,
    utils::formatters,
-   views::{layout, renderutils::proxy_media, timeline as timeline_view},
+   views::{
+      layout,
+      renderutils::proxy_media,
+      timeline as timeline_view,
+   },
 };
 
 #[derive(Debug, Deserialize)]

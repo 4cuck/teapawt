@@ -1,29 +1,65 @@
 use axum::{
    Router,
-   extract::{Path, Query, State},
-   http::{HeaderMap, StatusCode, header},
-   response::{Html, IntoResponse as _, Redirect, Response},
+   extract::{
+      Path,
+      Query,
+      State,
+   },
+   http::{
+      HeaderMap,
+      StatusCode,
+      header,
+   },
+   response::{
+      Html,
+      IntoResponse as _,
+      Redirect,
+      Response,
+   },
    routing::get,
 };
 use axum_extra::extract::CookieJar;
 use maud::html;
 use serde::Deserialize;
-use tweet_view::{TweetRenderer, render_reply_chains, thread_context};
+use tweet_view::{
+   TweetRenderer,
+   render_reply_chains,
+   thread_context,
+};
 
 use super::{
+   admin_stats,
    helpers,
-   helpers::{get_cached_strato_translation, get_cached_translation, get_cached_tweet},
+   helpers::{
+      get_cached_strato_translation,
+      get_cached_translation,
+      get_cached_tweet,
+   },
 };
 use crate::{
    AppState,
-   cache::{keys as cache_keys, ttl},
+   cache::{
+      keys as cache_keys,
+      ttl,
+   },
    config::Config,
-   error::{Error, Result},
-   types::{Conversation, Prefs},
+   error::{
+      Error,
+      Result,
+   },
+   types::{
+      Conversation,
+      Prefs,
+   },
    views::{
-      embed, layout,
-      timeline::{render_timeline_with_prefs, render_to_top_with_focus},
-      tweet as tweet_view, user_list,
+      embed,
+      layout,
+      timeline::{
+         render_timeline_with_prefs,
+         render_to_top_with_focus,
+      },
+      tweet as tweet_view,
+      user_list,
    },
 };
 
@@ -39,21 +75,21 @@ const PREVIEW_AGENTS: [&str; 6] = [
 #[derive(Debug, Deserialize)]
 struct StatusParams {
    username: String,
-   id: String,
+   id:       String,
 }
 
 #[derive(Debug, Deserialize)]
 struct PhotoParams {
    username: String,
-   id: String,
-   idx: usize,
+   id:       String,
+   idx:      usize,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct StatusQuery {
-   pub cursor: Option<String>,
-   pub scroll: Option<String>,
-   pub sort: Option<String>,
+   pub cursor:    Option<String>,
+   pub scroll:    Option<String>,
+   pub sort:      Option<String>,
    #[serde(rename = "cf-turnstile-response")]
    pub turnstile: Option<String>,
 }
@@ -230,9 +266,7 @@ async fn render_status(
                .get_conversation(&id, query.cursor.as_deref(), sort),
             state.api.get_conversation(&id, None, sort),
          );
-         if !is_sorted
-            && let Ok(ref first) = first_res
-         {
+         if !is_sorted && let Ok(ref first) = first_res {
             state.cache.set(&cache_key, first, ttl::DEFAULT);
          }
          (cursor_res, Some(first_res))
@@ -818,6 +852,7 @@ async fn quotes(
       .await?;
 
    let mut groups = timeline.content;
+   let empty = groups.iter().all(Vec::is_empty);
    helpers::enrich_tweet_groups(&state, &mut groups).await;
    for group in &groups {
       helpers::remember_tweets(&state, group);
@@ -835,7 +870,10 @@ async fn quotes(
          &prefs,
          None,
       );
-      return Ok(Html(fragment.into_string()).into_response());
+      return Ok(admin_stats::search_result(
+         Html(fragment.into_string()).into_response(),
+         empty,
+      ));
    }
 
    let content = html! {
@@ -849,7 +887,10 @@ async fn quotes(
    let markup = layout::PageLayout::new(&state.config, &title, content)
       .prefs(&prefs)
       .render();
-   Ok(Html(markup.into_string()).into_response())
+   Ok(admin_stats::search_result(
+      Html(markup.into_string()).into_response(),
+      empty,
+   ))
 }
 
 /// Edit history page handler.

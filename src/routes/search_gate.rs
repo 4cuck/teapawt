@@ -2,26 +2,46 @@
 
 use std::{
    collections::HashMap,
-   sync::{LazyLock, Mutex},
+   sync::{
+      LazyLock,
+      Mutex,
+   },
 };
 
 use axum::{
-   http::{HeaderValue, StatusCode, header},
-   response::{IntoResponse, Redirect, Response},
+   http::{
+      HeaderValue,
+      StatusCode,
+      header,
+   },
+   response::{
+      IntoResponse,
+      Redirect,
+      Response,
+   },
 };
 use axum_extra::extract::{
    CookieJar,
-   cookie::{Cookie, SameSite},
+   cookie::{
+      Cookie,
+      SameSite,
+   },
 };
 use data_encoding::HEXLOWER;
 use ring::hmac;
 use serde::Deserialize;
-use time::{Duration, OffsetDateTime};
+use time::{
+   Duration,
+   OffsetDateTime,
+};
 
 use crate::{
    AppState,
    types::Prefs,
-   views::{layout, search as search_view},
+   views::{
+      layout,
+      search as search_view,
+   },
 };
 
 /// How long one checkbox press unlocks search.
@@ -37,11 +57,12 @@ static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 
 /// A token Cloudflare already accepted. A second submit of the same checkbox
 /// (a retry, or the redirect that follows the first) is the same pass.
-static ACCEPTED: LazyLock<Mutex<HashMap<String, i64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static ACCEPTED: LazyLock<Mutex<HashMap<String, i64>>> =
+   LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Deserialize)]
 struct Siteverify {
-   success: bool,
+   success:     bool,
    #[serde(default, rename = "error-codes")]
    error_codes: Vec<String>,
 }
@@ -115,7 +136,7 @@ fn challenge(state: &AppState, prefs: &Prefs, prompt: &Prompt<'_>, failed: bool)
       .render();
    // 403, not 200. Cloudflare caches this status for search and does not
    // mix it with the finished results.
-   (
+   let mut response = (
       StatusCode::FORBIDDEN,
       [(
          header::CACHE_CONTROL,
@@ -123,7 +144,12 @@ fn challenge(state: &AppState, prefs: &Prefs, prompt: &Prompt<'_>, failed: bool)
       )],
       axum::response::Html(markup.into_string()),
    )
-      .into_response()
+      .into_response();
+   // A challenge is the gate working, not a failed search. Tagging it keeps it
+   // out of the error rate, which otherwise reads 90% on a healthy site because
+   // every first-time visitor gets one of these.
+   response.extensions_mut().insert(crate::stats::Outcome::Challenged);
+   response
 }
 
 pub(super) fn absolute(origin: &str, url: &str) -> String {
@@ -136,11 +162,15 @@ pub(super) fn absolute(origin: &str, url: &str) -> String {
 
 fn redirect(cookie: Option<Cookie<'static>>, url: &str) -> Response {
    let redirect = Redirect::to(url);
-   let response = if let Some(cookie) = cookie {
+   let mut response = if let Some(cookie) = cookie {
       (CookieJar::new().add(cookie), redirect).into_response()
    } else {
       redirect.into_response()
    };
+   // The visitor solved the challenge and is being sent to their results. That
+   // is a finished request, not an unknown outcome; counting it as "other" made
+   // a working gate look like tens of thousands of unexplained responses.
+   response.extensions_mut().insert(crate::stats::Outcome::Success);
    private(response)
 }
 

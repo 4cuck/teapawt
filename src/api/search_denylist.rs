@@ -6,8 +6,14 @@
 use std::{
    collections::HashSet,
    fs,
-   path::{Path, PathBuf},
-   sync::{Arc, RwLock},
+   path::{
+      Path,
+      PathBuf,
+   },
+   sync::{
+      Arc,
+      RwLock,
+   },
 };
 
 /// `include:nativeretweets` is what Shitter prepends so the raw query is no
@@ -22,7 +28,7 @@ pub fn bypass_denylist(query: &str) -> String {
 
 #[derive(Clone)]
 pub struct SearchDenylist {
-   path: Arc<PathBuf>,
+   path:  Arc<PathBuf>,
    inner: Arc<RwLock<HashSet<String>>>,
 }
 
@@ -38,7 +44,7 @@ impl SearchDenylist {
          .filter(|query| !query.is_empty())
          .collect();
       Self {
-         path: Arc::new(path),
+         path:  Arc::new(path),
          inner: Arc::new(RwLock::new(inner)),
       }
    }

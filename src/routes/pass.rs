@@ -122,7 +122,10 @@ fn see_note(key: &str) -> Response {
 }
 
 const fn bad(text: &'static str) -> Notice {
-   Notice { tone: Tone::Bad, text }
+   Notice {
+      tone: Tone::Bad,
+      text,
+   }
 }
 
 fn note(key: &str) -> Option<Notice> {
@@ -147,19 +150,44 @@ fn note(key: &str) -> Option<Notice> {
             "The payment service did not start a checkout. Try again, or use another method.",
          )
       },
-      "busy" => (Bad, "Too many checkouts from this address. Try again in a few minutes."),
+      "busy" => {
+         (
+            Bad,
+            "Too many checkouts from this address. Try again in a few minutes.",
+         )
+      },
       "renews" => (Info, "This pass already renews by card."),
       "added" => (Good, "Address added."),
       "removed" => (Good, "Address removed."),
       "listed" => (Info, "That address is already on the list."),
-      "full" => (Bad, "This pass has as many addresses as it can hold. Remove one first."),
+      "full" => {
+         (
+            Bad,
+            "This pass has as many addresses as it can hold. Remove one first.",
+         )
+      },
       "bad-ip" => (Bad, "That is not a public IPv4 or IPv6 address."),
       "email" => (Good, "Recovery email saved."),
       "no-email" => (Good, "Recovery email removed."),
       "bad-email" => (Bad, "That email address does not look right."),
-      "stopped" => (Good, "Card renewal stopped. The pass runs until the date above."),
-      "stop-failed" => (Bad, "Stripe did not stop the renewal. Try again in a minute."),
-      "unavailable" => (Bad, "Something went wrong on our side. Try again in a minute."),
+      "stopped" => {
+         (
+            Good,
+            "Card renewal stopped. The pass runs until the date above.",
+         )
+      },
+      "stop-failed" => {
+         (
+            Bad,
+            "Stripe did not stop the renewal. Try again in a minute.",
+         )
+      },
+      "unavailable" => {
+         (
+            Bad,
+            "Something went wrong on our side. Try again in a minute.",
+         )
+      },
       _ => return None,
    };
    Some(Notice { tone, text })
@@ -752,7 +780,11 @@ async fn grant(
          };
          let notice = Notice {
             tone: Tone::Good,
-            text: if granted.extended { "Pass extended." } else { "Pass issued." },
+            text: if granted.extended {
+               "Pass extended."
+            } else {
+               "Pass issued."
+            },
          };
          account_page(&state, &jar, &admin, Some(notice), Some(&issued))
       },

@@ -1,15 +1,40 @@
-use std::{fs, path::Path};
+use std::{
+   fs,
+   path::Path,
+};
 
 use axum::{
-   Form, Router,
-   extract::{Query, State},
-   http::{HeaderMap, header::REFERER},
+   Form,
+   Router,
+   extract::{
+      Query,
+      State,
+   },
+   http::{
+      HeaderMap,
+      header::REFERER,
+   },
    middleware,
-   response::{Html, IntoResponse as _, Redirect, Response},
-   routing::{get, post},
+   response::{
+      Html,
+      IntoResponse as _,
+      Redirect,
+      Response,
+   },
+   routing::{
+      get,
+      post,
+   },
 };
-use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use axum_extra::extract::cookie::{
+   Cookie,
+   CookieJar,
+   SameSite,
+};
+use percent_encoding::{
+   NON_ALPHANUMERIC,
+   utf8_percent_encode,
+};
 use serde::Deserialize;
 use time::Duration;
 
@@ -19,7 +44,10 @@ use crate::{
    error::Result,
    routes::middleware::same_origin_guard,
    types::Prefs,
-   views::{layout, preferences as pref_view},
+   views::{
+      layout,
+      preferences as pref_view,
+   },
 };
 
 /// Convert preferences to HTTP cookies for storage.
@@ -147,58 +175,58 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Debug, Deserialize)]
 pub struct PrefsForm {
-   pub referer: Option<String>,
-   pub theme: Option<String>,
+   pub referer:              Option<String>,
+   pub theme:                Option<String>,
    #[serde(rename = "infiniteScroll")]
-   pub infinite_scroll: Option<String>,
+   pub infinite_scroll:      Option<String>,
    #[serde(rename = "stickyProfile")]
-   pub sticky_profile: Option<String>,
+   pub sticky_profile:       Option<String>,
    #[serde(rename = "bidiSupport")]
-   pub bidi_support: Option<String>,
+   pub bidi_support:         Option<String>,
    #[serde(rename = "mp4Playback")]
-   pub mp4_playback: Option<String>,
+   pub mp4_playback:         Option<String>,
    #[serde(rename = "hlsPlayback")]
-   pub hls_playback: Option<String>,
+   pub hls_playback:         Option<String>,
    #[serde(rename = "autoplayGifs")]
-   pub autoplay_gifs: Option<String>,
+   pub autoplay_gifs:        Option<String>,
    #[serde(rename = "muteVideos")]
-   pub mute_videos: Option<String>,
+   pub mute_videos:          Option<String>,
    #[serde(rename = "hideTweetStats")]
-   pub hide_tweet_stats: Option<String>,
+   pub hide_tweet_stats:     Option<String>,
    #[serde(rename = "hideBanner")]
-   pub hide_banner: Option<String>,
+   pub hide_banner:          Option<String>,
    #[serde(rename = "hidePins")]
-   pub hide_pins: Option<String>,
+   pub hide_pins:            Option<String>,
    #[serde(rename = "hideReplies")]
-   pub hide_replies: Option<String>,
+   pub hide_replies:         Option<String>,
    #[serde(rename = "hideCommunityNotes")]
    pub hide_community_notes: Option<String>,
    #[serde(rename = "squareAvatars")]
-   pub square_avatars: Option<String>,
+   pub square_avatars:       Option<String>,
    #[serde(rename = "useTwemoji")]
-   pub use_twemoji: Option<String>,
+   pub use_twemoji:          Option<String>,
    #[serde(rename = "stickyNav")]
-   pub sticky_nav: Option<String>,
+   pub sticky_nav:           Option<String>,
    #[serde(rename = "proxyMedia")]
-   pub proxy_media: Option<String>,
+   pub proxy_media:          Option<String>,
    #[serde(rename = "fontSize")]
-   pub font_size: Option<String>,
+   pub font_size:            Option<String>,
    #[serde(rename = "replaceTwitter")]
-   pub replace_twitter: Option<String>,
+   pub replace_twitter:      Option<String>,
    #[serde(rename = "replaceYouTube")]
-   pub replace_youtube: Option<String>,
+   pub replace_youtube:      Option<String>,
    #[serde(rename = "replaceReddit")]
-   pub replace_reddit: Option<String>,
+   pub replace_reddit:       Option<String>,
    #[serde(rename = "kagiToken")]
-   pub kagi_token: Option<String>,
+   pub kagi_token:           Option<String>,
    #[serde(rename = "mediaView")]
-   pub media_view: Option<String>,
+   pub media_view:           Option<String>,
    #[serde(rename = "gallerySize")]
-   pub gallery_size: Option<String>,
+   pub gallery_size:         Option<String>,
    #[serde(rename = "compactGallery")]
-   pub compact_gallery: Option<String>,
+   pub compact_gallery:      Option<String>,
    #[serde(rename = "replySort")]
-   pub reply_sort: Option<String>,
+   pub reply_sort:           Option<String>,
 }
 
 impl PrefsForm {
@@ -209,32 +237,32 @@ impl PrefsForm {
       let parse_str = |field: &Option<String>, default: String| field.clone().unwrap_or(default);
 
       Prefs {
-         theme: parse_str(&self.theme, defaults.theme),
-         infinite_scroll: parse_bool(&self.infinite_scroll),
-         sticky_profile: parse_bool(&self.sticky_profile),
-         bidi_support: parse_bool(&self.bidi_support),
-         mp4_playback: parse_bool(&self.mp4_playback),
-         hls_playback: parse_bool(&self.hls_playback),
-         autoplay_gifs: parse_bool(&self.autoplay_gifs),
-         mute_videos: parse_bool(&self.mute_videos),
-         hide_tweet_stats: parse_bool(&self.hide_tweet_stats),
-         hide_banner: parse_bool(&self.hide_banner),
-         hide_pins: parse_bool(&self.hide_pins),
-         hide_replies: parse_bool(&self.hide_replies),
+         theme:                parse_str(&self.theme, defaults.theme),
+         infinite_scroll:      parse_bool(&self.infinite_scroll),
+         sticky_profile:       parse_bool(&self.sticky_profile),
+         bidi_support:         parse_bool(&self.bidi_support),
+         mp4_playback:         parse_bool(&self.mp4_playback),
+         hls_playback:         parse_bool(&self.hls_playback),
+         autoplay_gifs:        parse_bool(&self.autoplay_gifs),
+         mute_videos:          parse_bool(&self.mute_videos),
+         hide_tweet_stats:     parse_bool(&self.hide_tweet_stats),
+         hide_banner:          parse_bool(&self.hide_banner),
+         hide_pins:            parse_bool(&self.hide_pins),
+         hide_replies:         parse_bool(&self.hide_replies),
          hide_community_notes: parse_bool(&self.hide_community_notes),
-         square_avatars: parse_bool(&self.square_avatars),
-         use_twemoji: parse_bool(&self.use_twemoji),
-         sticky_nav: parse_bool(&self.sticky_nav),
-         proxy_media: parse_bool(&self.proxy_media),
-         font_size: parse_str(&self.font_size, defaults.font_size),
-         replace_twitter: parse_str(&self.replace_twitter, defaults.replace_twitter),
-         replace_youtube: parse_str(&self.replace_youtube, defaults.replace_youtube),
-         replace_reddit: parse_str(&self.replace_reddit, defaults.replace_reddit),
-         kagi_token: parse_str(&self.kagi_token, defaults.kagi_token),
-         media_view: parse_str(&self.media_view, defaults.media_view),
-         gallery_size: parse_str(&self.gallery_size, defaults.gallery_size),
-         compact_gallery: parse_bool(&self.compact_gallery),
-         reply_sort: Prefs::normalize_reply_sort(self.reply_sort.as_deref())
+         square_avatars:       parse_bool(&self.square_avatars),
+         use_twemoji:          parse_bool(&self.use_twemoji),
+         sticky_nav:           parse_bool(&self.sticky_nav),
+         proxy_media:          parse_bool(&self.proxy_media),
+         font_size:            parse_str(&self.font_size, defaults.font_size),
+         replace_twitter:      parse_str(&self.replace_twitter, defaults.replace_twitter),
+         replace_youtube:      parse_str(&self.replace_youtube, defaults.replace_youtube),
+         replace_reddit:       parse_str(&self.replace_reddit, defaults.replace_reddit),
+         kagi_token:           parse_str(&self.kagi_token, defaults.kagi_token),
+         media_view:           parse_str(&self.media_view, defaults.media_view),
+         gallery_size:         parse_str(&self.gallery_size, defaults.gallery_size),
+         compact_gallery:      parse_bool(&self.compact_gallery),
+         reply_sort:           Prefs::normalize_reply_sort(self.reply_sort.as_deref())
             .unwrap_or("relevance")
             .to_owned(),
       }

@@ -6,11 +6,13 @@ pub const CONSUMER_KEY: &str = "3nVuSoBZnx6U4vzUxf5w";
 pub const CONSUMER_SECRET: &str = "Bcs59EFbbsdF6Sl9Ng71smgStWEGwXXKSjYvPVt7qys";
 /// Bearer token that requires x-client-transaction-id (used for cookie sessions
 /// with TID).
-pub const BEARER_TOKEN: &str = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%\
+pub const BEARER_TOKEN: &str =
+   "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%\
     3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 
 /// Fallback bearer token that doesn't require x-client-transaction-id.
-pub const BEARER_TOKEN_NO_TID: &str = "Bearer AAAAAAAAAAAAAAAAAAAAAFXzAwAAAAAAMHCxpeSDG1gLNLghVe8d74hl6k4%\
+pub const BEARER_TOKEN_NO_TID: &str =
+   "Bearer AAAAAAAAAAAAAAAAAAAAAFXzAwAAAAAAMHCxpeSDG1gLNLghVe8d74hl6k4%\
     3DRUMF4xAQLsbeBhTSRrCiQpJtxoGWeyHrDb5te2jpGskWDFW82F";
 
 // GraphQL endpoints
@@ -78,6 +80,10 @@ pub const STRATO_URL: &str = "https://x.com/i/api/1.1/strato/column/None";
 pub const ACCOUNT_SETTINGS_URL: &str = "https://api.x.com/1.1/account/settings.json";
 /// `acquire_id` allows search accounts to use this settings operation.
 pub const ACCOUNT_SETTINGS: &str = "account/settings";
+/// A cookie session's own account, including its numeric id. Keyed by the
+/// session itself, so it resolves an id whatever the import was named.
+pub const VERIFY_CREDENTIALS_URL: &str = "https://api.x.com/1.1/account/verify_credentials.json";
+pub const VERIFY_CREDENTIALS: &str = "account/verify_credentials";
 pub const SEARCH_SAFETY: &str = "search/searchSafety";
 pub const X_POSED_LOOKUP_URL: &str = "https://x-posed-cache.xaitax.workers.dev/lookup";
 
@@ -90,7 +96,8 @@ pub const USER_REPOSTS_FIELD_TOGGLES: &str =
    r#"{"withPayments":false,"withArticlePlainText":false}"#;
 /// Field toggles Chrome sent with `UserArticlesTweets`, plus the rich article
 /// state so each row can link to the article itself.
-pub const USER_ARTICLES_FIELD_TOGGLES: &str = r#"{"withPayments":false,"withArticlePlainText":false,"withArticleRichContentState":true}"#;
+pub const USER_ARTICLES_FIELD_TOGGLES: &str =
+   r#"{"withPayments":false,"withArticlePlainText":false,"withArticleRichContentState":true}"#;
 /// Features sent with `UserRepostsTimeline` in the same capture. The query
 /// id is paired with this set; the older shared blob is a different generation.
 pub const USER_REPOSTS_FEATURES: &str = r#"{"rweb_video_screen_enabled":false,"rweb_cashtags_enabled":true,"profile_label_improvements_pcf_label_in_post_enabled":true,"responsive_web_profile_redirect_enabled":true,"rweb_tipjar_consumption_enabled":false,"verified_phone_label_enabled":false,"creator_subscriptions_tweet_preview_api_enabled":true,"responsive_web_graphql_timeline_navigation_enabled":true,"premium_content_api_read_enabled":false,"communities_web_enable_tweet_community_results_fetch":true,"c9s_tweet_anatomy_moderator_badge_enabled":true,"responsive_web_grok_analyze_button_fetch_trends_enabled":false,"responsive_web_grok_analyze_post_followups_enabled":true,"rweb_cashtags_composer_attachment_enabled":true,"responsive_web_jetfuel_frame":true,"rweb_sports_post_context_enabled":true,"responsive_web_grok_share_attachment_enabled":true,"responsive_web_grok_annotations_enabled":true,"articles_preview_enabled":true,"responsive_web_edit_tweet_api_enabled":true,"rweb_conversational_replies_downvote_enabled":false,"graphql_is_translatable_rweb_tweet_is_translatable_enabled":true,"view_counts_everywhere_api_enabled":true,"longform_notetweets_consumption_enabled":true,"responsive_web_twitter_article_tweet_consumption_enabled":true,"content_disclosure_indicator_enabled":true,"content_disclosure_ai_generated_indicator_enabled":true,"responsive_web_grok_show_grok_translated_post":true,"responsive_web_grok_analysis_button_from_backend":true,"post_ctas_fetch_enabled":false,"freedom_of_speech_not_reach_fetch_enabled":true,"standardized_nudges_misinfo":true,"tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled":true,"longform_notetweets_rich_text_read_enabled":true,"longform_notetweets_inline_media_enabled":false,"responsive_web_nested_quote_preview_enabled":true,"responsive_web_grok_image_annotation_enabled":true,"responsive_web_grok_imagine_annotation_enabled":true,"responsive_web_grok_community_note_auto_translation_is_enabled":true,"responsive_web_enhance_cards_enabled":false}"#;
@@ -149,7 +156,8 @@ pub fn user_tweets_sorted_vars(user_id: &str, cursor: Option<&str>, popular: boo
    vars(value)
 }
 
-/// Original posts (`UserOriginalsTimeline`), as the profile Posts filter sends them.
+/// Original posts (`UserOriginalsTimeline`), as the profile Posts filter sends
+/// them.
 pub fn user_originals_vars(user_id: &str, cursor: Option<&str>, popular: bool) -> String {
    let mut value = json!({
       "userId": user_id, "cursor": cursor, "count": 20,

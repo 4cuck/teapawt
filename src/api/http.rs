@@ -7,36 +7,81 @@
 //! else (media, bootstrap fetches) uses a shared default client.
 
 use std::{
-   collections::{HashMap, HashSet},
+   collections::{
+      HashMap,
+      HashSet,
+   },
    env,
    error::Error as _,
    fmt::Write as _,
    fs,
-   hash::{Hash as _, Hasher as _},
+   hash::{
+      Hash as _,
+      Hasher as _,
+   },
    io::Write as _,
-   path::{Path, PathBuf},
-   pin::{Pin, pin},
+   path::{
+      Path,
+      PathBuf,
+   },
+   pin::{
+      Pin,
+      pin,
+   },
    result::Result as StdResult,
    sync::{
-      Arc, Mutex,
-      atomic::{AtomicU64, AtomicUsize, Ordering},
+      Arc,
+      Mutex,
+      atomic::{
+         AtomicU64,
+         AtomicUsize,
+         Ordering,
+      },
    },
-   task::{Context, Poll},
-   time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+   task::{
+      Context,
+      Poll,
+   },
+   time::{
+      Duration,
+      Instant,
+      SystemTime,
+      UNIX_EPOCH,
+   },
 };
 
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
+use axum::http::{
+   HeaderMap,
+   HeaderName,
+   HeaderValue,
+   Method,
+   StatusCode,
+   header,
+};
 use bytes::Bytes;
 use futures_core::Stream;
 use http_body::Frame;
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{
+   OffsetDateTime,
+   format_description::well_known::Rfc3339,
+};
 
 use super::{
-   browser::{self, Engine, Identity},
+   browser::{
+      self,
+      Engine,
+      Identity,
+   },
    cookies::Jar,
-   log_events::{self, Event},
+   log_events::{
+      self,
+      Event,
+   },
 };
-use crate::error::{Error, Result};
+use crate::error::{
+   Error,
+   Result,
+};
 
 const DEFAULT_BODY_LIMIT: usize = 32 * 1024 * 1024; // 32 MiB
 /// Whole API call, connect to last byte.
@@ -78,8 +123,8 @@ const DIRECT_BLOCK_FOR: Duration = Duration::from_secs(5 * 60);
 /// 1101 and 1103 back in rotation to be throttled about 1,100 times each in
 /// one evening.
 const EDGE_PARKING: Parking = Parking {
-   first: Duration::from_mins(5),
-   max: Duration::from_hours(2),
+   first:  Duration::from_mins(5),
+   max:    Duration::from_hours(2),
    memory: Duration::from_mins(30),
 };
 /// An exit X answered a call through this recently is not IP-blocked, so a
@@ -103,8 +148,8 @@ const SLOW_EXIT_SHARE: f64 = 0.25;
 const SLOW_EXIT_VS_FLEET: f64 = 3.0;
 /// Parking for slowness, doubling while the exit keeps relapsing.
 const SLOW_PARKING: Parking = Parking {
-   first: Duration::from_mins(2),
-   max: Duration::from_mins(30),
+   first:  Duration::from_mins(2),
+   max:    Duration::from_mins(30),
    memory: Duration::from_mins(10),
 };
 
@@ -113,8 +158,8 @@ const SLOW_PARKING: Parking = Parking {
 /// parking within `memory` of the last one ending.
 #[derive(Clone, Copy, Debug)]
 struct Parking {
-   first: Duration,
-   max: Duration,
+   first:  Duration,
+   max:    Duration,
    memory: Duration,
 }
 
@@ -153,9 +198,9 @@ pub enum ProxyKind {
 /// Parsed proxy configuration.
 #[derive(Clone, Debug)]
 pub struct ProxyConfig {
-   pub host: String,
-   pub port: u16,
-   pub kind: ProxyKind,
+   pub host:     String,
+   pub port:     u16,
+   pub kind:     ProxyKind,
    pub username: Option<String>,
    pub password: Option<String>,
 }
@@ -194,7 +239,7 @@ impl ProxyConfig {
 #[derive(Clone, Debug)]
 pub struct Egress {
    pub session: i64,
-   pub proxy: Option<ProxyConfig>,
+   pub proxy:   Option<ProxyConfig>,
 }
 
 /// What a client's requests are for, which decides the fetch-context headers
@@ -223,8 +268,8 @@ impl Purpose {
 struct FallbackPool {
    proxies: Vec<ProxyConfig>,
    /// [`proxy_tag`] of every exit, to recognise them when picking a client.
-   tags: HashSet<u64>,
-   next: AtomicUsize,
+   tags:    HashSet<u64>,
+   next:    AtomicUsize,
 }
 
 impl FallbackPool {
@@ -239,8 +284,8 @@ impl FallbackPool {
 #[derive(Clone, Copy, Default)]
 struct ExitSamples {
    bucket: u64,
-   fast: [u32; 2],
-   slow: [u32; 2],
+   fast:   [u32; 2],
+   slow:   [u32; 2],
 }
 
 impl ExitSamples {
@@ -273,21 +318,21 @@ impl ExitSamples {
 /// pinned, but temporarily moves to another healthy exit when X rate-limits
 /// its public IP or answers it far slower than the other exits.
 struct PrimaryPool {
-   proxies: Vec<ProxyConfig>,
-   tags: HashSet<u64>,
+   proxies:       Vec<ProxyConfig>,
+   tags:          HashSet<u64>,
    blocked_until: Mutex<HashMap<u64, u64>>,
-   samples: Mutex<HashMap<u64, ExitSamples>>,
+   samples:       Mutex<HashMap<u64, ExitSamples>>,
    /// Parkings in a row per exit, and when the last one ends: for slowness,
    /// and for X's edge throttling its IP. Kept apart so a slow spell does not
    /// lengthen the next throttle parking or the other way round.
-   relapses: Mutex<HashMap<u64, (u32, u64)>>,
+   relapses:      Mutex<HashMap<u64, (u32, u64)>>,
    edge_relapses: Mutex<HashMap<u64, (u32, u64)>>,
    /// When X last answered a call through each exit with a success.
-   served: Mutex<HashMap<u64, u64>>,
+   served:        Mutex<HashMap<u64, u64>>,
    /// Exits named in the ban file: a Cloudflare block until it lapses, any
    /// other line until it is deleted. Kept across restarts.
-   banned: Mutex<HashSet<u64>>,
-   banned_file: Option<PathBuf>,
+   banned:        Mutex<HashSet<u64>>,
+   banned_file:   Option<PathBuf>,
 }
 
 impl PrimaryPool {
@@ -349,7 +394,8 @@ impl PrimaryPool {
    }
 
    fn banned_tags(&self) -> HashSet<u64> {
-      self.banned
+      self
+         .banned
          .lock()
          .map(|banned| banned.clone())
          .unwrap_or_default()
@@ -393,7 +439,12 @@ impl PrimaryPool {
             CLOUDFLARE_BAN_FOR.as_secs() / 3600
          );
       }
-      let _ = writeln!(line, "{} {} cloudflare", proxy.port, utc_stamp(unix_millis()));
+      let _ = writeln!(
+         line,
+         "{} {} cloudflare",
+         proxy.port,
+         utc_stamp(unix_millis())
+      );
       if let Err(err) = fs::OpenOptions::new()
          .create(true)
          .append(true)
@@ -609,26 +660,26 @@ impl PrimaryPool {
    reason = "HttpClient is clearer than Client"
 )]
 pub struct HttpClient {
-   purpose: Purpose,
-   default: primp::Client,
-   default_proxy: Option<ProxyConfig>,
+   purpose:              Purpose,
+   default:              primp::Client,
+   default_proxy:        Option<ProxyConfig>,
    /// Used only after the direct exit returns an HTML 429, or while that
    /// block is still fresh.
-   fallback_proxy: Option<ProxyConfig>,
+   fallback_proxy:       Option<ProxyConfig>,
    /// Round-robin exits for the same window. Each call takes the next one.
-   fallback_pool: Option<Arc<FallbackPool>>,
+   fallback_pool:        Option<Arc<FallbackPool>>,
    /// Stable session exits plus the shared circuit breaker for an IP that X
    /// temporarily rate-limited.
-   primary_pool: Option<Arc<PrimaryPool>>,
+   primary_pool:         Option<Arc<PrimaryPool>>,
    /// Unix millis until which the direct exit is skipped.
    direct_blocked_until: Arc<AtomicU64>,
-   extra_headers: HeaderMap,
+   extra_headers:        HeaderMap,
    /// Keyed by session and exit so a direct client is never reused for the
    /// fallback proxy.
-   sessions: Arc<Mutex<HashMap<(i64, u64), primp::Client>>>,
+   sessions:             Arc<Mutex<HashMap<(i64, u64), primp::Client>>>,
    /// The cookies each account has been handed, sent back with its calls and
    /// replaced by every `set-cookie` an answer carries.
-   cookies: Option<Arc<Jar>>,
+   cookies:              Option<Arc<Jar>>,
 }
 
 /// Response wrapper providing convenience methods.
@@ -766,7 +817,8 @@ impl HttpClient {
 
    /// Cloudflare blocked this exit's IP. Header stalls must not call this.
    pub fn ban_exit(&self, proxy: &ProxyConfig) -> bool {
-      self.primary_pool
+      self
+         .primary_pool
          .as_ref()
          .is_some_and(|pool| pool.ban(proxy))
    }
@@ -993,7 +1045,7 @@ impl HttpClient {
          .alternate(egress.session, proxy)?;
       Some(Egress {
          session: egress.session,
-         proxy: Some(alternate),
+         proxy:   Some(alternate),
       })
    }
 
@@ -1097,7 +1149,7 @@ impl HttpClient {
       let routed = if skip_direct {
          Some(Egress {
             session: via.expect("direct egress").session,
-            proxy: self.take_fallback(),
+            proxy:   self.take_fallback(),
          })
       } else if let Some(egress) = via
          && self.primary_is_blocked(egress)
@@ -1197,7 +1249,7 @@ impl HttpClient {
       );
       let proxied = Egress {
          session: via.expect("direct egress").session,
-         proxy: self.take_fallback(),
+         proxy:   self.take_fallback(),
       };
       self
          .dispatch(&method, uri, extra_headers, &body, Some(&proxied))
@@ -1217,20 +1269,18 @@ impl HttpClient {
       if let (Some(jar), Some(egress)) = (self.cookies.as_ref(), via) {
          jar.merge_into(egress.session, &mut headers).await;
       }
-      let send = || async {
-         let mut request = client
-            .request(method.clone(), uri)
-            .headers(headers.clone());
-         if !body.is_empty() {
-            request = request.body(body.clone());
+      let send = || {
+         async {
+            let mut request = client.request(method.clone(), uri).headers(headers.clone());
+            if !body.is_empty() {
+               request = request.body(body.clone());
+            }
+            let result = request.send().await;
+            if let (Some(jar), Some(egress), Ok(response)) = (self.cookies.as_ref(), via, &result) {
+               jar.absorb(egress.session, response.headers()).await;
+            }
+            result
          }
-         let result = request.send().await;
-         if let (Some(jar), Some(egress), Ok(response)) =
-            (self.cookies.as_ref(), via, &result)
-         {
-            jar.absorb(egress.session, response.headers()).await;
-         }
-         result
       };
       if self.purpose == Purpose::Media && is_idempotent(method) {
          let inner = match tokio::time::timeout(MEDIA_HEADER_DEADLINE, send()).await {
@@ -1351,13 +1401,8 @@ impl HttpClient {
          self.retire(via);
       }
       let race = async {
-         let mut fresh = pin!(self.send_fresh(
-            method,
-            uri,
-            extra_headers,
-            body,
-            alternate.as_ref().or(via),
-         ));
+         let mut fresh =
+            pin!(self.send_fresh(method, uri, extra_headers, body, alternate.as_ref().or(via),));
          let (mut first_done, mut fresh_done) = (false, false);
          // A 5xx or an error is held in case the other side does no better.
          // A 5xx goes back up as a response, which callers retry elsewhere.
@@ -1457,8 +1502,8 @@ impl HttpClient {
 /// arrive, when it fails, or when it is dropped unanswered because another
 /// copy of the call answered first.
 struct ExitProbe<'a> {
-   client: &'a HttpClient,
-   via: Option<&'a Egress>,
+   client:  &'a HttpClient,
+   via:     Option<&'a Egress>,
    started: Instant,
    settled: bool,
 }
@@ -1500,7 +1545,7 @@ impl Drop for ExitProbe<'_> {
 fn default_identity() -> Identity {
    Identity {
       engine: Engine::Chrome,
-      os: primp::ImpersonateOS::Windows,
+      os:     primp::ImpersonateOS::Windows,
    }
 }
 
@@ -1513,71 +1558,77 @@ fn default_identity() -> Identity {
 /// list for the calls that do.
 fn wire_header_order(purpose: Purpose) -> Vec<HeaderName> {
    let names: &[&str] = match purpose {
-      Purpose::Api => &[
-         "sec-gpc",
-         "sec-ch-ua-platform",
-         "authorization",
-         "x-csrf-token",
-         "sec-ch-ua",
-         "x-twitter-client-language",
-         "sec-ch-ua-mobile",
-         "x-twitter-active-user",
-         "x-client-transaction-id",
-         "x-twitter-auth-type",
-         "user-agent",
-         "dnt",
-         "x-twitter-polling",
-         "content-type",
-         "accept",
-         "origin",
-         "sec-fetch-site",
-         "sec-fetch-mode",
-         "sec-fetch-dest",
-         "referer",
-         "accept-encoding",
-         "accept-language",
-         "cookie",
-         "priority",
-      ],
-      Purpose::Media => &[
-         "sec-gpc",
-         "sec-ch-ua-platform",
-         "user-agent",
-         "sec-ch-ua",
-         "dnt",
-         "sec-ch-ua-mobile",
-         "accept",
-         "origin",
-         "sec-fetch-site",
-         "sec-fetch-mode",
-         "sec-fetch-dest",
-         "sec-fetch-storage-access",
-         "referer",
-         "accept-encoding",
-         "accept-language",
-         "range",
-         "if-range",
-         "cookie",
-         "priority",
-      ],
-      Purpose::Script => &[
-         "sec-gpc",
-         "origin",
-         "sec-ch-ua-platform",
-         "user-agent",
-         "sec-ch-ua",
-         "dnt",
-         "sec-ch-ua-mobile",
-         "accept",
-         "sec-fetch-site",
-         "sec-fetch-mode",
-         "sec-fetch-dest",
-         "referer",
-         "accept-encoding",
-         "accept-language",
-         "cookie",
-         "priority",
-      ],
+      Purpose::Api => {
+         &[
+            "sec-gpc",
+            "sec-ch-ua-platform",
+            "authorization",
+            "x-csrf-token",
+            "sec-ch-ua",
+            "x-twitter-client-language",
+            "sec-ch-ua-mobile",
+            "x-twitter-active-user",
+            "x-client-transaction-id",
+            "x-twitter-auth-type",
+            "user-agent",
+            "dnt",
+            "x-twitter-polling",
+            "content-type",
+            "accept",
+            "origin",
+            "sec-fetch-site",
+            "sec-fetch-mode",
+            "sec-fetch-dest",
+            "referer",
+            "accept-encoding",
+            "accept-language",
+            "cookie",
+            "priority",
+         ]
+      },
+      Purpose::Media => {
+         &[
+            "sec-gpc",
+            "sec-ch-ua-platform",
+            "user-agent",
+            "sec-ch-ua",
+            "dnt",
+            "sec-ch-ua-mobile",
+            "accept",
+            "origin",
+            "sec-fetch-site",
+            "sec-fetch-mode",
+            "sec-fetch-dest",
+            "sec-fetch-storage-access",
+            "referer",
+            "accept-encoding",
+            "accept-language",
+            "range",
+            "if-range",
+            "cookie",
+            "priority",
+         ]
+      },
+      Purpose::Script => {
+         &[
+            "sec-gpc",
+            "origin",
+            "sec-ch-ua-platform",
+            "user-agent",
+            "sec-ch-ua",
+            "dnt",
+            "sec-ch-ua-mobile",
+            "accept",
+            "sec-fetch-site",
+            "sec-fetch-mode",
+            "sec-fetch-dest",
+            "referer",
+            "accept-encoding",
+            "accept-language",
+            "cookie",
+            "priority",
+         ]
+      },
    };
    names
       .iter()
@@ -1615,17 +1666,16 @@ fn build_client(
       // from that list are appended after `priority`.
       .http2_headers_order(wire_header_order(purpose));
    if media {
-      builder = builder
-         .http1_only()
-         .connect_timeout(Duration::from_secs(3));
+      builder = builder.http1_only().connect_timeout(Duration::from_secs(3));
    }
-   builder =
-      match proxy {
-         Some(proxy) => builder.proxy(primp::Proxy::all(proxy.url()).map_err(|err| {
+   builder = match proxy {
+      Some(proxy) => {
+         builder.proxy(primp::Proxy::all(proxy.url()).map_err(|err| {
             Error::Internal(format!("proxy {}:{}: {err}", proxy.host, proxy.port))
-         })?),
-         None => builder.no_proxy(),
-      };
+         })?)
+      },
+      None => builder.no_proxy(),
+   };
    let mut client = builder
       .build()
       .map_err(|err| Error::Internal(format!("browser client for {identity}: {err}")))?;
@@ -1666,13 +1716,15 @@ fn shape_headers(headers: &mut HeaderMap, purpose: Purpose, extra: &HeaderMap) {
 
    let (accept, dest, mode, site, priority) = match purpose {
       Purpose::Api => ("*/*", "empty", "cors", "same-origin", Some("u=1, i")),
-      Purpose::Media => (
-         "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-         "image",
-         "no-cors",
-         "cross-site",
-         Some("u=1, i"),
-      ),
+      Purpose::Media => {
+         (
+            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "image",
+            "no-cors",
+            "cross-site",
+            Some("u=1, i"),
+         )
+      },
       // A chunk webpack loads on demand carries no priority.
       Purpose::Script => ("*/*", "script", "cors", "cross-site", None),
    };
@@ -1755,12 +1807,12 @@ fn proxy_tag(proxy: Option<&ProxyConfig>) -> u64 {
    let Some(proxy) = proxy else {
       return 0;
    };
-   let mut tag = 0xcbf2_9ce4_8422_2325_u64;
+   let mut tag = 0xCBF2_9CE4_8422_2325_u64;
    tag ^= u64::from(proxy.port);
-   tag = tag.wrapping_mul(0x100_0000_01b3);
+   tag = tag.wrapping_mul(0x100_0000_01B3);
    for byte in proxy.host.bytes() {
       tag ^= u64::from(byte);
-      tag = tag.wrapping_mul(0x100_0000_01b3);
+      tag = tag.wrapping_mul(0x100_0000_01B3);
    }
    tag | 1
 }
@@ -1773,10 +1825,10 @@ fn banned_proxies_file() -> Option<PathBuf> {
 
 /// One line of the ban file: `port time reason [detail...]`.
 struct BanLine<'a> {
-   port: u16,
+   port:    u16,
    /// Unix millis the line was written, when its time parses.
    written: Option<u64>,
-   reason: &'a str,
+   reason:  &'a str,
 }
 
 impl<'a> BanLine<'a> {
@@ -1824,7 +1876,10 @@ fn load_banned(path: &Path, proxies: &[ProxyConfig], now: u64) -> HashSet<u64> {
          continue;
       }
       let Some(proxy) = proxies.iter().find(|proxy| proxy.port == line.port) else {
-         tracing::warn!(port = line.port, "banned proxy file names a port that is not an exit");
+         tracing::warn!(
+            port = line.port,
+            "banned proxy file names a port that is not an exit"
+         );
          continue;
       };
       tags.insert(proxy_tag(Some(proxy)));
@@ -2079,7 +2134,7 @@ mod tests {
       ]);
       let pinned = Egress {
          session: 42,
-         proxy: Some(proxy_on(10001)),
+         proxy:   Some(proxy_on(10001)),
       };
       assert!(!client.primary_is_blocked(&pinned));
       assert_eq!(client.block_primary(&pinned), Some(EDGE_PARKING.first));
@@ -2112,13 +2167,23 @@ mod tests {
       ]);
       let pinned = Egress {
          session: 42,
-         proxy: Some(proxy_on(10001)),
+         proxy:   Some(proxy_on(10001)),
       };
-      assert!(!client.exit_still_served(&pinned), "nothing has been served yet");
+      assert!(
+         !client.exit_still_served(&pinned),
+         "nothing has been served yet"
+      );
 
-      client.primary_pool.as_ref().unwrap().note_served(&proxy_on(10001));
+      client
+         .primary_pool
+         .as_ref()
+         .unwrap()
+         .note_served(&proxy_on(10001));
       assert!(client.exit_still_served(&pinned));
-      assert!(!client.primary_is_blocked(&pinned), "judging an exit does not park it");
+      assert!(
+         !client.primary_is_blocked(&pinned),
+         "judging an exit does not park it"
+      );
 
       // Parked, the account goes out through its failover and is judged there.
       assert!(client.block_primary(&pinned).is_some());
@@ -2163,14 +2228,14 @@ mod tests {
 
       let pinned = Egress {
          session: 7,
-         proxy: Some(slow.clone()),
+         proxy:   Some(slow.clone()),
       };
       assert!(client.primary_is_blocked(&pinned));
       let moved = client.alternate_primary(&pinned).unwrap();
       assert_ne!(moved.proxy.unwrap().port, slow.port);
       let healthy = Egress {
          session: 7,
-         proxy: Some(proxies[0].clone()),
+         proxy:   Some(proxies[0].clone()),
       };
       assert!(!client.primary_is_blocked(&healthy));
    }
@@ -2223,10 +2288,15 @@ mod tests {
          // Throttled again a minute after coming back.
          now += at(park) + at(mins(1));
       }
-      assert_eq!(
-         parked,
-         [mins(5), mins(10), mins(20), mins(40), mins(80), mins(120), mins(120)]
-      );
+      assert_eq!(parked, [
+         mins(5),
+         mins(10),
+         mins(20),
+         mins(40),
+         mins(80),
+         mins(120),
+         mins(120)
+      ]);
       // Half an hour clean starts it over.
       now += at(parking.memory);
       assert_eq!(parking.next(history, now).1, mins(5));
@@ -2248,10 +2318,8 @@ mod tests {
 
    #[test]
    fn a_cloudflare_ban_stays_out_and_a_timeout_line_does_not() {
-      let path = std::env::temp_dir().join(format!(
-         "teapot-banned-proxies-{}.txt",
-         std::process::id()
-      ));
+      let path =
+         std::env::temp_dir().join(format!("teapot-banned-proxies-{}.txt", std::process::id()));
       let stamp = utc_stamp(unix_millis());
       std::fs::write(
          &path,
@@ -2264,10 +2332,16 @@ mod tests {
          proxies.iter().map(|proxy| proxy_tag(Some(proxy))).collect(),
       );
       pool.watch_banned_file(path.clone());
-      assert!(!pool.is_blocked(&proxies[0]), "a header-timeout line stays ignored");
+      assert!(
+         !pool.is_blocked(&proxies[0]),
+         "a header-timeout line stays ignored"
+      );
       assert!(pool.is_blocked(&proxies[1]));
       assert!(pool.ban(&proxies[2]));
-      assert!(!pool.ban(&proxies[2]), "banning the same exit twice is one line");
+      assert!(
+         !pool.ban(&proxies[2]),
+         "banning the same exit twice is one line"
+      );
       assert!(pool.is_blocked(&proxies[2]));
       let text = std::fs::read_to_string(&path).unwrap();
       assert!(text.contains("10003 "));
@@ -2278,10 +2352,7 @@ mod tests {
 
    #[test]
    fn a_lapsed_cloudflare_ban_comes_back_and_leaves_the_file() {
-      let path = env::temp_dir().join(format!(
-         "teapot-lapsed-proxies-{}.txt",
-         std::process::id()
-      ));
+      let path = env::temp_dir().join(format!("teapot-lapsed-proxies-{}.txt", std::process::id()));
       let now = unix_millis();
       let lasts = u64::try_from(CLOUDFLARE_BAN_FOR.as_millis()).unwrap();
       let old = utc_stamp(now - lasts - 60_000);
@@ -2300,10 +2371,19 @@ mod tests {
          proxies.iter().map(|proxy| proxy_tag(Some(proxy))).collect(),
       );
       pool.watch_banned_file(path.clone());
-      assert!(!pool.is_blocked(&proxies[0]), "the old Cloudflare ban has lapsed");
+      assert!(
+         !pool.is_blocked(&proxies[0]),
+         "the old Cloudflare ban has lapsed"
+      );
       assert!(pool.is_blocked(&proxies[1]));
-      assert!(pool.is_blocked(&proxies[2]), "a handshake ban waits to be deleted");
-      assert!(pool.is_blocked(&proxies[3]), "a newer block on the same exit holds");
+      assert!(
+         pool.is_blocked(&proxies[2]),
+         "a handshake ban waits to be deleted"
+      );
+      assert!(
+         pool.is_blocked(&proxies[3]),
+         "a newer block on the same exit holds"
+      );
 
       pool.reload_banned_file();
       let text = fs::read_to_string(&path).unwrap();
@@ -2315,7 +2395,10 @@ mod tests {
          )
       );
       assert!(!pool.is_blocked(&proxies[0]));
-      assert!(pool.ban(&proxies[0]), "Cloudflare blocking it again bans it again");
+      assert!(
+         pool.ban(&proxies[0]),
+         "Cloudflare blocking it again bans it again"
+      );
       assert!(pool.is_blocked(&proxies[0]));
       fs::remove_file(&path).unwrap();
    }
@@ -2343,10 +2426,12 @@ mod tests {
          pool.must_stay()
       );
       let slow = &proxies[0];
-      assert!(pool
-         .parked()
-         .iter()
-         .all(|(_, secs)| *secs <= EDGE_PARKING.first.max(SLOW_PARKING.first).as_secs()));
+      assert!(
+         pool
+            .parked()
+            .iter()
+            .all(|(_, secs)| *secs <= EDGE_PARKING.first.max(SLOW_PARKING.first).as_secs())
+      );
       assert_ne!(pool.alternate(7, slow).unwrap().port, slow.port);
    }
 
@@ -2378,9 +2463,9 @@ mod tests {
    #[test]
    fn socks_proxy_url_carries_credentials() {
       let proxy = ProxyConfig {
-         host: "proxy.example".into(),
-         port: 10001,
-         kind: ProxyKind::Socks5,
+         host:     "proxy.example".into(),
+         port:     10001,
+         kind:     ProxyKind::Socks5,
          username: Some("user".into()),
          password: Some("p@ss:word".into()),
       };
@@ -2456,31 +2541,28 @@ mod tests {
       let mut names: Vec<HeaderName> = headers.keys().cloned().collect();
       names.sort_by_key(|name| positions.get(name).copied().unwrap_or(order.len()));
       let joined: Vec<&str> = names.iter().map(HeaderName::as_str).collect();
-      assert_eq!(
-         joined,
-         vec![
-            "sec-ch-ua-platform",
-            "authorization",
-            "x-csrf-token",
-            "sec-ch-ua",
-            "x-twitter-client-language",
-            "sec-ch-ua-mobile",
-            "x-twitter-active-user",
-            "x-client-transaction-id",
-            "x-twitter-auth-type",
-            "user-agent",
-            "content-type",
-            "accept",
-            "sec-fetch-site",
-            "sec-fetch-mode",
-            "sec-fetch-dest",
-            "referer",
-            "accept-encoding",
-            "accept-language",
-            "cookie",
-            "priority",
-         ]
-      );
+      assert_eq!(joined, vec![
+         "sec-ch-ua-platform",
+         "authorization",
+         "x-csrf-token",
+         "sec-ch-ua",
+         "x-twitter-client-language",
+         "sec-ch-ua-mobile",
+         "x-twitter-active-user",
+         "x-client-transaction-id",
+         "x-twitter-auth-type",
+         "user-agent",
+         "content-type",
+         "accept",
+         "sec-fetch-site",
+         "sec-fetch-mode",
+         "sec-fetch-dest",
+         "referer",
+         "accept-encoding",
+         "accept-language",
+         "cookie",
+         "priority",
+      ]);
    }
 
    #[test]
@@ -2529,7 +2611,10 @@ mod tests {
    /// answering with its own index.
    async fn delayed_server(delays: Vec<Duration>) -> String {
       use tokio::{
-         io::{AsyncReadExt as _, AsyncWriteExt as _},
+         io::{
+            AsyncReadExt as _,
+            AsyncWriteExt as _,
+         },
          net::TcpListener,
          time::sleep,
       };
@@ -2572,7 +2657,11 @@ mod tests {
       let started = Instant::now();
       let body = client.get(&uri).await.unwrap().text().await.unwrap();
       assert_eq!(body, "1");
-      assert!(started.elapsed() < API_HEADER_DEADLINE * 2, "{:?}", started.elapsed());
+      assert!(
+         started.elapsed() < API_HEADER_DEADLINE * 2,
+         "{:?}",
+         started.elapsed()
+      );
    }
 
    #[tokio::test]
@@ -2586,12 +2675,22 @@ mod tests {
       let started = Instant::now();
       let body = client.get(&uri).await.unwrap().text().await.unwrap();
       assert_eq!(body, "0", "the slow first call answered and was dropped");
-      assert!(started.elapsed() < API_HEADER_DEADLINE * 2, "{:?}", started.elapsed());
+      assert!(
+         started.elapsed() < API_HEADER_DEADLINE * 2,
+         "{:?}",
+         started.elapsed()
+      );
    }
 
    #[tokio::test]
    async fn account_transport_sends_csrf_cookie_and_matching_header() {
-      use tokio::{io::{AsyncReadExt as _, AsyncWriteExt as _}, net::TcpListener};
+      use tokio::{
+         io::{
+            AsyncReadExt as _,
+            AsyncWriteExt as _,
+         },
+         net::TcpListener,
+      };
 
       let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
       let uri = format!("http://{}/", listener.local_addr().unwrap());
@@ -2604,19 +2703,37 @@ mod tests {
             assert_ne!(len, 0);
             request.extend_from_slice(&buf[..len]);
          }
-         socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+         socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
          String::from_utf8(request).unwrap()
       });
       let jar = super::super::cookies::Jar::memory();
       let client = HttpClient::new("", "", Purpose::Api).with_cookies(jar);
       let mut headers = HeaderMap::new();
-      headers.insert(header::COOKIE, HeaderValue::from_static("auth_token=fake-auth; ct0=fake-csrf"));
+      headers.insert(
+         header::COOKIE,
+         HeaderValue::from_static("auth_token=fake-auth; ct0=fake-csrf"),
+      );
       headers.insert("x-csrf-token", HeaderValue::from_static("fake-csrf"));
-      let egress = Egress { session: 5089, proxy: None };
-      tokio::time::timeout(Duration::from_secs(5), client.get_on(&uri, &headers, Some(&egress)))
-         .await.unwrap().unwrap();
+      let egress = Egress {
+         session: 5089,
+         proxy:   None,
+      };
+      tokio::time::timeout(
+         Duration::from_secs(5),
+         client.get_on(&uri, &headers, Some(&egress)),
+      )
+      .await
+      .unwrap()
+      .unwrap();
       let request = server.await.unwrap().to_ascii_lowercase();
-      assert!(request.lines().any(|l| l == "cookie: auth_token=fake-auth; ct0=fake-csrf"));
+      assert!(
+         request
+            .lines()
+            .any(|l| l == "cookie: auth_token=fake-auth; ct0=fake-csrf")
+      );
       assert!(request.lines().any(|l| l == "x-csrf-token: fake-csrf"));
    }
 

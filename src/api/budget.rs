@@ -10,7 +10,10 @@ use std::{
    future::Future,
    net::IpAddr,
    sync::Arc,
-   time::{Duration, Instant},
+   time::{
+      Duration,
+      Instant,
+   },
 };
 
 use axum::http::HeaderMap;
@@ -19,7 +22,7 @@ use tokio::sync::Mutex;
 #[derive(Clone, Copy)]
 pub struct Tier {
    pub refill_per_sec: f64,
-   pub capacity: f64,
+   pub capacity:       f64,
 }
 
 /// Widening horizons. The tightest tier decides.
@@ -29,15 +32,15 @@ pub type Tiers = [Tier; 3];
 pub const READER_TIERS: Tiers = [
    Tier {
       refill_per_sec: 5.0,
-      capacity: 100.0,
+      capacity:       100.0,
    },
    Tier {
       refill_per_sec: 1.0,
-      capacity: 300.0,
+      capacity:       300.0,
    },
    Tier {
       refill_per_sec: 0.25,
-      capacity: 1000.0,
+      capacity:       1000.0,
    },
 ];
 
@@ -48,15 +51,15 @@ pub const READER_TIERS: Tiers = [
 pub const LIST_PAGE_TIERS: Tiers = [
    Tier {
       refill_per_sec: 0.5,
-      capacity: 20.0,
+      capacity:       20.0,
    },
    Tier {
       refill_per_sec: 0.1,
-      capacity: 60.0,
+      capacity:       60.0,
    },
    Tier {
       refill_per_sec: 0.02,
-      capacity: 150.0,
+      capacity:       150.0,
    },
 ];
 
@@ -72,14 +75,14 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 struct Buckets {
    tokens: [f64; 3],
-   seen: Instant,
+   seen:   Instant,
 }
 
 impl Buckets {
    fn new(tiers: &Tiers) -> Self {
       Self {
          tokens: tiers.map(|tier| tier.capacity),
-         seen: Instant::now(),
+         seen:   Instant::now(),
       }
    }
 
@@ -119,11 +122,11 @@ impl Buckets {
 pub struct ClientBudget {
    clients: Arc<Mutex<Clients>>,
    enabled: bool,
-   tiers: &'static Tiers,
+   tiers:   &'static Tiers,
 }
 
 struct Clients {
-   buckets: HashMap<ClientKey, Buckets>,
+   buckets:    HashMap<ClientKey, Buckets>,
    last_sweep: Instant,
 }
 
@@ -237,7 +240,7 @@ impl ClientBudget {
    pub fn with_tiers(enabled: bool, tiers: &'static Tiers) -> Self {
       Self {
          clients: Arc::new(Mutex::new(Clients {
-            buckets: HashMap::new(),
+            buckets:    HashMap::new(),
             last_sweep: Instant::now(),
          })),
          enabled,

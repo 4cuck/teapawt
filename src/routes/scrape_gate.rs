@@ -11,25 +11,51 @@
 use std::{
    collections::HashMap,
    net::SocketAddr,
-   sync::{LazyLock, Mutex, PoisonError},
+   sync::{
+      LazyLock,
+      Mutex,
+      PoisonError,
+   },
 };
 
 use axum::{
-   Form, Router,
-   extract::{ConnectInfo, Request, State},
-   http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+   Form,
+   Router,
+   extract::{
+      ConnectInfo,
+      Request,
+      State,
+   },
+   http::{
+      HeaderMap,
+      HeaderValue,
+      Method,
+      StatusCode,
+      header,
+   },
    middleware::Next,
-   response::{Html, IntoResponse as _, Redirect, Response},
+   response::{
+      Html,
+      IntoResponse as _,
+      Redirect,
+      Response,
+   },
    routing::post,
 };
 use axum_extra::extract::{
    CookieJar,
-   cookie::{Cookie, SameSite},
+   cookie::{
+      Cookie,
+      SameSite,
+   },
 };
 use data_encoding::HEXLOWER;
 use ring::hmac;
 use serde::Deserialize;
-use time::{Duration, OffsetDateTime};
+use time::{
+   Duration,
+   OffsetDateTime,
+};
 
 use crate::{
    AppState,
@@ -39,7 +65,11 @@ use crate::{
    types::Prefs,
    views::{
       layout::PageLayout,
-      scrape::{self as view, GatePage, Why},
+      scrape::{
+         self as view,
+         GatePage,
+         Why,
+      },
    },
 };
 
@@ -89,7 +119,11 @@ impl Window {
    fn roll(&mut self, now: i64) {
       let minute = now.div_euclid(60);
       if minute != self.minute {
-         self.previous = if minute == self.minute + 1 { self.current } else { 0 };
+         self.previous = if minute == self.minute + 1 {
+            self.current
+         } else {
+            0
+         };
          self.current = 0;
          self.minute = minute;
       }
@@ -155,7 +189,9 @@ impl<'a> Visitor<'a> {
       let text = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
       Self {
          asn:          text("asn-num").and_then(|asn| asn.trim().parse().ok()),
-         country:      text("cf-ipcountry").map(str::trim).filter(|cc| cc.len() == 2),
+         country:      text("cf-ipcountry")
+            .map(str::trim)
+            .filter(|cc| cc.len() == 2),
          verified_bot: text("client-bot").is_some_and(|bot| bot.trim() == "true"),
       }
    }
@@ -170,10 +206,7 @@ enum Reason {
 
 /// Why this visitor should solve the check, counting the request.
 fn reason(config: &ScrapeConfig, visitor: &Visitor<'_>, now: i64) -> Option<Reason> {
-   if let Some(asn) = visitor
-      .asn
-      .filter(|asn| config.blocked_asns.contains(asn))
-   {
+   if let Some(asn) = visitor.asn.filter(|asn| config.blocked_asns.contains(asn)) {
       with_window(&asn_key(asn), |window| window.hit(now));
       return Some(Reason::Network(asn));
    }
@@ -191,7 +224,11 @@ fn reason(config: &ScrapeConfig, visitor: &Visitor<'_>, now: i64) -> Option<Reas
 
 /// The reason to show again after a failed check, without counting.
 fn reason_shown(config: &ScrapeConfig, visitor: &Visitor<'_>) -> Reason {
-   let fallback = if config.everyone { Reason::Everyone } else { Reason::Surge };
+   let fallback = if config.everyone {
+      Reason::Everyone
+   } else {
+      Reason::Surge
+   };
    visitor
       .asn
       .filter(|asn| config.blocked_asns.contains(asn))
@@ -203,11 +240,14 @@ fn reason_shown(config: &ScrapeConfig, visitor: &Visitor<'_>) -> Reason {
 fn is_open(path: &str) -> bool {
    matches!(
       path,
-      "/" | "/pool-counts" | super::import::PUBLIC_PATH | super::import::REFRESH_PATH | super::import::ADMIN_PATH
-   )
-      || OPEN_PAGES
-         .iter()
-         .any(|page| path == *page || path.strip_prefix(page).is_some_and(|rest| rest.starts_with('/')))
+      "/" | "/pool-counts" | super::import::PUBLIC_PATH | super::import::REFRESH_PATH
+   ) || super::middleware::is_admin_path(path)
+      || OPEN_PAGES.iter().any(|page| {
+         path == *page
+            || path
+               .strip_prefix(page)
+               .is_some_and(|rest| rest.starts_with('/'))
+      })
       || OPEN_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
 }
 
@@ -268,7 +308,9 @@ async fn check(
       let reason = reason_shown(&state.config.scrape, &Visitor::from_headers(&headers));
       return challenge(&state, &jar, reason, resume, true);
    }
-   if let Err(codes) = super::search_gate::verify(&state.config.turnstile.secret_key, &check.token).await {
+   if let Err(codes) =
+      super::search_gate::verify(&state.config.turnstile.secret_key, &check.token).await
+   {
       tracing::info!(errors = %codes.join(","), "scrape check failed");
       let reason = reason_shown(&state.config.scrape, &Visitor::from_headers(&headers));
       return challenge(&state, &jar, reason, resume, true);
@@ -311,14 +353,22 @@ fn cleared(state: &AppState, jar: &CookieJar) -> bool {
       })
 }
 
-fn challenge(state: &AppState, jar: &CookieJar, reason: Reason, resume: &str, failed: bool) -> Response {
+fn challenge(
+   state: &AppState,
+   jar: &CookieJar,
+   reason: Reason,
+   resume: &str,
+   failed: bool,
+) -> Response {
    let prefs = Prefs::from_cookies(jar, &state.config);
    let price = donations::format_usd(state.passes.price_cents());
    let goal = donations::format_usd(state.config.donations.goal_cents);
    let why = match reason {
-      Reason::Network(asn) => Why::Network {
-         asn,
-         per_minute: network_rate(asn),
+      Reason::Network(asn) => {
+         Why::Network {
+            asn,
+            per_minute: network_rate(asn),
+         }
       },
       Reason::Surge => Why::Surge,
       Reason::Everyone => Why::Everyone,
@@ -340,6 +390,11 @@ fn challenge(state: &AppState, jar: &CookieJar, reason: Reason, resume: &str, fa
    // 429 is the status nginx and Cloudflare keep out of the page cache.
    // A cached copy would show this page to every reader of the URL.
    let mut response = (StatusCode::TOO_MANY_REQUESTS, Html(markup.into_string())).into_response();
+   // The gate doing its job, not a rate limit we hit. Tagged so the traffic
+   // panels do not report a healthy site as 90% failed.
+   response
+      .extensions_mut()
+      .insert(crate::stats::Outcome::Challenged);
    response
       .headers_mut()
       .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
@@ -348,8 +403,14 @@ fn challenge(state: &AppState, jar: &CookieJar, reason: Reason, resume: &str, fa
 
 fn private(mut response: Response) -> Response {
    let headers = response.headers_mut();
-   headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
-   headers.insert("cloudflare-cdn-cache-control", HeaderValue::from_static("no-store"));
+   headers.insert(
+      header::CACHE_CONTROL,
+      HeaderValue::from_static("private, no-store"),
+   );
+   headers.insert(
+      "cloudflare-cdn-cache-control",
+      HeaderValue::from_static("no-store"),
+   );
    headers.insert("cdn-cache-control", HeaderValue::from_static("no-store"));
    response
 }
@@ -373,7 +434,10 @@ fn pass_cookie(key: &str, client: &str, minutes: i64, secure: bool) -> Cookie<'s
 }
 
 fn pass_valid(key: &str, jar: &CookieJar, client: &str, minutes: i64) -> bool {
-   let Some((expiry, mac)) = jar.get(COOKIE).and_then(|cookie| cookie.value().split_once('.')) else {
+   let Some((expiry, mac)) = jar
+      .get(COOKIE)
+      .and_then(|cookie| cookie.value().split_once('.'))
+   else {
       return false;
    };
    let Ok(expiry) = expiry.parse::<i64>() else {
@@ -427,9 +491,15 @@ mod tests {
    fn a_blocked_network_is_always_checked() {
       let config = config();
       let tencent = visitor(Some(132_203), Some("SG"));
-      assert_eq!(reason(&config, &tencent, 1_000), Some(Reason::Network(132_203)));
+      assert_eq!(
+         reason(&config, &tencent, 1_000),
+         Some(Reason::Network(132_203))
+      );
       let elsewhere = visitor(Some(132_203), Some("US"));
-      assert_eq!(reason(&config, &elsewhere, 1_000), Some(Reason::Network(132_203)));
+      assert_eq!(
+         reason(&config, &elsewhere, 1_000),
+         Some(Reason::Network(132_203))
+      );
    }
 
    #[test]
@@ -445,7 +515,10 @@ mod tests {
       assert_eq!(reason(&config, &reader, start + 5), Some(Reason::Surge));
       // Quiet, but held.
       assert_eq!(reason(&config, &reader, start + 300), Some(Reason::Surge));
-      assert_eq!(reason(&config, &reader, start + 5 + SURGE_HOLD_SECS + 1), None);
+      assert_eq!(
+         reason(&config, &reader, start + 5 + SURGE_HOLD_SECS + 1),
+         None
+      );
       assert_eq!(reason(&config, &visitor(None, Some("US")), start), None);
    }
 
@@ -473,7 +546,11 @@ mod tests {
          "/about",
          "/import",
          "/import/summary",
+         "/admin/import",
          "/import/admin",
+         "/admin/stats",
+         "/admin/stats/data",
+         "/admin/stats/extra",
          "/.scrape-check",
          "/css/clean.css",
          "/pic/abc",
@@ -482,7 +559,15 @@ mod tests {
       ] {
          assert!(is_open(open), "{open}");
       }
-      for gated in ["/jack", "/contactlenses", "/donatello/rss", "/jack/status/20", "/search", "/import/status/20"] {
+      for gated in [
+         "/jack",
+         "/contactlenses",
+         "/donatello/rss",
+         "/jack/status/20",
+         "/search",
+         "/import/status/20",
+         "/administer",
+      ] {
          assert!(!is_open(gated), "{gated}");
       }
    }
@@ -493,13 +578,22 @@ mod tests {
          everyone: true,
          ..config()
       };
-      assert_eq!(reason(&config, &visitor(Some(7922), Some("US")), 1_000), Some(Reason::Everyone));
-      assert_eq!(reason(&config, &visitor(None, None), 1_000), Some(Reason::Everyone));
+      assert_eq!(
+         reason(&config, &visitor(Some(7922), Some("US")), 1_000),
+         Some(Reason::Everyone)
+      );
+      assert_eq!(
+         reason(&config, &visitor(None, None), 1_000),
+         Some(Reason::Everyone)
+      );
       assert_eq!(
          reason(&config, &visitor(Some(132_203), Some("SG")), 1_000),
          Some(Reason::Network(132_203))
       );
-      assert_eq!(reason_shown(&config, &visitor(None, None)), Reason::Everyone);
+      assert_eq!(
+         reason_shown(&config, &visitor(None, None)),
+         Reason::Everyone
+      );
    }
 
    #[test]
@@ -508,7 +602,12 @@ mod tests {
       let jar = CookieJar::new().add(cookie);
       assert!(pass_valid(KEY, &jar, "203.0.113.9", 60));
       assert!(!pass_valid(KEY, &jar, "203.0.113.10", 60));
-      assert!(!pass_valid("another-key-another-key-another!!", &jar, "203.0.113.9", 60));
+      assert!(!pass_valid(
+         "another-key-another-key-another!!",
+         &jar,
+         "203.0.113.9",
+         60
+      ));
    }
 
    #[test]

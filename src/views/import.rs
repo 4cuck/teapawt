@@ -7,10 +7,10 @@ use crate::accounts::{ImportSummary, Stats};
 
 use super::layout::{CLEAN_CSS, STYLE_CSS, theme_stylesheet};
 
-const IMPORT_CSS: &str = "/css/import.css?v=3";
+const IMPORT_CSS: &str = "/css/import.css?v=4";
 
 pub(crate) const PUBLIC_PATH: &str = "/import";
-pub(crate) const ADMIN_PATH: &str = "/import/admin";
+pub(crate) const ADMIN_PATH: &str = "/admin/import";
 pub(crate) const REFRESH_PATH: &str = "/import/summary";
 
 pub(crate) struct Batch {
@@ -189,8 +189,9 @@ pub(crate) fn admin(
                button type="submit" class="import-submit" { "Import" }
             }
          }
-         p {
-            a href=(PUBLIC_PATH) { "Public inventory →" }
+         nav class="import-nav-row" aria-label="Import navigation" {
+            a href=(PUBLIC_PATH) { "← Public inventory" }
+            a href="/admin/stats" { "Admin stats →" }
          }
       },
    )

@@ -1,19 +1,31 @@
 use std::cmp;
 
 use crate::{
-   api::schema::{MediaItem, MediaType, RawVideoContentType, TweetLegacy},
-   types::{Gif, Photo, User, Video, VideoType, VideoVariant},
+   api::schema::{
+      MediaItem,
+      MediaType,
+      RawVideoContentType,
+      TweetLegacy,
+   },
+   types::{
+      Gif,
+      Photo,
+      User,
+      Video,
+      VideoType,
+      VideoVariant,
+   },
 };
 
 /// Parsed media result (no side effects on tweet text).
 pub struct ParsedMedia {
-   pub photos: Vec<Photo>,
-   pub video: Option<Video>,
+   pub photos:            Vec<Photo>,
+   pub video:             Option<Video>,
    pub additional_videos: Vec<Video>,
-   pub gifs: Vec<Gif>,
-   pub attribution: Option<User>,
+   pub gifs:              Vec<Gif>,
+   pub attribution:       Option<User>,
    /// t.co and expanded URLs that should be stripped from tweet text.
-   pub strip_urls: Vec<String>,
+   pub strip_urls:        Vec<String>,
 }
 
 /// Parse media from tweet legacy data.
@@ -35,10 +47,10 @@ pub fn parse_media(legacy: &TweetLegacy) -> ParsedMedia {
          MediaType::Photo => {
             if let Some(url) = media.media_url_https.as_deref() {
                photos.push(Photo {
-                  url: url.to_owned(),
+                  url:      url.to_owned(),
                   alt_text: media.ext_alt_text.clone().unwrap_or_default(),
-                  width: media.original_info.as_ref().map_or(0, |info| info.width),
-                  height: media.original_info.as_ref().map_or(0, |info| info.height),
+                  width:    media.original_info.as_ref().map_or(0, |info| info.width),
+                  height:   media.original_info.as_ref().map_or(0, |info| info.height),
                });
             }
          },

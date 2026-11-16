@@ -12,10 +12,16 @@
 
 use std::{
    cmp::Reverse,
-   collections::{BTreeMap, HashMap},
+   collections::{
+      BTreeMap,
+      HashMap,
+   },
    fmt::Write as _,
    sync::Mutex,
-   time::{Duration, Instant},
+   time::{
+      Duration,
+      Instant,
+   },
 };
 
 /// Recent answers kept per operation. Enough for a steady 90th percentile,
@@ -59,15 +65,15 @@ const SLOW_EXIT_SHARE: usize = 3;
 #[derive(Default)]
 struct Operation {
    /// Milliseconds per answered call, oldest overwritten first.
-   ring: Vec<u32>,
-   next: usize,
-   delay: Option<Duration>,
-   median: Option<u32>,
+   ring:            Vec<u32>,
+   next:            usize,
+   delay:           Option<Duration>,
+   median:          Option<u32>,
    since_recompute: u32,
    /// Since the last report.
-   answered: u64,
-   hedged: u64,
-   rescued: u64,
+   answered:        u64,
+   hedged:          u64,
+   rescued:         u64,
 }
 
 impl Operation {
@@ -88,8 +94,7 @@ impl Operation {
          let slow =
             percentile(&self.ring, HEDGE_PERCENTILE).max(median.saturating_mul(HEDGE_MEDIANS));
          self.median = Some(median);
-         self.delay =
-            Some(Duration::from_millis(u64::from(slow)).clamp(HEDGE_FLOOR, HEDGE_CAP));
+         self.delay = Some(Duration::from_millis(u64::from(slow)).clamp(HEDGE_FLOOR, HEDGE_CAP));
       }
    }
 }
@@ -148,7 +153,7 @@ fn operation_name(endpoint: &str) -> &str {
 #[derive(Default)]
 pub struct Latency {
    operations: Mutex<HashMap<String, Operation>>,
-   exits: Mutex<BTreeMap<u16, Exit>>,
+   exits:      Mutex<BTreeMap<u16, Exit>>,
 }
 
 impl Latency {
@@ -185,7 +190,10 @@ impl Latency {
          .collect::<Vec<_>>();
       let mut slow = Vec::new();
       if judged.len() >= MIN_JUDGED_EXITS {
-         let mut medians = judged.iter().map(|&(_, median, _)| median).collect::<Vec<_>>();
+         let mut medians = judged
+            .iter()
+            .map(|&(_, median, _)| median)
+            .collect::<Vec<_>>();
          let middle = medians.len() / 2;
          let fleet = *medians.select_nth_unstable(middle).1;
          slow = judged
@@ -259,8 +267,8 @@ impl Latency {
             let mut line = String::new();
             let _ = write!(
                line,
-               "{name}: {} answered, p50 {} ms, p90 {} ms, p99 {} ms, hedge at {} ms, {} hedged, {} \
-                rescued",
+               "{name}: {} answered, p50 {} ms, p90 {} ms, p99 {} ms, hedge at {} ms, {} hedged, \
+                {} rescued",
                operation.answered,
                percentile(&operation.ring, 50),
                percentile(&operation.ring, 90),
@@ -307,7 +315,10 @@ mod tests {
          let millis = if index % 4 == 0 { 1000 } else { 200 };
          latency.record("x/SearchTimeline", Duration::from_millis(millis), None);
       }
-      assert_eq!(latency.hedge_delay("x/SearchTimeline"), Duration::from_millis(1000));
+      assert_eq!(
+         latency.hedge_delay("x/SearchTimeline"),
+         Duration::from_millis(1000)
+      );
    }
 
    #[test]
@@ -331,7 +342,11 @@ mod tests {
       latency.rescued("x/TweetDetail");
       let first = latency.report();
       assert_eq!(first.len(), 1);
-      assert!(first[0].starts_with("TweetDetail: 40 answered"), "{}", first[0]);
+      assert!(
+         first[0].starts_with("TweetDetail: 40 answered"),
+         "{}",
+         first[0]
+      );
       assert!(first[0].ends_with("1 hedged, 1 rescued"), "{}", first[0]);
       assert!(latency.report().is_empty());
    }
@@ -346,7 +361,11 @@ mod tests {
                .iter()
                .find(|&&(slow, _)| slow == port)
                .map_or(0, |&(_, millis)| millis);
-            latency.record("x/UserTweets", Duration::from_millis(base + added), Some(port));
+            latency.record(
+               "x/UserTweets",
+               Duration::from_millis(base + added),
+               Some(port),
+            );
          }
       }
    }
@@ -370,7 +389,9 @@ mod tests {
       answer_through_exits(&latency, 80, &[(1082, 15), (1085, 25)]);
       assert!(latency.slow_exits().is_empty());
 
-      let everyone = (1081..=1090_u16).map(|port| (port, 300)).collect::<Vec<_>>();
+      let everyone = (1081..=1090_u16)
+         .map(|port| (port, 300))
+         .collect::<Vec<_>>();
       answer_through_exits(&latency, EXIT_WINDOW as u64, &everyone);
       assert!(latency.slow_exits().is_empty());
    }
@@ -378,7 +399,9 @@ mod tests {
    #[test]
    fn at_most_a_third_of_the_exits_go_last() {
       let latency = Latency::default();
-      let half = (1081..=1085_u16).map(|port| (port, 200)).collect::<Vec<_>>();
+      let half = (1081..=1085_u16)
+         .map(|port| (port, 200))
+         .collect::<Vec<_>>();
       answer_through_exits(&latency, 80, &half);
       assert!(latency.slow_exits().len() <= 10 / SLOW_EXIT_SHARE);
    }

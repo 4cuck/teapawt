@@ -2,21 +2,24 @@ use serde::Deserialize;
 
 use super::timeline::parse_timeline_instructions;
 use crate::{
-   api::schema::{NestedResult, TimelineInstructions},
+   api::schema::{
+      NestedResult,
+      TimelineInstructions,
+   },
    error::Result,
    types::Timeline,
 };
 
 #[derive(Debug, Clone, Default)]
 pub struct CommunityInfo {
-   pub id: String,
-   pub name: String,
+   pub id:          String,
+   pub name:        String,
    pub description: String,
-   pub members: i64,
-   pub banner: String,
-   pub category: String,
+   pub members:     i64,
+   pub banner:      String,
+   pub category:    String,
    pub join_policy: String,
-   pub rules: Vec<(String, String)>,
+   pub rules:       Vec<(String, String)>,
 }
 
 #[derive(Deserialize, Default)]
@@ -36,25 +39,25 @@ struct CommunityDataField {
 #[serde(default)]
 struct CommunityNode {
    #[serde(rename = "rest_id")]
-   rest_id: Option<String>,
-   id_str: Option<String>,
-   name: Option<String>,
-   description: Option<String>,
+   rest_id:      Option<String>,
+   id_str:       Option<String>,
+   name:         Option<String>,
+   description:  Option<String>,
    #[serde(rename = "member_count")]
    member_count: Option<i64>,
    #[serde(rename = "join_policy")]
-   join_policy: Option<String>,
+   join_policy:  Option<String>,
    #[serde(rename = "primary_community_topic")]
-   topic: Option<CommunityTopic>,
+   topic:        Option<CommunityTopic>,
    #[serde(rename = "custom_banner_media")]
-   banner: Option<CommunityBanner>,
-   rules: Option<Vec<CommunityRuleNode>>,
+   banner:       Option<CommunityBanner>,
+   rules:        Option<Vec<CommunityRuleNode>>,
    #[serde(rename = "ranked_community_timeline")]
-   ranked: Option<CommunityTimelineBox>,
+   ranked:       Option<CommunityTimelineBox>,
    #[serde(rename = "community_media_timeline")]
-   media: Option<CommunityTimelineBox>,
+   media:        Option<CommunityTimelineBox>,
    #[serde(rename = "community_filtered_timeline")]
-   filtered: Option<CommunityTimelineBox>,
+   filtered:     Option<CommunityTimelineBox>,
 }
 
 #[derive(Deserialize, Default)]
@@ -79,7 +82,7 @@ struct CommunityBannerInfo {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct CommunityRuleNode {
-   name: Option<String>,
+   name:        Option<String>,
    description: Option<String>,
 }
 
@@ -99,27 +102,27 @@ pub fn parse_community(data: &CommunityQueryData) -> CommunityInfo {
       return CommunityInfo::default();
    };
    CommunityInfo {
-      id: node
+      id:          node
          .rest_id
          .clone()
          .or_else(|| node.id_str.clone())
          .unwrap_or_default(),
-      name: node.name.clone().unwrap_or_default(),
+      name:        node.name.clone().unwrap_or_default(),
       description: node.description.clone().unwrap_or_default(),
-      members: node.member_count.unwrap_or(0),
-      banner: node
+      members:     node.member_count.unwrap_or(0),
+      banner:      node
          .banner
          .as_ref()
          .and_then(|banner| banner.media_info.as_ref())
          .and_then(|info| info.original_img_url.clone())
          .unwrap_or_default(),
-      category: node
+      category:    node
          .topic
          .as_ref()
          .and_then(|topic| topic.topic_name.clone())
          .unwrap_or_default(),
       join_policy: node.join_policy.clone().unwrap_or_default(),
-      rules: node
+      rules:       node
          .rules
          .iter()
          .flatten()

@@ -1,23 +1,52 @@
 use std::slice;
 
 use axum::{
-   Form, Router,
-   extract::{Path, Query as AxumQuery, RawQuery, State},
+   Form,
+   Router,
+   extract::{
+      Path,
+      Query as AxumQuery,
+      RawQuery,
+      State,
+   },
    http::header::CONTENT_TYPE,
-   response::{Html, IntoResponse as _, Redirect, Response},
+   response::{
+      Html,
+      IntoResponse as _,
+      Redirect,
+      Response,
+   },
    routing::get,
 };
 use axum_extra::extract::CookieJar;
 use serde::Deserialize;
 
-use super::helpers;
+use super::{
+   admin_stats,
+   helpers,
+};
 use crate::{
    AppState,
-   cache::{Hit, keys as cache_keys, ttl},
+   cache::{
+      Hit,
+      keys as cache_keys,
+      ttl,
+   },
    config::Config,
    error::Result,
-   types::{PaginatedResult, Prefs, Query, QueryKind, Timeline, Tweet, User},
-   views::{layout, search as search_view},
+   types::{
+      PaginatedResult,
+      Prefs,
+      Query,
+      QueryKind,
+      Timeline,
+      Tweet,
+      User,
+   },
+   views::{
+      layout,
+      search as search_view,
+   },
 };
 
 fn search_host(config: &Config) -> String {
@@ -78,60 +107,60 @@ fn dedup_search_tweets(tweets: Vec<Tweet>) -> Vec<Tweet> {
 #[derive(Debug, Default, Deserialize)]
 pub struct SearchQuery {
    #[serde(rename = "q")]
-   pub query: Option<String>,
+   pub query:            Option<String>,
    #[serde(rename = "f")]
-   pub filter: Option<String>,
-   pub cursor: Option<String>,
-   pub view: Option<String>,
+   pub filter:           Option<String>,
+   pub cursor:           Option<String>,
+   pub view:             Option<String>,
    // Filter parameters
-   pub from: Option<String>,
-   pub since: Option<String>,
-   pub until: Option<String>,
-   pub min_faves: Option<String>,
+   pub from:             Option<String>,
+   pub since:            Option<String>,
+   pub until:            Option<String>,
+   pub min_faves:        Option<String>,
    // Filter toggles (f-media=on, e-replies=on, etc.)
    #[serde(rename = "f-media")]
-   pub f_media: Option<String>,
+   pub f_media:          Option<String>,
    #[serde(rename = "f-images")]
-   pub f_images: Option<String>,
+   pub f_images:         Option<String>,
    #[serde(rename = "f-videos")]
-   pub f_videos: Option<String>,
+   pub f_videos:         Option<String>,
    #[serde(rename = "f-links")]
-   pub f_links: Option<String>,
+   pub f_links:          Option<String>,
    #[serde(rename = "f-news")]
-   pub f_news: Option<String>,
+   pub f_news:           Option<String>,
    #[serde(rename = "f-quote")]
-   pub f_quote: Option<String>,
+   pub f_quote:          Option<String>,
    #[serde(rename = "f-verified")]
-   pub f_verified: Option<String>,
+   pub f_verified:       Option<String>,
    #[serde(rename = "e-replies")]
-   pub e_replies: Option<String>,
+   pub e_replies:        Option<String>,
    /// Hide retweets. The form posts `e-nativeretweets`; `e-retweets` is the
    /// older name and still accepted.
    #[serde(rename = "e-nativeretweets", alias = "e-retweets")]
    pub e_nativeretweets: Option<String>,
    /// AJAX infinite-scroll request — return a timeline fragment, not a page.
-   pub scroll: Option<String>,
+   pub scroll:           Option<String>,
    /// Checkbox token. Stripped before the search runs.
    #[serde(rename = "cf-turnstile-response")]
-   pub turnstile: Option<String>,
+   pub turnstile:        Option<String>,
 }
 
 impl SearchQuery {
    /// Convert URL parameters to `SearchFilters` for form rendering.
    pub fn to_filters(&self) -> search_view::SearchFilters {
       search_view::SearchFilters {
-         media: self.f_media.as_deref() == Some("on"),
-         images: self.f_images.as_deref() == Some("on"),
-         videos: self.f_videos.as_deref() == Some("on"),
-         links: self.f_links.as_deref() == Some("on"),
-         news: self.f_news.as_deref() == Some("on"),
-         quote: self.f_quote.as_deref() == Some("on"),
-         verified: self.f_verified.as_deref() == Some("on"),
-         exclude_replies: self.e_replies.as_deref() == Some("on"),
+         media:            self.f_media.as_deref() == Some("on"),
+         images:           self.f_images.as_deref() == Some("on"),
+         videos:           self.f_videos.as_deref() == Some("on"),
+         links:            self.f_links.as_deref() == Some("on"),
+         news:             self.f_news.as_deref() == Some("on"),
+         quote:            self.f_quote.as_deref() == Some("on"),
+         verified:         self.f_verified.as_deref() == Some("on"),
+         exclude_replies:  self.e_replies.as_deref() == Some("on"),
          exclude_retweets: self.e_nativeretweets.as_deref() == Some("on"),
-         since: self.since.clone().unwrap_or_default(),
-         until: self.until.clone().unwrap_or_default(),
-         min_faves: self.min_faves.clone().unwrap_or_default(),
+         since:            self.since.clone().unwrap_or_default(),
+         until:            self.until.clone().unwrap_or_default(),
+         min_faves:        self.min_faves.clone().unwrap_or_default(),
       }
    }
 
@@ -225,9 +254,7 @@ impl SearchQuery {
       // field; profile search is already scoped to the path username.
       let typed_from = Query::parse(self.query.as_deref().unwrap_or(""), query.kind).from_user;
       query.from_user.clear();
-      query
-         .excludes
-         .retain(|name| name != "nativeretweets");
+      query.excludes.retain(|name| name != "nativeretweets");
 
       let mut api = format!("from:{username}");
       if self.query.as_deref().unwrap_or("").is_empty() && !exclude_retweets {
@@ -278,7 +305,11 @@ pub fn search_fields(params: &SearchQuery) -> Vec<(&'static str, &str)> {
    push_field(&mut fields, "f-quote", params.f_quote.as_ref());
    push_field(&mut fields, "f-verified", params.f_verified.as_ref());
    push_field(&mut fields, "e-replies", params.e_replies.as_ref());
-   push_field(&mut fields, "e-nativeretweets", params.e_nativeretweets.as_ref());
+   push_field(
+      &mut fields,
+      "e-nativeretweets",
+      params.e_nativeretweets.as_ref(),
+   );
    fields
 }
 
@@ -391,22 +422,26 @@ async fn search(
    if raw_q.is_empty() && params.from.is_none() {
       let filters = params.to_filters();
       let content = match active_tab {
-         "users" => search_view::render_user_search_results(
-            &raw_q,
-            &[],
-            &state.config,
-            None,
-            None,
-            Some(&prefs),
-         ),
-         "lists" => search_view::render_list_search_results(
-            &raw_q,
-            &[],
-            &state.config,
-            None,
-            None,
-            prefs.proxy_media,
-         ),
+         "users" => {
+            search_view::render_user_search_results(
+               &raw_q,
+               &[],
+               &state.config,
+               None,
+               None,
+               Some(&prefs),
+            )
+         },
+         "lists" => {
+            search_view::render_list_search_results(
+               &raw_q,
+               &[],
+               &state.config,
+               None,
+               None,
+               prefs.proxy_media,
+            )
+         },
          _ => {
             let empty_tweets = Vec::new();
             search_view::render_search_results_with_prefs(
@@ -455,11 +490,13 @@ async fn search(
             helpers::swr_take::<PaginatedResult<crate::types::List>, _, _>(&state, &cache_key, {
                let raw_q = raw_q.clone();
                let cache_key = cache_key.clone();
-               move |state| async move {
-                  if let Ok(data) = state.api.search_lists(&raw_q, None).await {
-                     state
-                        .cache
-                        .set_swr(&cache_key, &data, ttl::SEARCH, ttl::SEARCH_STALE);
+               move |state| {
+                  async move {
+                     if let Ok(data) = state.api.search_lists(&raw_q, None).await {
+                        state
+                           .cache
+                           .set_swr(&cache_key, &data, ttl::SEARCH, ttl::SEARCH_STALE);
+                     }
                   }
                }
             })
@@ -483,6 +520,7 @@ async fn search(
 
       match search_result {
          Ok(result) => {
+            let empty = result.content.is_empty();
             let cursor = result.bottom.as_deref();
             let newer_url = params.cursor.is_some().then(|| {
                format!(
@@ -508,7 +546,10 @@ async fn search(
                percent_encoding::utf8_percent_encode(&raw_q, percent_encoding::NON_ALPHANUMERIC)
             );
             if is_scroll {
-               return Ok(Html(content.into_string()).into_response());
+               return Ok(admin_stats::search_result(
+                  Html(content.into_string()).into_response(),
+                  empty,
+               ));
             }
             let description = search_description(&raw_q, &search_host(&state.config), "lists");
             let markup = layout::PageLayout::new(&state.config, &title, content)
@@ -517,7 +558,10 @@ async fn search(
                .canonical(&canonical)
                .referer(&referer)
                .render();
-            Ok(Html(markup.into_string()).into_response())
+            Ok(admin_stats::search_result(
+               Html(markup.into_string()).into_response(),
+               empty,
+            ))
          },
          Err(err) => Ok(search_error(&state.config, &err)),
       }
@@ -528,11 +572,13 @@ async fn search(
             helpers::swr_take::<PaginatedResult<User>, _, _>(&state, &cache_key, {
                let raw_q = raw_q.clone();
                let cache_key = cache_key.clone();
-               move |state| async move {
-                  if let Ok(data) = state.api.search_users(&raw_q, None).await {
-                     state
-                        .cache
-                        .set_swr(&cache_key, &data, ttl::SEARCH, ttl::SEARCH_STALE);
+               move |state| {
+                  async move {
+                     if let Ok(data) = state.api.search_users(&raw_q, None).await {
+                        state
+                           .cache
+                           .set_swr(&cache_key, &data, ttl::SEARCH, ttl::SEARCH_STALE);
+                     }
                   }
                }
             })
@@ -556,6 +602,7 @@ async fn search(
 
       match search_result {
          Ok(result) => {
+            let empty = result.content.is_empty();
             for user in &result.content {
                helpers::remember_user_id(&state, user);
             }
@@ -585,7 +632,10 @@ async fn search(
                percent_encoding::utf8_percent_encode(&raw_q, percent_encoding::NON_ALPHANUMERIC)
             );
             if is_scroll {
-               return Ok(Html(content.into_string()).into_response());
+               return Ok(admin_stats::search_result(
+                  Html(content.into_string()).into_response(),
+                  empty,
+               ));
             }
             let description = search_description(&raw_q, &search_host(&state.config), "users");
             let markup = layout::PageLayout::new(&state.config, &title, content)
@@ -594,7 +644,10 @@ async fn search(
                .canonical(&canonical)
                .referer(&referer)
                .render();
-            Ok(Html(markup.into_string()).into_response())
+            Ok(admin_stats::search_result(
+               Html(markup.into_string()).into_response(),
+               empty,
+            ))
          },
          Err(err) => Ok(search_error(&state.config, &err)),
       }
@@ -613,11 +666,13 @@ async fn search(
          if let Some(cached) = helpers::swr_take::<Timeline, _, _>(&state, &cache_key, {
             let api_query = api_query.clone();
             let cache_key = cache_key.clone();
-            move |state| async move {
-               if let Ok(data) = state.api.search(&api_query, None, product).await {
-                  state
-                     .cache
-                     .set_swr(&cache_key, &data, ttl::SEARCH, ttl::SEARCH_STALE);
+            move |state| {
+               async move {
+                  if let Ok(data) = state.api.search(&api_query, None, product).await {
+                     state
+                        .cache
+                        .set_swr(&cache_key, &data, ttl::SEARCH, ttl::SEARCH_STALE);
+                  }
                }
             }
          }) {
@@ -663,6 +718,7 @@ async fn search(
             if active_tab == "media" && matches!(media_view, "grid" | "gallery") {
                tweets.retain(Tweet::has_gallery_media);
             }
+            let empty = tweets.is_empty();
             helpers::enrich_tweet_groups(&state, slice::from_mut(&mut tweets)).await;
             helpers::remember_tweets(&state, &tweets);
             helpers::prefetch_profiles(&state, &tweets);
@@ -712,7 +768,10 @@ async fn search(
                percent_encoding::utf8_percent_encode(&raw_q, percent_encoding::NON_ALPHANUMERIC)
             );
             if is_scroll {
-               return Ok(Html(content.into_string()).into_response());
+               return Ok(admin_stats::search_result(
+                  Html(content.into_string()).into_response(),
+                  empty,
+               ));
             }
             let description = search_description(&raw_q, &search_host(&state.config), "posts");
             let markup = layout::PageLayout::new(&state.config, &title, content)
@@ -722,7 +781,10 @@ async fn search(
                .canonical(&canonical)
                .referer(&referer)
                .render();
-            Ok(Html(markup.into_string()).into_response())
+            Ok(admin_stats::search_result(
+               Html(markup.into_string()).into_response(),
+               empty,
+            ))
          },
          Err(err) => Ok(search_error(&state.config, &err)),
       }
@@ -780,7 +842,11 @@ async fn opensearch(State(state): State<AppState>) -> Response {
 
 #[cfg(test)]
 mod tests {
-   use super::{SearchQuery, path_with, search_fields};
+   use super::{
+      SearchQuery,
+      path_with,
+      search_fields,
+   };
 
    #[test]
    fn empty_profile_search_includes_retweets() {

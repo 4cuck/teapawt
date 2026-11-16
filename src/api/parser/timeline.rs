@@ -1,10 +1,19 @@
 use super::tweet::parse_tweet_object;
 use crate::{
    api::schema::{
-      Entry, Instruction, InstructionType, ListTimelineData, SearchTimelineData, UserTimelineData,
+      Entry,
+      Instruction,
+      InstructionType,
+      ListTimelineData,
+      SearchTimelineData,
+      UserTimelineData,
    },
    error::Result,
-   types::{Query, Timeline, Tweets},
+   types::{
+      Query,
+      Timeline,
+      Tweets,
+   },
 };
 
 /// Parse a user timeline (tweets, media, tweets-and-replies).
@@ -100,11 +109,11 @@ pub(crate) fn parse_timeline_instructions(raw_instructions: &[Instruction]) -> R
    }
 
    Ok(Timeline {
-      content: tweets,
-      top: top_cursor,
-      bottom: bottom_cursor,
+      content:   tweets,
+      top:       top_cursor,
+      bottom:    bottom_cursor,
       beginning: false,
-      query: Query::default(),
+      query:     Query::default(),
    })
 }
 
@@ -189,10 +198,10 @@ pub fn parse_search_timeline(data: &SearchTimelineData) -> Timeline {
    }
 
    Timeline {
-      content: tweets,
-      top: None,
-      bottom: bottom_cursor,
+      content:   tweets,
+      top:       None,
+      bottom:    bottom_cursor,
       beginning: false,
-      query: Query::default(),
+      query:     Query::default(),
    }
 }

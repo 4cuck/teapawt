@@ -3,18 +3,38 @@
 use std::net::SocketAddr;
 
 use axum::{
-   extract::{ConnectInfo, Path, Request, State},
-   http::{HeaderValue, header},
+   extract::{
+      ConnectInfo,
+      Path,
+      Request,
+      State,
+   },
+   http::{
+      HeaderValue,
+      header,
+   },
    middleware::Next,
-   response::{IntoResponse as _, Redirect, Response},
+   response::{
+      IntoResponse as _,
+      Redirect,
+      Response,
+   },
 };
 use axum_extra::extract::{
    CookieJar,
-   cookie::{Cookie, SameSite},
+   cookie::{
+      Cookie,
+      SameSite,
+   },
 };
 use time::Duration;
 
-use crate::{AppState, api::budget, error::Error, types::Prefs};
+use crate::{
+   AppState,
+   api::budget,
+   error::Error,
+   types::Prefs,
+};
 
 /// Refuse any route whose `{id}` cannot be a snowflake before a handler spends
 /// cookies, prefs or a session on it.
@@ -71,13 +91,21 @@ pub async fn same_origin_guard(request: Request, next: Next) -> Response {
    next.run(request).await
 }
 
+pub(super) fn is_admin_path(path: &str) -> bool {
+   path == "/admin"
+      || path.starts_with("/admin/")
+      || path == super::import::LEGACY_ADMIN_PATH
+      || path.starts_with("/import/admin/")
+}
+
 /// Middleware that applies `?prefs=` URL parameter overrides.
 ///
 /// A link from another site could otherwise switch off the media proxy or
 /// point redirects elsewhere, so cross-site navigations get no overrides.
-/// The import form rejects all query parameters itself and must not redirect them.
+/// Admin endpoints must receive their own query parameters without redirects or
+/// cookie changes.
 pub async fn prefs_middleware(mut request: Request, next: Next) -> Response {
-   if request.uri().path() == super::import::ADMIN_PATH || is_cross_site(&request) {
+   if is_admin_path(request.uri().path()) || is_cross_site(&request) {
       return next.run(request).await;
    }
 
@@ -210,7 +238,11 @@ mod tests {
    use axum::{
       Router,
       body::Body,
-      http::{Request, StatusCode, header},
+      http::{
+         Request,
+         StatusCode,
+         header,
+      },
       middleware,
       response::IntoResponse,
       routing::get,
@@ -219,7 +251,10 @@ mod tests {
    use http_body_util::BodyExt as _;
    use tower::ServiceExt as _;
 
-   use super::{prefs_middleware, snowflake_guard};
+   use super::{
+      prefs_middleware,
+      snowflake_guard,
+   };
 
    async fn preference_value(jar: CookieJar) -> impl IntoResponse {
       jar.get("mp4Playback")
@@ -246,6 +281,46 @@ mod tests {
       assert!(response.headers().get(header::SET_COOKIE).is_none());
       let body = response.into_body().collect().await.unwrap().to_bytes();
       assert_eq!(body, "on");
+   }
+
+   #[tokio::test]
+   async fn admin_paths_do_not_apply_url_preferences() {
+      let mut app = Router::new();
+      let paths = [
+         "/admin/import",
+         "/import/admin",
+         "/admin/stats",
+         "/admin/stats/data",
+      ];
+      for path in paths {
+         app = app.route(path, get(preference_value));
+      }
+      let app = app.layer(middleware::from_fn(prefs_middleware));
+      for path in paths {
+         for query in ["prefs=mp4Playback%3Don", "mp4Playback=on"] {
+            let response = app
+               .clone()
+               .oneshot(
+                  Request::builder()
+                     .uri(format!("{path}?{query}"))
+                     .body(Body::empty())
+                     .unwrap(),
+               )
+               .await
+               .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}?{query}");
+            assert!(!response.headers().contains_key(header::SET_COOKIE));
+            assert!(
+               response
+                  .into_body()
+                  .collect()
+                  .await
+                  .unwrap()
+                  .to_bytes()
+                  .is_empty()
+            );
+         }
+      }
    }
 
    #[tokio::test]

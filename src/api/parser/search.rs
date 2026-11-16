@@ -1,7 +1,18 @@
 use super::user::parse_user_object;
 use crate::{
-   api::schema::{InstructionType, ListData, ListMembersData, RetweetersData, SearchTimelineData},
-   types::{List, PaginatedResult, Query, User},
+   api::schema::{
+      InstructionType,
+      ListData,
+      ListMembersData,
+      RetweetersData,
+      SearchTimelineData,
+   },
+   types::{
+      List,
+      PaginatedResult,
+      Query,
+      User,
+   },
 };
 
 /// Parse user search results.
@@ -32,11 +43,11 @@ pub fn parse_user_search(data: &SearchTimelineData) -> PaginatedResult<User> {
    }
 
    PaginatedResult {
-      content: users,
-      top: None,
-      bottom: bottom_cursor,
+      content:   users,
+      top:       None,
+      bottom:    bottom_cursor,
       beginning: false,
-      query: Query::default(),
+      query:     Query::default(),
    }
 }
 
@@ -140,11 +151,11 @@ pub fn parse_list_search(data: &SearchTimelineData) -> PaginatedResult<List> {
    }
 
    PaginatedResult {
-      content: lists,
-      top: None,
-      bottom: bottom_cursor,
+      content:   lists,
+      top:       None,
+      bottom:    bottom_cursor,
       beginning: false,
-      query: Query::default(),
+      query:     Query::default(),
    }
 }
 
@@ -179,11 +190,11 @@ pub fn parse_list_members(data: &ListMembersData) -> PaginatedResult<User> {
    }
 
    PaginatedResult {
-      content: users,
-      top: top_cursor,
-      bottom: bottom_cursor,
+      content:   users,
+      top:       top_cursor,
+      bottom:    bottom_cursor,
       beginning: false,
-      query: Query::default(),
+      query:     Query::default(),
    }
 }
 
@@ -218,11 +229,11 @@ pub fn parse_retweeters(data: &RetweetersData) -> PaginatedResult<User> {
    }
 
    PaginatedResult {
-      content: users,
-      top: top_cursor,
-      bottom: bottom_cursor,
+      content:   users,
+      top:       top_cursor,
+      bottom:    bottom_cursor,
       beginning: false,
-      query: Query::default(),
+      query:     Query::default(),
    }
 }
 
@@ -290,13 +301,10 @@ mod tests {
          page.content[0].banner,
          "https://pbs.twimg.com/list_banner.jpg"
       );
-      assert_eq!(
-         page.content[0].pictures,
-         vec![
-            "https://pbs.twimg.com/profile_images/1/a_normal.jpg".to_owned(),
-            "https://pbs.twimg.com/profile_images/2/b_normal.jpg".to_owned(),
-         ]
-      );
+      assert_eq!(page.content[0].pictures, vec![
+         "https://pbs.twimg.com/profile_images/1/a_normal.jpg".to_owned(),
+         "https://pbs.twimg.com/profile_images/2/b_normal.jpg".to_owned(),
+      ]);
       assert_eq!(page.bottom.as_deref(), Some("next"));
    }
 }

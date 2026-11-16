@@ -1,21 +1,65 @@
 use std::{
    collections::BTreeMap,
    pin::Pin,
-   task::{Context, Poll, Waker},
+   task::{
+      Context,
+      Poll,
+      Waker,
+   },
    time::Duration,
 };
 
-use super::super::search_denylist::bypass_denylist;
-use super::super::timeline_route::Route;
 use super::{
-   AboutAccountData, AccountContext, ApiClient, Article, AudioSpaceData, BroadcastsData, CardKind,
-   Conversation, ConversationData, Deserialize, EditHistory, EditHistoryData, Error, List,
-   ListByIdData, ListBySlugData, ListMembersData, ListTimelineData, LiveStreamStatus,
-   PaginatedResult, PhotoRail, Profile, Result, RetweetersData, SearchTimelineData, SessionKind,
-   SessionLease, Timeline, Translation, Tweet, User, UserResultData, UserTimelineData, article_tweet_data,
-   audio_space_host, audio_space_status, broadcast_id_from_url, broadcast_status,
-   clamp_community_value, endpoints, header, hosted_by, parser, settles_the_call,
-   space_id_from_url, timeout,
+   super::{
+      search_denylist::bypass_denylist,
+      timeline_route::Route,
+   },
+   AboutAccountData,
+   AccountContext,
+   ApiClient,
+   Article,
+   AudioSpaceData,
+   BroadcastsData,
+   CardKind,
+   Conversation,
+   ConversationData,
+   Deserialize,
+   EditHistory,
+   EditHistoryData,
+   Error,
+   List,
+   ListByIdData,
+   ListBySlugData,
+   ListMembersData,
+   ListTimelineData,
+   LiveStreamStatus,
+   PaginatedResult,
+   PhotoRail,
+   Profile,
+   Result,
+   RetweetersData,
+   SearchTimelineData,
+   SessionKind,
+   SessionLease,
+   Timeline,
+   Translation,
+   Tweet,
+   User,
+   UserResultData,
+   UserTimelineData,
+   article_tweet_data,
+   audio_space_host,
+   audio_space_status,
+   broadcast_id_from_url,
+   broadcast_status,
+   clamp_community_value,
+   endpoints,
+   header,
+   hosted_by,
+   parser,
+   settles_the_call,
+   space_id_from_url,
+   timeout,
 };
 use crate::types::ExploreFeed;
 
@@ -55,7 +99,10 @@ impl<'a> PostsCursor<'a> {
 /// dropped: nothing asks for newer posts through it.
 fn tag_cursor(mut timeline: Timeline, tag: &str) -> Timeline {
    timeline.top = None;
-   timeline.bottom = timeline.bottom.take().map(|cursor| format!("{tag}{cursor}"));
+   timeline.bottom = timeline
+      .bottom
+      .take()
+      .map(|cursor| format!("{tag}{cursor}"));
    timeline
 }
 
@@ -67,7 +114,7 @@ fn tag_cursor(mut timeline: Timeline, tag: &str) -> Timeline {
 /// also comes back empty.
 #[derive(Default)]
 struct FirstPage {
-   empty: Option<Timeline>,
+   empty:            Option<Timeline>,
    /// A route answered with nothing usable rather than with no quota, so
    /// running out of calls is not what stopped this page.
    answered_nothing: bool,
@@ -130,7 +177,8 @@ where
    }
 }
 
-/// Entry ids only, so an empty Explore tab can be diagnosed without logging posts.
+/// Entry ids only, so an empty Explore tab can be diagnosed without logging
+/// posts.
 fn explore_shape(value: &serde_json::Value) -> String {
    let mut ids = Vec::new();
    collect_entry_ids(value, &mut ids);
@@ -223,7 +271,7 @@ enum Rail {
 /// Dropping this aborts a rail nobody asked to keep.
 pub struct OpenProfile {
    pub profile: Profile,
-   media: Option<tokio::task::JoinHandle<Result<Timeline>>>,
+   media:       Option<tokio::task::JoinHandle<Result<Timeline>>>,
 }
 
 impl Drop for OpenProfile {
@@ -248,16 +296,8 @@ impl OpenProfile {
    }
 
    /// Profile, plus a rail task when `UserMedia` had not finished yet.
-   pub fn into_parts(
-      mut self,
-   ) -> (
-      Profile,
-      Option<tokio::task::JoinHandle<Result<Timeline>>>,
-   ) {
-      (
-         std::mem::take(&mut self.profile),
-         self.media.take(),
-      )
+   pub fn into_parts(mut self) -> (Profile, Option<tokio::task::JoinHandle<Result<Timeline>>>) {
+      (std::mem::take(&mut self.profile), self.media.take())
    }
 }
 
@@ -301,10 +341,12 @@ impl MediaFetch {
       match self.inner.take() {
          Some(MediaInner::Given(rail)) => (Rail::Given(rail), None),
          None => (Rail::None, None),
-         Some(MediaInner::Flying(mut handle)) => match poll_join(&mut handle) {
-            Poll::Ready(Ok(media)) => (Rail::Fetched(media), None),
-            Poll::Ready(Err(_)) => (Rail::None, None),
-            Poll::Pending => (Rail::None, Some(handle)),
+         Some(MediaInner::Flying(mut handle)) => {
+            match poll_join(&mut handle) {
+               Poll::Ready(Ok(media)) => (Rail::Fetched(media), None),
+               Poll::Ready(Err(_)) => (Rail::None, None),
+               Poll::Pending => (Rail::None, Some(handle)),
+            }
          },
       }
    }
@@ -396,10 +438,12 @@ impl ApiClient {
 
       Ok(raw
          .about_profile
-         .map_or_else(AccountContext::default, |profile| AccountContext {
-            account_based_in: profile.account_based_in.unwrap_or_default(),
-            connection_source: profile.source.unwrap_or_default(),
-            location_accurate: profile.location_accurate,
+         .map_or_else(AccountContext::default, |profile| {
+            AccountContext {
+               account_based_in:  profile.account_based_in.unwrap_or_default(),
+               connection_source: profile.source.unwrap_or_default(),
+               location_accurate: profile.location_accurate,
+            }
          }))
    }
 
@@ -415,7 +459,7 @@ impl ApiClient {
          #[serde(rename = "l")]
          location: Option<String>,
          #[serde(rename = "d")]
-         device: Option<String>,
+         device:   Option<String>,
          #[serde(rename = "a")]
          accurate: Option<bool>,
       }
@@ -452,7 +496,7 @@ impl ApiClient {
                continue;
             }
             let context = AccountContext {
-               account_based_in: clamp_community_value(info.location),
+               account_based_in:  clamp_community_value(info.location),
                connection_source: clamp_community_value(info.device),
                location_accurate: info.accurate,
             };
@@ -724,16 +768,21 @@ impl ApiClient {
 
       // The guard is released before any other route: the wait below sends
       // this same call, which would otherwise queue behind itself.
-      let busy = match self.charged_free_session(endpoints::GRAPH_USER_TWEETS).await {
-         Ok(Some(session)) => match self.user_tweets_on(session, &variables, guard).await {
-            Err(Error::RateLimited) => false,
-            Err(err) => return Err(err),
-            answer => {
-               if let Some(settled) = self.settle(&mut page, Route::Primary, answer) {
-                  return settled;
-               }
-               false
-            },
+      let busy = match self
+         .charged_free_session(endpoints::GRAPH_USER_TWEETS)
+         .await
+      {
+         Ok(Some(session)) => {
+            match self.user_tweets_on(session, &variables, guard).await {
+               Err(Error::RateLimited) => false,
+               Err(err) => return Err(err),
+               answer => {
+                  if let Some(settled) = self.settle(&mut page, Route::Primary, answer) {
+                     return settled;
+                  }
+                  false
+               },
+            }
          },
          Ok(None) => {
             drop(guard);
@@ -841,24 +890,30 @@ impl ApiClient {
       popular: bool,
    ) -> Result<Timeline> {
       let (endpoint, variables, features, toggles) = match filter {
-         "posts" => (
-            endpoints::GRAPH_USER_ORIGINALS,
-            endpoints::user_originals_vars(user_id, cursor, popular),
-            endpoints::USER_REPOSTS_FEATURES,
-            endpoints::USER_REPOSTS_FIELD_TOGGLES,
-         ),
-         "highlights" => (
-            endpoints::GRAPH_USER_HIGHLIGHTS,
-            endpoints::user_highlights_vars(user_id, cursor, popular),
-            endpoints::USER_REPOSTS_FEATURES,
-            endpoints::USER_REPOSTS_FIELD_TOGGLES,
-         ),
-         _ if popular => (
-            endpoints::GRAPH_USER_TWEETS,
-            endpoints::user_tweets_sorted_vars(user_id, cursor, true),
-            endpoints::GQL_FEATURES,
-            endpoints::USER_TWEETS_FIELD_TOGGLES,
-         ),
+         "posts" => {
+            (
+               endpoints::GRAPH_USER_ORIGINALS,
+               endpoints::user_originals_vars(user_id, cursor, popular),
+               endpoints::USER_REPOSTS_FEATURES,
+               endpoints::USER_REPOSTS_FIELD_TOGGLES,
+            )
+         },
+         "highlights" => {
+            (
+               endpoints::GRAPH_USER_HIGHLIGHTS,
+               endpoints::user_highlights_vars(user_id, cursor, popular),
+               endpoints::USER_REPOSTS_FEATURES,
+               endpoints::USER_REPOSTS_FIELD_TOGGLES,
+            )
+         },
+         _ if popular => {
+            (
+               endpoints::GRAPH_USER_TWEETS,
+               endpoints::user_tweets_sorted_vars(user_id, cursor, true),
+               endpoints::GQL_FEATURES,
+               endpoints::USER_TWEETS_FIELD_TOGGLES,
+            )
+         },
          _ => return self.get_user_tweets(user_id, cursor).await,
       };
       let data = self
@@ -930,14 +985,18 @@ impl ApiClient {
          .charged_session_by_kind(endpoints::GRAPH_USER_MEDIA, endpoints::GRAPH_USER_MEDIA_V2)
          .await?;
       let (endpoint, variables) = match session.kind {
-         SessionKind::OAuth => (
-            endpoints::GRAPH_USER_MEDIA_V2,
-            endpoints::user_media_v2_vars(user_id, cursor),
-         ),
-         SessionKind::Cookie => (
-            endpoints::GRAPH_USER_MEDIA,
-            endpoints::user_media_vars(user_id, cursor),
-         ),
+         SessionKind::OAuth => {
+            (
+               endpoints::GRAPH_USER_MEDIA_V2,
+               endpoints::user_media_v2_vars(user_id, cursor),
+            )
+         },
+         SessionKind::Cookie => {
+            (
+               endpoints::GRAPH_USER_MEDIA,
+               endpoints::user_media_vars(user_id, cursor),
+            )
+         },
       };
 
       let retry_kind = session.kind;
@@ -997,16 +1056,16 @@ impl ApiClient {
       if let Some(id) = known_id {
          if cursor.is_none() {
             let media = MediaFetch::start(self, id, rail);
-            let (user_res, tweets_res) = tokio::join!(
-               self.get_user(screen_name),
-               self.get_user_tweets(id, None),
-            );
+            let (user_res, tweets_res) =
+               tokio::join!(self.get_user(screen_name), self.get_user_tweets(id, None),);
             let user = match user_res {
                Ok(user) => user,
-               Err(err) => known
-                  .filter(|user| !user.fullname.is_empty())
-                  .cloned()
-                  .ok_or(err)?,
+               Err(err) => {
+                  known
+                     .filter(|user| !user.fullname.is_empty())
+                     .cloned()
+                     .ok_or(err)?
+               },
             };
             if user.protected || user.suspended {
                return Ok(OpenProfile::ready(Profile {
@@ -1022,9 +1081,7 @@ impl ApiClient {
             });
          }
 
-         let known_user = known
-            .filter(|user| !user.fullname.is_empty())
-            .cloned();
+         let known_user = known.filter(|user| !user.fullname.is_empty()).cloned();
          let (user_res, tweets_res) = tokio::join!(
             async {
                if let Some(user) = known_user {
@@ -1278,33 +1335,36 @@ impl ApiClient {
    }
 
    pub async fn nfl_game(&self, game_id: &str) -> Result<serde_json::Value> {
-      self.graphql_request(
-         endpoints::GRAPH_NFL_GAME,
-         &endpoints::nfl_game_vars(game_id),
-         "{}",
-         None,
-      )
-      .await
+      self
+         .graphql_request(
+            endpoints::GRAPH_NFL_GAME,
+            &endpoints::nfl_game_vars(game_id),
+            "{}",
+            None,
+         )
+         .await
    }
 
    pub async fn sports_game_top(&self, game_id: &str) -> Result<serde_json::Value> {
-      self.graphql_request(
-         endpoints::GRAPH_SPORTS_GAME_TOP,
-         &endpoints::sports_game_top_vars(game_id),
-         endpoints::EXPLORE_FEATURES,
-         None,
-      )
-      .await
+      self
+         .graphql_request(
+            endpoints::GRAPH_SPORTS_GAME_TOP,
+            &endpoints::sports_game_top_vars(game_id),
+            endpoints::EXPLORE_FEATURES,
+            None,
+         )
+         .await
    }
 
    pub async fn tweets_by_ids(&self, ids: &[String]) -> Result<serde_json::Value> {
-      self.graphql_request(
-         endpoints::GRAPH_TWEETS_BY_IDS,
-         &endpoints::tweets_by_ids_vars(ids),
-         endpoints::TWEET_RESULTS_FEATURES,
-         Some(endpoints::TWEET_RESULTS_TOGGLES),
-      )
-      .await
+      self
+         .graphql_request(
+            endpoints::GRAPH_TWEETS_BY_IDS,
+            &endpoints::tweets_by_ids_vars(ids),
+            endpoints::TWEET_RESULTS_FEATURES,
+            Some(endpoints::TWEET_RESULTS_TOGGLES),
+         )
+         .await
    }
 
    /// One timeline by the id X already returned, such as a story's Top posts.
@@ -1318,34 +1378,37 @@ impl ApiClient {
       timeline_id: &str,
       cursor: Option<&str>,
    ) -> Result<serde_json::Value> {
-      self.graphql_request(
-         endpoints::GRAPH_GENERIC_TIMELINE,
-         &endpoints::generic_timeline_vars(timeline_id, cursor),
-         endpoints::EXPLORE_FEATURES,
-         None,
-      )
-      .await
+      self
+         .graphql_request(
+            endpoints::GRAPH_GENERIC_TIMELINE,
+            &endpoints::generic_timeline_vars(timeline_id, cursor),
+            endpoints::EXPLORE_FEATURES,
+            None,
+         )
+         .await
    }
 
    /// The writeup and posts for one trending story.
    pub async fn ai_trend(&self, trend_id: &str) -> Result<serde_json::Value> {
-      self.graphql_request(
-         endpoints::GRAPH_AI_TREND,
-         &endpoints::ai_trend_vars(trend_id),
-         endpoints::EXPLORE_FEATURES,
-         None,
-      )
-      .await
+      self
+         .graphql_request(
+            endpoints::GRAPH_AI_TREND,
+            &endpoints::ai_trend_vars(trend_id),
+            endpoints::EXPLORE_FEATURES,
+            None,
+         )
+         .await
    }
 
    pub async fn nfl_schedule(&self) -> Result<serde_json::Value> {
-      self.graphql_request(
-         endpoints::GRAPH_NFL_SCHEDULE,
-         &endpoints::nfl_schedule_vars(),
-         "{}",
-         None,
-      )
-      .await
+      self
+         .graphql_request(
+            endpoints::GRAPH_NFL_SCHEDULE,
+            &endpoints::nfl_schedule_vars(),
+            "{}",
+            None,
+         )
+         .await
    }
 
    /// Get list by ID.
@@ -1465,16 +1528,20 @@ impl ApiClient {
          )
          .await?;
       let (endpoint, variables, field_toggles) = match session.kind {
-         SessionKind::OAuth => (
-            endpoints::GRAPH_USER_TWEETS_AND_REPLIES_V2,
-            endpoints::user_tweets_and_replies_v2_vars(user_id, cursor),
-            None,
-         ),
-         SessionKind::Cookie => (
-            endpoints::GRAPH_USER_TWEETS_AND_REPLIES,
-            endpoints::user_tweets_and_replies_vars(user_id, cursor),
-            Some(endpoints::USER_TWEETS_FIELD_TOGGLES),
-         ),
+         SessionKind::OAuth => {
+            (
+               endpoints::GRAPH_USER_TWEETS_AND_REPLIES_V2,
+               endpoints::user_tweets_and_replies_v2_vars(user_id, cursor),
+               None,
+            )
+         },
+         SessionKind::Cookie => {
+            (
+               endpoints::GRAPH_USER_TWEETS_AND_REPLIES,
+               endpoints::user_tweets_and_replies_vars(user_id, cursor),
+               Some(endpoints::USER_TWEETS_FIELD_TOGGLES),
+            )
+         },
       };
       let retry_kind = session.kind;
       let (data, bytes) = self
@@ -1529,13 +1596,18 @@ impl ApiClient {
       let mut last = Err(Error::NoSessions);
       for attempt in 0..=super::RATE_LIMIT_REPLACEMENTS {
          let session = if attempt == 0 {
-            self.charged_session(endpoints::STRATO_TRANSLATE, Some(SessionKind::Cookie))
+            self
+               .charged_session(endpoints::STRATO_TRANSLATE, Some(SessionKind::Cookie))
                .await?
          } else {
             let previous = tried_ids.last().copied().unwrap_or(0);
             if !self
                .sessions
-               .has_unlimited(endpoints::STRATO_TRANSLATE, Some(SessionKind::Cookie), previous)
+               .has_unlimited(
+                  endpoints::STRATO_TRANSLATE,
+                  Some(SessionKind::Cookie),
+                  previous,
+               )
                .await
             {
                break;
@@ -1544,19 +1616,25 @@ impl ApiClient {
             let next_session = if bad_ports.is_empty() {
                self
                   .sessions
-                  .acquire_where(endpoints::STRATO_TRANSLATE, Some(SessionKind::Cookie), |id| {
-                     !tried_ids.contains(&id)
-                  })
+                  .acquire_where(
+                     endpoints::STRATO_TRANSLATE,
+                     Some(SessionKind::Cookie),
+                     |id| !tried_ids.contains(&id),
+                  )
                   .await
             } else {
                match self
                   .sessions
-                  .acquire_where(endpoints::STRATO_TRANSLATE, Some(SessionKind::Cookie), |id| {
-                     !tried_ids.contains(&id)
-                        && self
-                           .pinned_port(id)
-                           .is_none_or(|port| !bad_ports.contains(&port))
-                  })
+                  .acquire_where(
+                     endpoints::STRATO_TRANSLATE,
+                     Some(SessionKind::Cookie),
+                     |id| {
+                        !tried_ids.contains(&id)
+                           && self
+                              .pinned_port(id)
+                              .is_none_or(|port| !bad_ports.contains(&port))
+                     },
+                  )
                   .await
                {
                   Ok(next) => Ok(next),
@@ -1627,7 +1705,10 @@ impl ApiClient {
          "x-twitter-auth-type",
          header::HeaderValue::from_static("OAuth2Session"),
       );
-      let ct0 = self.sessions.ct0(session.id).unwrap_or_else(|| session.ct0.clone());
+      let ct0 = self
+         .sessions
+         .ct0(session.id)
+         .unwrap_or_else(|| session.ct0.clone());
       headers.insert(
          "x-csrf-token",
          ct0.parse()
@@ -1673,11 +1754,11 @@ impl ApiClient {
       )]
       #[derive(Deserialize)]
       struct TranslationResponse {
-         translation: Option<String>,
+         translation:               Option<String>,
          #[serde(rename = "sourceLanguage")]
-         source_language: Option<String>,
+         source_language:           Option<String>,
          #[serde(rename = "destinationLanguage")]
-         dest_language: Option<String>,
+         dest_language:             Option<String>,
          #[serde(rename = "localizedSourceLanguage")]
          localized_source_language: Option<String>,
       }
@@ -1686,20 +1767,23 @@ impl ApiClient {
          .map_err(|err| Error::Internal(format!("Translation parse error: {err}")))?;
 
       Ok(Translation {
-         text: resp.translation.unwrap_or_default(),
-         source_lang: resp.source_language.unwrap_or_default(),
-         dest_lang: resp.dest_language.unwrap_or_default(),
+         text:                resp.translation.unwrap_or_default(),
+         source_lang:         resp.source_language.unwrap_or_default(),
+         dest_lang:           resp.dest_language.unwrap_or_default(),
          source_lang_display: resp.localized_source_language.unwrap_or_default(),
       })
    }
 
    /// Translate a tweet using Kagi Translate API.
    pub async fn kagi_translate(&self, tweet: &Tweet, kagi_token: &str) -> Result<Translation> {
-      use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+      use percent_encoding::{
+         NON_ALPHANUMERIC,
+         utf8_percent_encode,
+      };
 
       #[derive(Deserialize)]
       struct KagiResponse {
-         translation: Option<String>,
+         translation:       Option<String>,
          detected_language: Option<KagiDetectedLang>,
       }
 
@@ -1758,9 +1842,9 @@ impl ApiClient {
          .unwrap_or_else(|| tweet.lang.clone());
 
       Ok(Translation {
-         text: kagi.translation.unwrap_or_default(),
-         source_lang: tweet.lang.clone(),
-         dest_lang: "en".to_owned(),
+         text:                kagi.translation.unwrap_or_default(),
+         source_lang:         tweet.lang.clone(),
+         dest_lang:           "en".to_owned(),
          source_lang_display: source_display,
       })
    }
@@ -1903,22 +1987,30 @@ impl ApiClient {
 }
 
 pub struct WatchedBroadcast {
-   pub id: String,
-   pub title: String,
-   pub state: String,
-   pub thumb: String,
-   pub username: String,
+   pub id:           String,
+   pub title:        String,
+   pub state:        String,
+   pub thumb:        String,
+   pub username:     String,
    pub display_name: String,
-   pub watched: i64,
-   pub watching: i64,
-   pub replay: bool,
-   pub status_line: String,
-   pub m3u8: String,
+   pub watched:      i64,
+   pub watching:     i64,
+   pub replay:       bool,
+   pub status_line:  String,
+   pub m3u8:         String,
 }
 
 #[cfg(test)]
 mod first_page_tests {
-   use super::{Error, FirstPage, PostsCursor, Timeline, Tweet, recheck_empty, tag_cursor};
+   use super::{
+      Error,
+      FirstPage,
+      PostsCursor,
+      Timeline,
+      Tweet,
+      recheck_empty,
+      tag_cursor,
+   };
 
    #[test]
    fn a_fallback_cursor_comes_back_to_its_own_timeline() {
@@ -1949,7 +2041,10 @@ mod first_page_tests {
 
    #[test]
    fn an_untagged_cursor_is_user_tweets() {
-      assert_eq!(PostsCursor::parse("DAABCgAB"), PostsCursor::Tweets("DAABCgAB"));
+      assert_eq!(
+         PostsCursor::parse("DAABCgAB"),
+         PostsCursor::Tweets("DAABCgAB")
+      );
    }
 
    #[test]
@@ -2031,8 +2126,8 @@ mod first_page_tests {
 
    #[tokio::test]
    async fn a_tab_with_posts_is_not_asked_again() {
-      let shown = recheck_empty(Ok(page(&[false])), || async {
-         panic!("asked X again for a page that had posts")
+      let shown = recheck_empty(Ok(page(&[false])), || {
+         async { panic!("asked X again for a page that had posts") }
       })
       .await;
       assert!(matches!(shown, Ok(tl) if tl.has_posts()));
@@ -2040,8 +2135,8 @@ mod first_page_tests {
 
    #[tokio::test]
    async fn an_error_is_not_asked_again() {
-      let shown = recheck_empty(Err(Error::RateLimited), || async {
-         panic!("asked X again after the request layer gave up")
+      let shown = recheck_empty(Err(Error::RateLimited), || {
+         async { panic!("asked X again after the request layer gave up") }
       })
       .await;
       assert!(matches!(shown, Err(Error::RateLimited)));

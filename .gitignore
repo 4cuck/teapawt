@@ -62,3 +62,12 @@ web-bot-auth.pkcs8
 !flake.nix
 !nix/
 !nix/package.nix
+
+# X account registration tool. Code and the example config are tracked; the
+# real config (proxy login, Hotmail007 key) and captures are not.
+!tools/
+!tools/**
+tools/register/node_modules/
+tools/register/config.json
+tools/register/captures/
+tools/register/mail-accounts.txt

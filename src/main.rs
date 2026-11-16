@@ -6,6 +6,7 @@ mod donations;
 mod error;
 mod passes;
 mod routes;
+mod stats;
 mod transcode;
 mod translation;
 mod types;
@@ -61,6 +62,7 @@ pub struct AppState {
    pub cache: Cache,
    pub api: ApiClient,
    pub accounts: AccountStore,
+   pub stats: Option<stats::StatsStore>,
    pub http_client: HttpClient,
    pub gif_transcoder: Option<Arc<GifTranscoder>>,
    pub translation_limiter: Arc<translation::TranslationLimiter>,
@@ -152,8 +154,19 @@ async fn main() -> eyre::Result<()> {
    // address.
    let exits = proxies.as_ref().map(ProxyPool::all).unwrap_or_default();
 
+   let stats = match tokio::time::timeout(Duration::from_secs(5), stats::StatsStore::connect()).await {
+      Ok(Ok(store)) => Some(store),
+      _ => {
+         tracing::warn!("statistics storage unavailable; search will continue without telemetry");
+         None
+      },
+   };
+
    // Initialize API client
-   let api = ApiClient::new(&config, sessions, proxies, fallback_proxies, accounts.clone()).await?;
+   let mut api = ApiClient::new(&config, sessions, proxies, fallback_proxies, accounts.clone())
+      .await?
+      .with_telemetry(stats.clone());
+   api.sessions.set_telemetry(stats.clone());
    api.spawn_tid_warmup();
    api.spawn_filter_sync();
    api.spawn_search_check();
@@ -209,6 +222,7 @@ async fn main() -> eyre::Result<()> {
       cache,
       api,
       accounts,
+      stats,
       http_client,
       gif_transcoder,
       translation_limiter: Arc::new(translation::TranslationLimiter::new()),
@@ -219,6 +233,11 @@ async fn main() -> eyre::Result<()> {
 
    // Build the router with specific routes before static files
    let static_dir = config.server.static_dir.clone();
+   let form_destinations = crate::utils::host::APEX_HOSTS
+      .iter()
+      .map(|host| format!("https://{host} https://www.{host}"))
+      .collect::<Vec<_>>()
+      .join(" ");
    let app = Router::new()
         .merge(routes::router(&config.config.indexnow_key))
         // Serve static files at various paths
@@ -247,13 +266,13 @@ async fn main() -> eyre::Result<()> {
             state.clone(),
             routes::client_middleware,
         ))
-        .layer(SetResponseHeaderLayer::overriding(
+        .layer(SetResponseHeaderLayer::if_not_present(
             header::REFERRER_POLICY,
             HeaderValue::from_static("no-referrer"),
         ))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(
+            HeaderValue::from_str(&format!(
                 "default-src 'none'; \
                  script-src 'self' https://challenges.cloudflare.com; \
                  style-src 'self' 'unsafe-inline'; \
@@ -263,10 +282,10 @@ async fn main() -> eyre::Result<()> {
                  connect-src 'self' https://challenges.cloudflare.com https://*.twimg.com https://video.pscp.tv https://*.video.pscp.tv; \
                  frame-src https://challenges.cloudflare.com; \
                  manifest-src 'self'; \
-                 form-action 'self' https://nitter.cf https://www.nitter.cf https://xitter.cf https://www.xitter.cf; \
+                 form-action 'self' {form_destinations}; \
                  base-uri 'self'; \
                  frame-ancestors 'none'"
-            ),
+            ))?,
         ))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
@@ -294,6 +313,8 @@ async fn main() -> eyre::Result<()> {
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(45),
         ))
+        .layer(middleware::from_fn_with_state(state.clone(), routes::record_search))
+        .layer(middleware::from_fn(routes::admin_no_store))
         .layer(ConcurrencyLimitLayer::new(
             usize::try_from(config.server.http_max_connections).unwrap_or(usize::MAX),
         ))

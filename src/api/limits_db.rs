@@ -3,21 +3,27 @@
 //! The JSON file rewrote every account on each flush. A session change only
 //! touches one account, and that update is the write that has to be fast.
 
-use std::{collections::HashMap, env};
+use std::{
+   collections::HashMap,
+   env,
+};
 
 use tokio::sync::mpsc;
 use tokio_postgres::NoTls;
 
 use crate::{
-   error::{Error, Result},
+   error::{
+      Error,
+      Result,
+   },
    types::SessionLimits,
 };
 
 const DEFAULT_URL: &str = "host=/var/run/postgresql user=teapot dbname=teapot";
 
 const UPSERT: &str = "\
-INSERT INTO session_limits (id, body) VALUES ($1, $2) \
-ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body";
+INSERT INTO session_limits (id, body) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET body = \
+                      EXCLUDED.body";
 
 /// Handle for saving one account without rewriting the rest.
 #[derive(Clone)]

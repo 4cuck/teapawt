@@ -1,3 +1,4 @@
+pub(crate) mod admin_stats;
 pub mod donate;
 pub mod embed;
 pub mod explore;

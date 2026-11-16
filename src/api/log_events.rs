@@ -4,7 +4,10 @@
 
 use std::{
    fmt::Write as _,
-   sync::atomic::{AtomicU64, Ordering},
+   sync::atomic::{
+      AtomicU64,
+      Ordering,
+   },
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -118,7 +121,10 @@ mod tests {
       events.note(Event::HeaderStall);
       events.note(Event::HeaderStall);
       events.note(Event::Bare429);
-      assert_eq!(events.report().as_deref(), Some("2 header stalls, 1 bare 429s"));
+      assert_eq!(
+         events.report().as_deref(),
+         Some("2 header stalls, 1 bare 429s")
+      );
       assert_eq!(events.report(), None);
    }
 }

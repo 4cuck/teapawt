@@ -1,20 +1,42 @@
 //! Account import dashboard: public counts, administrator-only writes.
 
-use std::{future::Future, time::Duration};
+use std::{
+   future::Future,
+   time::Duration,
+};
 
 use axum::{
    Router,
    body::to_bytes,
-   extract::{Request, State},
-   http::{HeaderMap, HeaderValue, StatusCode, header},
-   middleware::{self, Next},
-   response::{IntoResponse as _, Response},
+   extract::{
+      Request,
+      State,
+   },
+   http::{
+      HeaderMap,
+      HeaderValue,
+      StatusCode,
+      header,
+   },
+   middleware::{
+      self,
+      Next,
+   },
+   response::{
+      IntoResponse as _,
+      Response,
+   },
    routing::get,
 };
 use axum_extra::extract::CookieJar;
 use data_encoding::HEXLOWER;
 use ring::hmac;
 use time::OffsetDateTime;
+pub(super) use view::{
+   ADMIN_PATH,
+   PUBLIC_PATH,
+   REFRESH_PATH,
+};
 
 use crate::{
    AppState,
@@ -22,10 +44,14 @@ use crate::{
    passes::SESSION_COOKIE,
    types::Prefs,
    utils::host::current_origin,
-   views::import::{self as view, AdminNotice, Snapshot},
+   views::import::{
+      self as view,
+      AdminNotice,
+      Snapshot,
+   },
 };
 
-pub(super) use view::{ADMIN_PATH, PUBLIC_PATH, REFRESH_PATH};
+pub(super) const LEGACY_ADMIN_PATH: &str = "/import/admin";
 
 const MAX_TEXT_BYTES: usize = 256 * 1024;
 const MAX_FORM_BYTES: usize = 3 * MAX_TEXT_BYTES + 1024;
@@ -46,9 +72,17 @@ trait Backend: Clone + Send + Sync + 'static {
 impl Backend for AppState {
    async fn snapshot(&self) -> Option<Snapshot> {
       let stats = self.accounts.stats().await.ok()?;
-      let batches = self.accounts.recent_import_batches().await.ok().map(|rows| {
-         rows.into_iter().map(|(timestamp, counts)| view::Batch { timestamp, counts }).collect()
-      });
+      let batches = self
+         .accounts
+         .recent_import_batches()
+         .await
+         .ok()
+         .map(|rows| {
+            rows
+               .into_iter()
+               .map(|(timestamp, counts)| view::Batch { timestamp, counts })
+               .collect()
+         });
       Some(Snapshot {
          stats,
          batches,
@@ -57,14 +91,7 @@ impl Backend for AppState {
    }
 
    async fn administrator(&self, jar: &CookieJar) -> bool {
-      let Some(id) = self.passes.signed_in(jar) else {
-         return false;
-      };
-      self
-         .passes
-         .account(id)
-         .await
-         .is_ok_and(|account| account.is_some_and(|a| a.is_admin()))
+      administrator(self, jar).await
    }
 
    fn theme(&self, jar: &CookieJar) -> String {
@@ -95,19 +122,30 @@ fn dashboard_routes<B: Backend>() -> Router<B> {
 }
 
 fn admin_routes<B: Backend>() -> Router<B> {
-   Router::new().route(
-      view::ADMIN_PATH,
-      get(admin::<B>)
-         .post(upload::<B>)
-         .layer(tower_http::timeout::TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(40),
-         ))
-         .layer(middleware::from_fn(private)),
-   )
+   let methods = get(admin::<B>)
+      .post(upload::<B>)
+      .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+         StatusCode::REQUEST_TIMEOUT,
+         Duration::from_secs(40),
+      ))
+      .layer(middleware::from_fn(private));
+   Router::new()
+      .route(ADMIN_PATH, methods.clone())
+      .route(LEGACY_ADMIN_PATH, methods)
 }
 
-fn no_store(headers: &mut HeaderMap) {
+pub(super) async fn administrator(state: &AppState, jar: &CookieJar) -> bool {
+   let Some(id) = state.passes.signed_in(jar) else {
+      return false;
+   };
+   state
+      .passes
+      .account(id)
+      .await
+      .is_ok_and(|account| account.is_some_and(|a| a.is_admin()))
+}
+
+pub(super) fn no_store(headers: &mut HeaderMap) {
    headers.insert(
       header::CACHE_CONTROL,
       HeaderValue::from_static("private, no-store"),
@@ -132,9 +170,13 @@ async fn private(request: Request, next: Next) -> Response {
       header::REFERRER_POLICY,
       HeaderValue::from_static("same-origin"),
    );
-   headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(
-      "default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-   ));
+   headers.insert(
+      header::CONTENT_SECURITY_POLICY,
+      HeaderValue::from_static(
+         "default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; \
+          frame-ancestors 'none'",
+      ),
+   );
    response
 }
 
@@ -174,6 +216,7 @@ async fn refresh<B: Backend>(State(state): State<B>) -> Response {
 }
 
 fn csrf_message(session: &str, origin: &str, expires: i64) -> String {
+   // Keep the signing context stable for forms issued before the route moved.
    format!("teapot/import/admin/POST\n{origin}\n{expires}\n{session}")
 }
 
@@ -258,7 +301,7 @@ async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Req
    if cross_origin(request.headers(), &origin) {
       return (
          StatusCode::FORBIDDEN,
-         "The form must be submitted from the same site. Reload /import/admin and try again.",
+         "The form must be submitted from the same site. Reload /admin/import and try again.",
       )
          .into_response();
    }
@@ -273,7 +316,15 @@ async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Req
       return (StatusCode::FORBIDDEN, view::forbidden(&theme)).into_response();
    }
    let session = session.value();
-   let error = |status, text| form(&state, &theme, session, status, Some(AdminNotice::Error(text)));
+   let error = |status, text| {
+      form(
+         &state,
+         &theme,
+         session,
+         status,
+         Some(AdminNotice::Error(text)),
+      )
+   };
    if request.uri().query().is_some() {
       return error(
          StatusCode::BAD_REQUEST,
@@ -371,17 +422,21 @@ async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Req
       );
    }
    match state.upload(&accounts, search).await {
-      Some(counts) => form(
-         &state,
-         &theme,
-         session,
-         StatusCode::OK,
-         Some(AdminNotice::Saved(counts)),
-      ),
-      None => error(
-         StatusCode::SERVICE_UNAVAILABLE,
-         "The import could not be saved. Check the dashboard before retrying.",
-      ),
+      Some(counts) => {
+         form(
+            &state,
+            &theme,
+            session,
+            StatusCode::OK,
+            Some(AdminNotice::Saved(counts)),
+         )
+      },
+      None => {
+         error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The import could not be saved. Check the dashboard before retrying.",
+         )
+      },
    }
 }
 
@@ -389,15 +444,17 @@ async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Req
 mod tests {
    use std::sync::{
       Arc,
-      atomic::{AtomicUsize, Ordering},
+      atomic::{
+         AtomicUsize,
+         Ordering,
+      },
    };
 
    use axum::body::Body;
    use tower::ServiceExt as _;
 
-   use crate::accounts::Stats;
-
    use super::*;
+   use crate::accounts::Stats;
 
    const ADMIN: &str = "synthetic-admin-cookie";
    const SECRET: &str = "synthetic private import input <script>";
@@ -412,21 +469,23 @@ mod tests {
 
    impl Backend for Fixture {
       async fn snapshot(&self) -> Option<Snapshot> {
-         (!self.failed).then(|| Snapshot {
-            stats: Stats {
-               total: 21,
-               search: 8,
-               view: 13,
-            },
-            batches: Some(vec![view::Batch {
-               timestamp: 1_700_000_000,
-               counts: ImportSummary {
-                  imported: 7,
-                  duplicates: 2,
-                  invalid: 1,
+         (!self.failed).then(|| {
+            Snapshot {
+               stats:   Stats {
+                  total:  21,
+                  search: 8,
+                  view:   13,
                },
-            }]),
-            updated: OffsetDateTime::from_unix_timestamp(1_700_000_030).unwrap(),
+               batches: Some(vec![view::Batch {
+                  timestamp: 1_700_000_000,
+                  counts:    ImportSummary {
+                     imported:   7,
+                     duplicates: 2,
+                     invalid:    1,
+                  },
+               }]),
+               updated: OffsetDateTime::from_unix_timestamp(1_700_000_030).unwrap(),
+            }
          })
       }
 
@@ -436,7 +495,9 @@ mod tests {
       }
 
       fn theme(&self, jar: &CookieJar) -> String {
-         jar.get("theme").map_or("Teapot", |cookie| cookie.value()).into()
+         jar.get("theme")
+            .map_or("Teapot", |cookie| cookie.value())
+            .into()
       }
 
       fn csrf_key(&self) -> &str {
@@ -451,9 +512,9 @@ mod tests {
          assert!(search);
          self.writes.fetch_add(1, Ordering::Relaxed);
          (!self.failed).then_some(ImportSummary {
-            imported: 1,
+            imported:   1,
             duplicates: 0,
-            invalid: 0,
+            invalid:    0,
          })
       }
    }
@@ -461,7 +522,9 @@ mod tests {
    fn app(state: Fixture) -> Router {
       dashboard_routes::<Fixture>()
          .merge(admin_routes::<Fixture>())
-         .layer(middleware::from_fn(super::super::middleware::prefs_middleware))
+         .layer(middleware::from_fn(
+            super::super::middleware::prefs_middleware,
+         ))
          .with_state(state)
    }
 
@@ -525,7 +588,11 @@ mod tests {
          assert_eq!(response.status(), StatusCode::OK);
          assert_eq!(
             response.headers()[header::CACHE_CONTROL],
-            if dashboard { "private, no-store" } else { "public, max-age=10" }
+            if dashboard {
+               "private, no-store"
+            } else {
+               "public, max-age=10"
+            }
          );
          assert!(!response.headers().contains_key(header::SET_COOKIE));
          let html = body(response).await;
@@ -535,6 +602,7 @@ mod tests {
          assert!(html.contains("<dd>21</dd>"));
          assert!(html.contains(">7<") && html.contains("added"));
          assert!(!html.contains("<form"));
+         assert_eq!(html.contains("href=\"/admin/import\""), dashboard);
          assert!(!html.contains(ADMIN));
          assert!(!html.contains("name=\"csrf\""));
       }
@@ -550,25 +618,36 @@ mod tests {
       ] {
          let request = Request::builder()
             .uri(path)
-            .header(header::COOKIE, format!("{SESSION_COOKIE}={ADMIN}; theme=Dracula"))
+            .header(
+               header::COOKIE,
+               format!("{SESSION_COOKIE}={ADMIN}; theme=Dracula"),
+            )
             .body(Body::empty())
             .unwrap();
          let response = app.clone().oneshot(request).await.unwrap();
          assert_eq!(response.status(), StatusCode::OK);
          if themed {
-            assert_eq!(response.headers()["cloudflare-cdn-cache-control"], "no-store");
+            assert_eq!(
+               response.headers()["cloudflare-cdn-cache-control"],
+               "no-store"
+            );
          }
          let html = body(response).await;
          assert_eq!(html.contains("/css/themes/dracula.css?teapawt17"), themed);
-         assert_eq!(html.contains("/css/import.css?v=3"), themed);
+         assert_eq!(html.contains("/css/import.css?v=4"), themed);
       }
    }
 
    #[tokio::test]
    async fn admin_post_binds_csrf_to_session_origin_and_time() {
+      for path in ["/admin/import", "/import/admin"] {
+         exercise_admin_csrf(path).await;
+      }
+   }
+
+   async fn exercise_admin_csrf(path: &str) {
       let state = Fixture::default();
       let app = app(state.clone());
-      let path = view::ADMIN_PATH;
       for session in [None, Some("ordinary-pass-holder")] {
          let response = app
             .clone()
@@ -586,7 +665,8 @@ mod tests {
       assert_private(&response, StatusCode::OK);
       assert_eq!(response.headers()[header::REFERRER_POLICY], "same-origin");
       let html = body(response).await;
-      assert!(html.contains("method=\"post\" action=\"/import/admin\""));
+      assert!(html.contains("method=\"post\" action=\"/admin/import\""));
+      assert!(html.contains("href=\"/admin/stats\""));
       assert!(!html.contains(ADMIN));
       let csrf = html
          .split_once("name=\"csrf\" value=\"")
@@ -653,6 +733,11 @@ mod tests {
             view::ADMIN_PATH,
             "line\n".repeat(MAX_LINES + 1),
             StatusCode::PAYLOAD_TOO_LARGE,
+         ),
+         (
+            "/admin/import?prefs=theme%3Dteapot&accounts=synthetic-secret-needle",
+            SECRET.into(),
+            StatusCode::BAD_REQUEST,
          ),
          (
             "/import/admin?prefs=theme%3Dteapot&accounts=synthetic-secret-needle",

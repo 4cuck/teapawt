@@ -2,8 +2,16 @@
 
 use axum::{
    Router,
-   extract::{Path, Query, State},
-   response::{Html, IntoResponse as _, Response},
+   extract::{
+      Path,
+      Query,
+      State,
+   },
+   response::{
+      Html,
+      IntoResponse as _,
+      Response,
+   },
    routing::get,
 };
 use axum_extra::extract::CookieJar;
@@ -13,10 +21,24 @@ use serde::Deserialize;
 use crate::{
    AppState,
    api,
-   cache::{Hit, keys as cache_keys, ttl},
-   error::{Error, Result},
-   types::{Prefs, TrendStory, Tweet},
-   views::{explore as explore_view, layout},
+   cache::{
+      Hit,
+      keys as cache_keys,
+      ttl,
+   },
+   error::{
+      Error,
+      Result,
+   },
+   types::{
+      Prefs,
+      TrendStory,
+      Tweet,
+   },
+   views::{
+      explore as explore_view,
+      layout,
+   },
 };
 
 #[derive(Debug, Deserialize)]
@@ -40,8 +62,14 @@ async fn story(
       return Err(Error::InvalidUrl("Invalid story".into()));
    }
    let prefs = Prefs::from_cookies(&jar, &state.config);
-   let cursor = query.cursor.as_deref().filter(|cursor| acceptable_cursor(cursor));
-   let timeline = query.timeline.as_deref().filter(|timeline| acceptable_timeline(timeline));
+   let cursor = query
+      .cursor
+      .as_deref()
+      .filter(|cursor| acceptable_cursor(cursor));
+   let timeline = query
+      .timeline
+      .as_deref()
+      .filter(|timeline| acceptable_timeline(timeline));
    if let (Some(timeline), Some(cursor)) = (timeline, cursor) {
       let page = load_timeline(&state, timeline, Some(cursor)).await?;
       let more = page
@@ -49,7 +77,10 @@ async fn story(
          .as_deref()
          .map(|next| more_url(&id, timeline, next));
       if query.scroll.as_deref() == Some("true") {
-         let search = format!("/search?q={}&f=tweets", percent_encoding::utf8_percent_encode(&id, percent_encoding::NON_ALPHANUMERIC));
+         let search = format!(
+            "/search?q={}&f=tweets",
+            percent_encoding::utf8_percent_encode(&id, percent_encoding::NON_ALPHANUMERIC)
+         );
          let fragment = explore_view::render_story_posts(
             &page.tweets,
             &state.config,

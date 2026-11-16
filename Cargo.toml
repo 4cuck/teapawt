@@ -92,6 +92,10 @@ tokio-test = "0.4.5"
 # their stream, as h2 and primp-h2 0.4.18 do. Drop it once a release fixes it.
 [patch.crates-io]
 primp-h2 = { path = "vendor/primp-h2" }
+# xitter-txid 0.2.0 derives the animation key from the wrong key bytes, so the
+# transaction id it mints is one X refuses with a bodyless 404. Settings writes
+# are the calls that notice; see vendor/xitter-txid/README.md.
+xitter-txid = { path = "vendor/xitter-txid" }
 
 [profile.dev]
 opt-level = 1

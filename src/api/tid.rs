@@ -9,38 +9,58 @@ use std::{
    collections::HashMap,
    sync::{
       Arc,
-      atomic::{AtomicU64, Ordering},
+      atomic::{
+         AtomicU64,
+         Ordering,
+      },
    },
-   time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+   time::{
+      Duration,
+      Instant,
+      SystemTime,
+      UNIX_EPOCH,
+   },
 };
 
-use axum::http::{HeaderMap, header};
-use tokio::sync::{Mutex, RwLock};
+use axum::http::{
+   HeaderMap,
+   header,
+};
+use tokio::sync::{
+   Mutex,
+   RwLock,
+};
 use xitter_txid::transaction::ClientTransaction;
 
 use super::{
    ProxyPool,
    auth::SessionPool,
-   http::{Egress, HttpClient},
-   operations::{self, Operations},
+   http::{
+      Egress,
+      HttpClient,
+   },
+   operations::{
+      self,
+      Operations,
+   },
 };
 
 /// Cached transaction ID client that refreshes periodically.
 #[derive(Clone)]
 pub struct TidClient {
-   inner: Arc<RwLock<Option<ClientTransaction>>>,
-   http: HttpClient,
+   inner:        Arc<RwLock<Option<ClientTransaction>>>,
+   http:         HttpClient,
    /// Loads the web client's script chunks from abs.twimg.com.
-   scripts: HttpClient,
-   sessions: SessionPool,
-   proxies: Option<Arc<ProxyPool>>,
-   operations: Operations,
-   last_fetch: Arc<Mutex<Instant>>,
+   scripts:      HttpClient,
+   sessions:     SessionPool,
+   proxies:      Option<Arc<ProxyPool>>,
+   operations:   Operations,
+   last_fetch:   Arc<Mutex<Instant>>,
    /// Unix millis before which `ensure_fresh` can return without locking.
    next_refresh: Arc<AtomicU64>,
-   refused: Arc<RwLock<HashMap<String, Instant>>>,
+   refused:      Arc<RwLock<HashMap<String, Instant>>>,
    /// When GraphQL operations were last read again after an empty answer.
-   rechecked: Arc<Mutex<Option<Instant>>>,
+   rechecked:    Arc<Mutex<Option<Instant>>>,
 }
 
 /// How often to refresh the TID client.
@@ -165,19 +185,31 @@ impl TidClient {
       format!("{method} {path}")
    }
 
-   /// Refresh the TID client if stale. Uses `try_lock` so only one task
-   /// performs the refresh. Concurrent callers skip it and use the existing
-   /// (possibly stale) client.
+   /// Refresh the TID client if stale.
    ///
-   /// Only the very first caller waits for the bootstrap, since there is
-   /// nothing else to serve. Once a client exists, the hourly refresh runs in
-   /// the background so no request pays for two page fetches.
+   /// With no client at all the caller waits for the bootstrap: there is
+   /// nothing to mint an id from, and a request sent without one comes back as
+   /// a bodyless 404 that has nothing to do with the account. Startup warms
+   /// this in the background, but a settings write that arrived in the same
+   /// instant used to skip the wait through `try_lock` and cost its account an
+   /// hour of being believed refused.
+   ///
+   /// Once a client exists the hourly refresh runs in the background so no
+   /// request pays for two page fetches; concurrent callers use the existing
+   /// (possibly stale) client.
    async fn ensure_fresh(&self) {
       if now_millis() < self.next_refresh.load(Ordering::Relaxed) {
          return;
       }
-      let Ok(mut last) = self.last_fetch.try_lock() else {
-         return; // another task is already refreshing
+
+      let bootstrapping = self.inner.read().await.is_none();
+      let mut last = if bootstrapping {
+         self.last_fetch.lock().await
+      } else {
+         match self.last_fetch.try_lock() {
+            Ok(last) => last,
+            Err(_) => return, // another task is already refreshing
+         }
       };
 
       if last.elapsed() < REFRESH_INTERVAL {
@@ -221,7 +253,8 @@ impl TidClient {
          Ok(_) => {
             *last = Instant::now();
             next_refresh.store(
-               now_millis().saturating_add(u64::try_from(REFRESH_INTERVAL.as_millis()).unwrap_or(0)),
+               now_millis()
+                  .saturating_add(u64::try_from(REFRESH_INTERVAL.as_millis()).unwrap_or(0)),
                Ordering::Relaxed,
             );
             tracing::info!("TID client refreshed");
@@ -310,7 +343,7 @@ impl TidClient {
       );
       let egress = Egress {
          session: session_id,
-         proxy: self
+         proxy:   self
             .proxies
             .as_ref()
             .map(|pool| pool.for_session(session_id)),

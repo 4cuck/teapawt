@@ -1,8 +1,19 @@
 use super::tweet::parse_tweet_object;
 use crate::{
-   api::schema::{ConversationData, InstructionType},
-   error::{Error, Result},
-   types::{Chain, Conversation, PaginatedResult, Tweet},
+   api::schema::{
+      ConversationData,
+      InstructionType,
+   },
+   error::{
+      Error,
+      Result,
+   },
+   types::{
+      Chain,
+      Conversation,
+      PaginatedResult,
+      Tweet,
+   },
 };
 
 /// Parse a conversation from `TweetDetail` response.

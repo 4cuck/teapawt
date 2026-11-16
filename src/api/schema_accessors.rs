@@ -1,5 +1,11 @@
 use super::{
-   BindingValues, CardData, EditControl, MediaItem, TweetCore, TweetLegacy, UserData,
+   BindingValues,
+   CardData,
+   EditControl,
+   MediaItem,
+   TweetCore,
+   TweetLegacy,
+   UserData,
    parse_twitter_time,
 };
 

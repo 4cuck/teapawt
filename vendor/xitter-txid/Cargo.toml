@@ -1,0 +1,38 @@
+[package]
+name        = "xitter-txid"
+version     = "0.2.0"
+edition     = "2024"
+description = "Generate Xitter client transaction IDs."
+authors     = [ "Amaan Qureshi <contact@amaanq.com>" ]
+license     = "MIT"
+repository  = "https://github.com/amaanq/xitter-txid"
+keywords    = [ "twitter", "x", "api", "transaction-id" ]
+categories  = [ "api-bindings", "web-programming" ]
+
+# Patched copy, see README.md. The only change is in `compute_animation_key`.
+[dependencies]
+data-encoding = "2.11.1"
+hmac-sha256   = "1.1.14"
+
+[lints.clippy]
+cargo    = { level = "warn", priority = -1 }
+nursery  = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+blanket_clippy_restriction_lints = "allow"
+restriction                      = { level = "warn", priority = -1 }
+
+arbitrary_source_item_ordering  = "allow"
+arithmetic_side_effects         = "allow"
+default_numeric_fallback        = "allow"
+error_impl_error                = "allow"
+float_arithmetic                = "allow"
+implicit_return                 = "allow"
+indexing_slicing                = "allow"
+integer_division_remainder_used = "allow"
+little_endian_bytes             = "allow"
+partial_pub_fields              = "allow"
+question_mark_used              = "allow"
+separated_literal_suffix        = "allow"
+single_call_fn                  = "allow"
+string_slice                    = "allow"

@@ -1,7 +1,13 @@
 use super::tweet::parse_tweet_object;
 use crate::{
-   api::schema::{EditHistoryData, InstructionType},
-   error::{Error, Result},
+   api::schema::{
+      EditHistoryData,
+      InstructionType,
+   },
+   error::{
+      Error,
+      Result,
+   },
    types::EditHistory,
 };
 

@@ -246,3 +246,16 @@
   outline-offset: 2px;
   border-radius: .2rem;
 }
+
+.import-nav-row {
+  display: flex;
+  gap: 1.5rem;
+  font-size: 13px;
+  margin-top: .5rem;
+}
+.import-nav-row a {
+  color: var(--accent);
+  text-decoration: none;
+  opacity: .85;
+}
+.import-nav-row a:hover { opacity: 1; }

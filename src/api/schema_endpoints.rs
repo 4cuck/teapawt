@@ -6,7 +6,7 @@ use super::*;
 /// with `errors` alongside or instead of it when something went wrong.
 #[derive(Deserialize)]
 pub struct GqlResponse<T> {
-   pub data: Option<T>,
+   pub data:   Option<T>,
    #[serde(default)]
    pub errors: Vec<ApiError>,
 }
@@ -15,13 +15,13 @@ pub struct GqlResponse<T> {
 #[derive(Deserialize)]
 pub struct ApiError {
    #[serde(default)]
-   pub code: i64,
+   pub code:    i64,
    #[serde(default)]
    pub message: String,
    /// Where in `data` the failed field sits. Empty for an error about the
    /// whole request.
    #[serde(default)]
-   pub path: Vec<serde_json::Value>,
+   pub path:    Vec<serde_json::Value>,
 }
 
 // ── X Spaces ──
@@ -42,17 +42,17 @@ pub struct AudioSpace {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct AudioSpaceMetadata {
-   pub rest_id: Option<String>,
-   pub state: Option<String>,
-   pub title: Option<String>,
+   pub rest_id:                       Option<String>,
+   pub state:                         Option<String>,
+   pub title:                         Option<String>,
    #[serde(default, deserialize_with = "deser_optional_i64")]
-   pub scheduled_start: Option<i64>,
+   pub scheduled_start:               Option<i64>,
    pub is_space_available_for_replay: Option<bool>,
    #[serde(default, deserialize_with = "deser_optional_i64")]
-   pub total_live_listeners: Option<i64>,
+   pub total_live_listeners:          Option<i64>,
    #[serde(default, deserialize_with = "deser_optional_i64")]
-   pub total_replay_watched: Option<i64>,
-   pub creator_results: Option<NestedResult<UserData>>,
+   pub total_replay_watched:          Option<i64>,
+   pub creator_results:               Option<NestedResult<UserData>>,
 }
 
 // ── Live broadcasts ──
@@ -66,18 +66,18 @@ pub struct BroadcastsData {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct BroadcastMetadata {
-   pub status: String,
-   pub image_url: String,
-   pub state: String,
-   pub user_display_name: String,
-   pub twitter_username: String,
+   pub status:               String,
+   pub image_url:            String,
+   pub state:                String,
+   pub user_display_name:    String,
+   pub twitter_username:     String,
    pub available_for_replay: bool,
    #[serde(default)]
-   pub media_key: String,
+   pub media_key:            String,
    #[serde(default, deserialize_with = "deser_optional_i64")]
-   pub total_watching: Option<i64>,
+   pub total_watching:       Option<i64>,
    #[serde(default, deserialize_with = "deser_optional_i64")]
-   pub total_watched: Option<i64>,
+   pub total_watched:        Option<i64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -91,7 +91,7 @@ pub struct LiveStreamStatus {
 pub struct LiveStreamSource {
    #[serde(rename = "noRedirectPlaybackUrl")]
    pub no_redirect_playback_url: Option<String>,
-   pub location: Option<String>,
+   pub location:                 Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -106,9 +106,11 @@ where
    D: Deserializer<'de>,
 {
    Option::<I64OrString>::deserialize(de)?
-      .map(|value| match value {
-         I64OrString::I64(value) => Ok(value),
-         I64OrString::String(value) => value.parse().map_err(D::Error::custom),
+      .map(|value| {
+         match value {
+            I64OrString::I64(value) => Ok(value),
+            I64OrString::String(value) => value.parse().map_err(D::Error::custom),
+         }
       })
       .transpose()
 }
@@ -132,8 +134,8 @@ pub struct TimelineInstructions {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct UserResultData {
-   pub user: Option<NestedResult<UserData>>,
-   pub user_result: Option<NestedResult<UserData>>,
+   pub user:         Option<NestedResult<UserData>>,
+   pub user_result:  Option<NestedResult<UserData>>,
    pub user_results: Option<NestedResult<UserData>>,
 }
 
@@ -143,7 +145,7 @@ pub struct UserResultData {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct UserTimelineData {
-   pub user: Option<TimelineNested>,
+   pub user:        Option<TimelineNested>,
    pub user_result: Option<TimelineNested>,
 }
 
@@ -156,8 +158,8 @@ pub struct TimelineNested {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct TimelineResultData {
-   pub timeline_v2: Option<TimelinePayload>,
-   pub timeline: Option<TimelinePayload>,
+   pub timeline_v2:       Option<TimelinePayload>,
+   pub timeline:          Option<TimelinePayload>,
    pub timeline_response: Option<TimelinePayload>,
 }
 
@@ -204,7 +206,7 @@ impl SearchTimelineData {
 #[serde(default)]
 pub struct ConversationData {
    #[serde(rename = "tweetResult")]
-   pub tweet_result: Option<NestedResult<TweetData>>,
+   pub tweet_result:                             Option<NestedResult<TweetData>>,
    pub threaded_conversation_with_injections_v2: Option<TimelineInstructions>,
 }
 
@@ -221,7 +223,7 @@ pub struct ListTimelineData {
 pub struct ListTimelineNested {
    pub timeline_response: Option<TimelinePayload>,
    /// Current web query `ListLatestTweetsTimeline` nests the posts here.
-   pub tweets_timeline: Option<TimelinePayload>,
+   pub tweets_timeline:   Option<TimelinePayload>,
 }
 
 impl ListTimelineData {
@@ -296,7 +298,7 @@ pub struct ListByIdData {
 #[serde(default)]
 pub struct ListByIdWrapper {
    #[serde(flatten)]
-   pub data: ListData,
+   pub data:   ListData,
    pub result: Option<Box<ListData>>,
 }
 
@@ -363,12 +365,12 @@ pub struct ArticleWrapper {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct InlineArticle {
-   pub rest_id: Option<String>,
-   pub title: Option<String>,
-   pub cover_media: Option<InlineArticleCoverMedia>,
+   pub rest_id:        Option<String>,
+   pub title:          Option<String>,
+   pub cover_media:    Option<InlineArticleCoverMedia>,
    pub media_entities: Option<Vec<ArticleMediaEntry>>,
-   pub metadata: Option<InlineArticleMetadata>,
-   pub content_state: Option<InlineContentState>,
+   pub metadata:       Option<InlineArticleMetadata>,
+   pub content_state:  Option<InlineContentState>,
 }
 
 #[derive(Deserialize, Default)]
@@ -392,7 +394,7 @@ pub struct InlineArticleMetadata {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct InlineContentState {
-   pub blocks: Vec<ArticleBlock>,
+   pub blocks:     Vec<ArticleBlock>,
    #[serde(rename = "entityMap")]
    pub entity_map: Vec<EntityMapEntry>,
 }
@@ -400,20 +402,20 @@ pub struct InlineContentState {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct EntityMapEntry {
-   pub key: String,
+   pub key:   String,
    pub value: ArticleRawEntity,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ArticleBlock {
-   pub text: String,
+   pub text:                String,
    #[serde(rename = "type")]
-   pub block_type: String,
+   pub block_type:          String,
    #[serde(rename = "inlineStyleRanges")]
    pub inline_style_ranges: Vec<ArticleRawStyleRange>,
    #[serde(rename = "entityRanges")]
-   pub entity_ranges: Vec<ArticleRawEntityRange>,
+   pub entity_ranges:       Vec<ArticleRawEntityRange>,
 }
 
 #[derive(Deserialize, Default)]
@@ -421,7 +423,7 @@ pub struct ArticleBlock {
 pub struct ArticleRawStyleRange {
    pub offset: usize,
    pub length: usize,
-   pub style: String,
+   pub style:  String,
 }
 
 #[derive(Deserialize, Default)]
@@ -429,7 +431,7 @@ pub struct ArticleRawStyleRange {
 pub struct ArticleRawEntityRange {
    pub offset: usize,
    pub length: usize,
-   pub key: usize,
+   pub key:    usize,
 }
 
 #[derive(Deserialize, Default)]
@@ -437,18 +439,18 @@ pub struct ArticleRawEntityRange {
 pub struct ArticleRawEntity {
    #[serde(rename = "type")]
    pub entity_type: String,
-   pub data: Option<ArticleRawEntityData>,
+   pub data:        Option<ArticleRawEntityData>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ArticleRawEntityData {
-   pub url: Option<String>,
-   pub markdown: Option<String>,
+   pub url:         Option<String>,
+   pub markdown:    Option<String>,
    #[serde(rename = "mediaItems")]
    pub media_items: Option<Vec<ArticleRawMediaItem>>,
    #[serde(rename = "tweetId")]
-   pub tweet_id: Option<String>,
+   pub tweet_id:    Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -461,7 +463,7 @@ pub struct ArticleRawMediaItem {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ArticleMediaEntry {
-   pub media_id: Option<String>,
+   pub media_id:   Option<String>,
    pub media_info: Option<ArticleMediaInfo>,
 }
 
@@ -469,9 +471,9 @@ pub struct ArticleMediaEntry {
 #[serde(default)]
 pub struct ArticleMediaInfo {
    #[expect(clippy::pub_underscore_fields, reason = "serde field name matches API")]
-   pub __typename: Option<String>,
+   pub __typename:       Option<String>,
    pub original_img_url: Option<String>,
-   pub variants: Option<Vec<ArticleMediaVariant>>,
+   pub variants:         Option<Vec<ArticleMediaVariant>>,
 }
 
 #[derive(Deserialize, Default)]

@@ -1,12 +1,25 @@
-//! Donation checkouts. Provider secrets are read from config and never rendered.
+//! Donation checkouts. Provider secrets are read from config and never
+//! rendered.
 
 use axum::{
-   Form, Router,
+   Form,
+   Router,
    body::Bytes,
    extract::State,
-   http::{HeaderMap, StatusCode, header},
-   response::{Html, IntoResponse, Response},
-   routing::{get, post},
+   http::{
+      HeaderMap,
+      StatusCode,
+      header,
+   },
+   response::{
+      Html,
+      IntoResponse,
+      Response,
+   },
+   routing::{
+      get,
+      post,
+   },
 };
 use axum_extra::extract::CookieJar;
 use serde::Deserialize;
@@ -14,9 +27,15 @@ use serde_json::Value;
 
 use crate::{
    AppState,
-   donations::{self, PayError},
+   donations::{
+      self,
+      PayError,
+   },
    types::Prefs,
-   views::{donate as donate_view, layout::PageLayout},
+   views::{
+      donate as donate_view,
+      layout::PageLayout,
+   },
 };
 
 pub fn router() -> Router<AppState> {
@@ -30,19 +49,19 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Debug, Deserialize)]
 struct DonateForm {
-   amount: String,
+   amount:   String,
    provider: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct DonateQuery {
    canceled: Option<String>,
-   error: Option<String>,
+   error:    Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ThanksQuery {
-   provider: Option<String>,
+   provider:   Option<String>,
    session_id: Option<String>,
    payment_id: Option<String>,
 }
@@ -61,9 +80,15 @@ async fn donate_page(
    .await
 }
 
-async fn page(state: &AppState, jar: &CookieJar, message: Option<&str>, canceled: bool) -> Response {
+async fn page(
+   state: &AppState,
+   jar: &CookieJar,
+   message: Option<&str>,
+   canceled: bool,
+) -> Response {
    let prefs = Prefs::from_cookies(jar, &state.config);
-   let progress = donations::month_progress(&state.donations, state.config.donations.goal_cents).await;
+   let progress =
+      donations::month_progress(&state.donations, state.config.donations.goal_cents).await;
    let donations = &state.config.donations;
    let content = donate_view::render_donate_page(
       &progress,
@@ -97,16 +122,21 @@ async fn start_donation(
    };
    let provider = form.provider.as_str();
    if !donations::provider_ready(&state.config.donations, provider) {
-      return page(&state, &jar, Some("That payment method is not available."), false).await;
+      return page(
+         &state,
+         &jar,
+         Some("That payment method is not available."),
+         false,
+      )
+      .await;
    }
    let id = donations::new_donation_id();
    let base = crate::utils::host::current_origin(state.config.url_prefix());
    let cancel = format!("{base}/donate?canceled=1");
    let result = match provider {
       "stripe" => {
-         let success = format!(
-            "{base}/donate/thanks?provider=stripe&session_id={{CHECKOUT_SESSION_ID}}"
-         );
+         let success =
+            format!("{base}/donate/thanks?provider=stripe&session_id={{CHECKOUT_SESSION_ID}}");
          donations::stripe_checkout(
             &state.config.donations.stripe.secret_key,
             &id,
@@ -116,25 +146,29 @@ async fn start_donation(
          )
          .await
       },
-      "nowpayments" => donations::nowpayments_invoice(
-         &state.config.donations.nowpayments.api_key,
-         &id,
-         cents,
-         "Donation to nitter.cf",
-         &format!("{base}/donate/nowpayments/ipn"),
-         &format!("{base}/donate/thanks?provider=nowpayments"),
-         &cancel,
-      )
-      .await,
-      "lzt" => donations::lzt_invoice(
-         &state.config.donations.lzt,
-         &id,
-         cents,
-         "Donation to nitter.cf",
-         &format!("{base}/donate/thanks?provider=lzt&payment_id={id}"),
-         &format!("{base}/donate/lzt/callback"),
-      )
-      .await,
+      "nowpayments" => {
+         donations::nowpayments_invoice(
+            &state.config.donations.nowpayments.api_key,
+            &id,
+            cents,
+            "Donation to nitter.cf",
+            &format!("{base}/donate/nowpayments/ipn"),
+            &format!("{base}/donate/thanks?provider=nowpayments"),
+            &cancel,
+         )
+         .await
+      },
+      "lzt" => {
+         donations::lzt_invoice(
+            &state.config.donations.lzt,
+            &id,
+            cents,
+            "Donation to nitter.cf",
+            &format!("{base}/donate/thanks?provider=lzt&payment_id={id}"),
+            &format!("{base}/donate/lzt/callback"),
+         )
+         .await
+      },
       _ => Err(PayError("unknown provider".into())),
    };
    match result {
@@ -157,13 +191,20 @@ async fn start_donation(
 
 fn checkout_handoff(state: &AppState, jar: &CookieJar, url: &str) -> Response {
    let prefs = Prefs::from_cookies(jar, &state.config);
-   let markup = PageLayout::new(&state.config, "Checkout", donate_view::render_checkout_handoff(url))
-      .prefs(&prefs)
-      .referer("/donate")
-      .render();
+   let markup = PageLayout::new(
+      &state.config,
+      "Checkout",
+      donate_view::render_checkout_handoff(url),
+   )
+   .prefs(&prefs)
+   .referer("/donate")
+   .render();
    let mut response = Html(markup.into_string()).into_response();
    let headers = response.headers_mut();
-   headers.insert(header::CACHE_CONTROL, header::HeaderValue::from_static("private, no-store"));
+   headers.insert(
+      header::CACHE_CONTROL,
+      header::HeaderValue::from_static("private, no-store"),
+   );
    if let Ok(refresh) = header::HeaderValue::from_str(&format!("0; url={url}")) {
       headers.insert(header::REFRESH, refresh);
    }
@@ -179,13 +220,13 @@ async fn thanks(
    let mut confirmed = false;
    if provider == "stripe"
       && let Some(session_id) = query.session_id.as_deref()
-      && let Ok(Some((id, cents, reference))) = donations::stripe_paid_session(
-         &state.config.donations.stripe.secret_key,
-         session_id,
-      )
-      .await
+      && let Ok(Some((id, cents, reference))) =
+         donations::stripe_paid_session(&state.config.donations.stripe.secret_key, session_id).await
    {
-      state.donations.mark_paid(&id, "stripe", &reference, cents).await;
+      state
+         .donations
+         .mark_paid(&id, "stripe", &reference, cents)
+         .await;
       confirmed = true;
    }
    if provider == "lzt"
@@ -211,7 +252,11 @@ async fn thanks(
    Html(markup.into_string()).into_response()
 }
 
-async fn stripe_webhook(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+async fn stripe_webhook(
+   State(state): State<AppState>,
+   headers: HeaderMap,
+   body: Bytes,
+) -> Response {
    let secret = &state.config.donations.stripe.webhook_secret;
    if secret.is_empty() {
       return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -240,13 +285,20 @@ async fn stripe_webhook(State(state): State<AppState>, headers: HeaderMap, body:
    let cents = session["amount_total"].as_i64().unwrap_or(0);
    let reference = session["id"].as_str().unwrap_or("");
    if donations::valid_donation_id(id) && cents > 0 && !reference.is_empty() {
-      state.donations.mark_paid(id, "stripe", reference, cents).await;
+      state
+         .donations
+         .mark_paid(id, "stripe", reference, cents)
+         .await;
       tracing::info!(donation_id = id, cents, "stripe donation paid");
    }
    StatusCode::OK.into_response()
 }
 
-async fn nowpayments_ipn(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+async fn nowpayments_ipn(
+   State(state): State<AppState>,
+   headers: HeaderMap,
+   body: Bytes,
+) -> Response {
    let secret = &state.config.donations.nowpayments.ipn_secret;
    if secret.is_empty() {
       return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -302,7 +354,10 @@ async fn lzt_callback(State(state): State<AppState>, headers: HeaderMap, body: B
    } else {
       &payload
    };
-   let status = invoice["status"].as_str().unwrap_or("").to_ascii_lowercase();
+   let status = invoice["status"]
+      .as_str()
+      .unwrap_or("")
+      .to_ascii_lowercase();
    if status != "paid" {
       return StatusCode::OK.into_response();
    }
@@ -317,7 +372,10 @@ async fn lzt_callback(State(state): State<AppState>, headers: HeaderMap, body: B
       cents = state.donations.cents_for(id).await.unwrap_or(0);
    }
    if donations::valid_donation_id(id) && cents > 0 {
-      state.donations.mark_paid(id, "lzt", &reference, cents).await;
+      state
+         .donations
+         .mark_paid(id, "lzt", &reference, cents)
+         .await;
       tracing::info!(donation_id = id, cents, "lzt donation paid");
    }
    StatusCode::OK.into_response()

@@ -2,9 +2,17 @@
 
 use std::time::Duration;
 
-use tokio::time::{sleep, timeout};
+use tokio::time::{
+   sleep,
+   timeout,
+};
 
-use super::{ApiClient, client::search_answer_is_empty, endpoints, schema::SearchTimelineData};
+use super::{
+   ApiClient,
+   client::search_answer_is_empty,
+   endpoints,
+   schema::SearchTimelineData,
+};
 use crate::error::Result;
 
 const CHECK_GAP: Duration = Duration::from_secs(10);
@@ -50,14 +58,15 @@ impl ApiClient {
    async fn search_as(&self, session_id: i64) -> Result<bool> {
       let api = endpoints::GRAPH_SEARCH_TIMELINE;
       let session = self.sessions.acquire_id(session_id, api).await?;
-      self.graphql_request_inner::<SearchTimelineData>(
-         &session,
-         api,
-         &endpoints::search_vars("news", None, "Latest"),
-         endpoints::SEARCH_FEATURES,
-         None,
-      )
-      .await
-      .map(|(_, bytes)| !search_answer_is_empty(&bytes))
+      self
+         .graphql_request_inner::<SearchTimelineData>(
+            &session,
+            api,
+            &endpoints::search_vars("news", None, "Latest"),
+            endpoints::SEARCH_FEATURES,
+            None,
+         )
+         .await
+         .map(|(_, bytes)| !search_answer_is_empty(&bytes))
    }
 }

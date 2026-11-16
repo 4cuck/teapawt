@@ -5,34 +5,40 @@
 
 use serde_json::Value;
 
-use super::{explore::parse_explore, tweet::parse_tweet_object};
+use super::{
+   explore::parse_explore,
+   tweet::parse_tweet_object,
+};
 use crate::{
    api::schema::TweetData,
-   types::{ExploreItem, Tweet},
+   types::{
+      ExploreItem,
+      Tweet,
+   },
 };
 
 #[derive(Clone, Debug, Default)]
 pub struct GameSide {
-   pub abbr: String,
-   pub name: String,
-   pub score: String,
+   pub abbr:   String,
+   pub name:   String,
+   pub score:  String,
    pub record: String,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct NflGame {
-   pub id: String,
-   pub status: String,
-   pub away: GameSide,
-   pub home: GameSide,
+   pub id:            String,
+   pub status:        String,
+   pub away:          GameSide,
+   pub home:          GameSide,
    pub highlight_ids: Vec<String>,
 }
 
 /// One row on the Sports tab. `id` is the game rest id.
 #[derive(Clone, Debug)]
 pub struct ScheduledGame {
-   pub id: String,
-   pub label: String,
+   pub id:     String,
+   pub label:  String,
    pub status: String,
 }
 
@@ -63,7 +69,9 @@ fn parse_known_game(game: &Value) -> NflGame {
          .and_then(string_leaf)
          .as_deref()
          .unwrap_or(""),
-      score.and_then(|score| score.get("quarter")).and_then(Value::as_i64),
+      score
+         .and_then(|score| score.get("quarter"))
+         .and_then(Value::as_i64),
       score
          .and_then(|score| score.get("clock"))
          .and_then(string_leaf)
@@ -81,10 +89,7 @@ fn parse_known_game(game: &Value) -> NflGame {
    let mut ids = Vec::new();
    walk_game(game, &mut NflGame::default(), &mut Vec::new(), &mut ids);
    NflGame {
-      id: game
-         .get("rest_id")
-         .and_then(snowflake)
-         .unwrap_or_default(),
+      id: game.get("rest_id").and_then(snowflake).unwrap_or_default(),
       status,
       away,
       home,
@@ -218,10 +223,7 @@ pub fn parse_tweets_by_ids(data: &Value, order: &[String]) -> Vec<Tweet> {
    for tweet in tweets {
       by_id.insert(tweet.id.to_string(), tweet);
    }
-   order
-      .iter()
-      .filter_map(|id| by_id.remove(id))
-      .collect()
+   order.iter().filter_map(|id| by_id.remove(id)).collect()
 }
 
 /// Posts already expanded inside a game timeline.
@@ -229,9 +231,11 @@ pub fn tweets_in_timeline(data: &Value) -> Vec<Tweet> {
    parse_explore(data)
       .items
       .into_iter()
-      .filter_map(|item| match item {
-         ExploreItem::Tweet(tweet) => Some(*tweet),
-         ExploreItem::Header(_) | ExploreItem::Trend(_) => None,
+      .filter_map(|item| {
+         match item {
+            ExploreItem::Tweet(tweet) => Some(*tweet),
+            ExploreItem::Header(_) | ExploreItem::Trend(_) => None,
+         }
       })
       .collect()
 }
@@ -251,7 +255,10 @@ fn walk_game(value: &Value, game: &mut NflGame, sides: &mut Vec<GameSide>, ids: 
          }
          if let Some(side) = side_from(object) {
             let key = format!("{}:{}", side.abbr, side.score);
-            if !sides.iter().any(|seen| format!("{}:{}", seen.abbr, seen.score) == key) {
+            if !sides
+               .iter()
+               .any(|seen| format!("{}:{}", seen.abbr, seen.score) == key)
+            {
                sides.push(side);
             }
          }
@@ -269,27 +276,28 @@ fn walk_game(value: &Value, game: &mut NflGame, sides: &mut Vec<GameSide>, ids: 
 }
 
 fn side_from(object: &serde_json::Map<String, Value>) -> Option<GameSide> {
-   let abbr = first_string(
-      object,
-      &[
-         "abbreviation",
-         "abbr",
-         "team_abbreviation",
-         "short_name",
-         "tricode",
-      ],
-   )?;
+   let abbr = first_string(object, &[
+      "abbreviation",
+      "abbr",
+      "team_abbreviation",
+      "short_name",
+      "tricode",
+   ])?;
    if abbr.len() < 2 || abbr.len() > 4 || !abbr.chars().all(|ch| ch.is_ascii_uppercase()) {
       return None;
    }
    let score = first_score(object)?;
-   let name = first_string(
-      object,
-      &["team_name", "teamName", "full_name", "fullName", "name", "location"],
-   )
+   let name = first_string(object, &[
+      "team_name",
+      "teamName",
+      "full_name",
+      "fullName",
+      "name",
+      "location",
+   ])
    .unwrap_or_default();
-   let record = first_string(object, &["record", "overall_record", "overallRecord"])
-      .unwrap_or_default();
+   let record =
+      first_string(object, &["record", "overall_record", "overallRecord"]).unwrap_or_default();
    Some(GameSide {
       abbr,
       name,
@@ -299,7 +307,14 @@ fn side_from(object: &serde_json::Map<String, Value>) -> Option<GameSide> {
 }
 
 fn status_text(object: &serde_json::Map<String, Value>) -> Option<String> {
-   for key in ["status", "game_status", "gameStatus", "display_status", "displayStatus", "state"] {
+   for key in [
+      "status",
+      "game_status",
+      "gameStatus",
+      "display_status",
+      "displayStatus",
+      "state",
+   ] {
       if let Some(text) = object.get(key).and_then(string_leaf) {
          let lower = text.to_ascii_lowercase();
          if lower.contains("final")
@@ -317,7 +332,13 @@ fn status_text(object: &serde_json::Map<String, Value>) -> Option<String> {
 }
 
 fn highlight_id(object: &serde_json::Map<String, Value>) -> Option<String> {
-   for key in ["tweet_id", "tweetId", "focalTweetId", "status_id", "statusId"] {
+   for key in [
+      "tweet_id",
+      "tweetId",
+      "focalTweetId",
+      "status_id",
+      "statusId",
+   ] {
       if let Some(id) = object.get(key).and_then(snowflake) {
          return Some(id);
       }
@@ -328,7 +349,11 @@ fn highlight_id(object: &serde_json::Map<String, Value>) -> Option<String> {
       .and_then(Value::as_str)
       .unwrap_or("");
    if kind.contains("Highlight") || kind.contains("Play") {
-      if let Some(id) = object.get("rest_id").or_else(|| object.get("id")).and_then(snowflake) {
+      if let Some(id) = object
+         .get("rest_id")
+         .or_else(|| object.get("id"))
+         .and_then(snowflake)
+      {
          return Some(id);
       }
    }
@@ -346,7 +371,9 @@ fn collect_tweets(value: &Value, tweets: &mut Vec<Tweet>) {
          if let Some(result) = object.get("result").or_else(|| object.get("tweet")) {
             if let Ok(data) = serde_json::from_value::<TweetData>(result.clone()) {
                if let Ok(tweet) = parse_tweet_object(&data) {
-                  if tweet.available && tweet.id > 0 && !tweets.iter().any(|seen| seen.id == tweet.id)
+                  if tweet.available
+                     && tweet.id > 0
+                     && !tweets.iter().any(|seen| seen.id == tweet.id)
                   {
                      tweets.push(tweet);
                      return;
@@ -400,14 +427,16 @@ fn string_leaf(value: &Value) -> Option<String> {
             Some(text.to_owned())
          }
       },
-      Value::Object(object) => object
-         .get("text")
-         .or_else(|| object.get("label"))
-         .or_else(|| object.get("name"))
-         .and_then(Value::as_str)
-         .map(str::trim)
-         .filter(|text| !text.is_empty())
-         .map(str::to_owned),
+      Value::Object(object) => {
+         object
+            .get("text")
+            .or_else(|| object.get("label"))
+            .or_else(|| object.get("name"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+      },
       Value::Null | Value::Bool(_) | Value::Number(_) | Value::Array(_) => None,
    }
 }

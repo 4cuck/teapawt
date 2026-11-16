@@ -2,27 +2,63 @@ use std::cmp;
 
 use axum::{
    Router,
-   extract::{Path, Query, State},
-   response::{Html, IntoResponse as _, Response},
+   extract::{
+      Path,
+      Query,
+      State,
+   },
+   response::{
+      Html,
+      IntoResponse as _,
+      Response,
+   },
    routing::get,
 };
 use axum_extra::extract::CookieJar;
-use maud::{PreEscaped, html};
+use maud::{
+   PreEscaped,
+   html,
+};
 use serde::Deserialize;
 
 use super::{
+   admin_stats,
    helpers,
    helpers::extract_timeline,
-   search::{self, SearchQuery},
+   search::{
+      self,
+      SearchQuery,
+   },
 };
 use crate::{
    AppState,
-   api::{budget, recheck_empty},
-   cache::{Hit, keys as cache_keys, ttl},
-   error::{Error, Result},
-   types::{Prefs, Profile, Timeline, TimelineKind, User},
+   api::{
+      budget,
+      recheck_empty,
+   },
+   cache::{
+      Hit,
+      keys as cache_keys,
+      ttl,
+   },
+   error::{
+      Error,
+      Result,
+   },
+   types::{
+      Prefs,
+      Profile,
+      Timeline,
+      TimelineKind,
+      User,
+   },
    utils::formatters,
-   views::{layout, profile, search::render_search_panel_with_action, timeline},
+   views::{
+      layout,
+      profile,
+      search::render_search_panel_with_action,
+      timeline,
+   },
 };
 
 /// Below this many accounts with `UserTweets` left, a stale profile is shown
@@ -240,15 +276,15 @@ fn parse_usernames(name: &str) -> Option<Vec<String>> {
 
 #[derive(Debug, Deserialize)]
 pub struct TimelineQuery {
-   pub tab: Option<String>,
+   pub tab:    Option<String>,
    pub cursor: Option<String>,
-   pub view: Option<String>,
+   pub view:   Option<String>,
    /// For AJAX infinite scroll requests - returns only tweet HTML.
    pub scroll: Option<String>,
    /// Posts menu: `all`, `posts`, or `highlights`.
    pub filter: Option<String>,
    /// Posts menu sort: `recent` or `popular`.
-   pub sort: Option<String>,
+   pub sort:   Option<String>,
 }
 
 fn posts_filter(raw: Option<&str>) -> &'static str {
@@ -274,7 +310,10 @@ pub fn router() -> Router<AppState> {
       .route("/{username}/reposts", get(user_reposts))
       .route("/{username}/articles", get(user_articles))
       .route("/{username}/media", get(user_media))
-      .route("/{username}/search", get(user_search).post(user_search_submit))
+      .route(
+         "/{username}/search",
+         get(user_search).post(user_search_submit),
+      )
 }
 
 async fn filtered_posts(
@@ -310,16 +349,17 @@ async fn filtered_posts(
       };
    }
 
-   let (user, (timeline_result, photo_rail)) =
-      helpers::with_user(state, username, |user_id| async move {
+   let (user, (timeline_result, photo_rail)) = helpers::with_user(state, username, |user_id| {
+      async move {
          let posts = filtered_timeline(state, username, &user_id, cursor, filter, sort);
          if cursor.is_some() {
             (posts.await, Vec::new())
          } else {
             helpers::beside_rail(posts, helpers::photo_rail(state, username, &user_id)).await
          }
-      })
-      .await?;
+      }
+   })
+   .await?;
    let promised = counts_promise_posts(&user, TimelineKind::Tweets, filter);
    let timeline_result = if cursor.is_none() && promised {
       recheck_empty(timeline_result, || {
@@ -495,9 +535,7 @@ async fn user_timeline(
       .await;
    }
 
-   if is_scroll
-      && let Some(cursor) = query.cursor.as_deref()
-   {
+   if is_scroll && let Some(cursor) = query.cursor.as_deref() {
       let user_id = helpers::user_id(&state, &username).await?;
       return match state.api.get_user_tweets(&user_id, Some(cursor)).await {
          Ok(data) => {
@@ -673,16 +711,17 @@ async fn user_tab_handler(
       };
    }
 
-   let (user, (timeline_result, photo_rail)) =
-      helpers::with_user(state, username, |user_id| async move {
+   let (user, (timeline_result, photo_rail)) = helpers::with_user(state, username, |user_id| {
+      async move {
          let timeline = tab_timeline(state, username, &user_id, cursor, tab, cache_kind);
          if include_photo_rail && cursor.is_none() {
             helpers::beside_rail(timeline, helpers::photo_rail(state, username, &user_id)).await
          } else {
             (timeline.await, Vec::new())
          }
-      })
-      .await?;
+      }
+   })
+   .await?;
    let timeline_result = if cursor.is_none() && counts_promise_posts(&user, tab, "") {
       recheck_empty(timeline_result, || {
          refresh_tab(state, username, &user.id, tab, cache_kind)
@@ -784,8 +823,10 @@ async fn tab_timeline(
       let user_id = user_id.to_owned();
       let username = username.to_owned();
       let cache_kind = cache_kind.to_owned();
-      move |state| async move {
-         let _ = refresh_tab(&state, &username, &user_id, tab, &cache_kind).await;
+      move |state| {
+         async move {
+            let _ = refresh_tab(&state, &username, &user_id, tab, &cache_kind).await;
+         }
       }
    }) {
       return Ok(cached);
@@ -982,13 +1023,18 @@ async fn user_search(
                &prefs,
                None,
             );
-            Ok(Html(content.into_string()).into_response())
+            Ok(admin_stats::search_result(
+               Html(content.into_string()).into_response(),
+               tweets.iter().all(Vec::is_empty),
+            ))
          },
-         Err(err) => Ok(helpers::api_error_titled(
-            &state.config,
-            &err,
-            "Search Error",
-         )),
+         Err(err) => {
+            Ok(helpers::api_error_titled(
+               &state.config,
+               &err,
+               "Search Error",
+            ))
+         },
       };
    }
 
@@ -1074,13 +1120,18 @@ async fn user_search(
             .canonical(&canonical)
             .referer(&referer)
             .render();
-         Ok(Html(markup.into_string()).into_response())
+         Ok(admin_stats::search_result(
+            Html(markup.into_string()).into_response(),
+            tweets.iter().all(Vec::is_empty),
+         ))
       },
-      Err(err) => Ok(helpers::api_error_titled(
-         &state.config,
-         &err,
-         "Search Error",
-      )),
+      Err(err) => {
+         Ok(helpers::api_error_titled(
+            &state.config,
+            &err,
+            "Search Error",
+         ))
+      },
    }
 }
 
@@ -1123,8 +1174,8 @@ async fn multi_user_timeline(
          // has to be carried over or these fan-out calls go unbilled.
          tokio::spawn(budget::scoped(async move {
             let api = &state.api;
-            let (_, timeline) = helpers::with_user(&state, &username, |user_id| async move {
-               api.get_user_tweets(&user_id, None).await
+            let (_, timeline) = helpers::with_user(&state, &username, |user_id| {
+               async move { api.get_user_tweets(&user_id, None).await }
             })
             .await
             .ok()?;
@@ -1185,7 +1236,11 @@ async fn multi_user_timeline(
 
 #[cfg(test)]
 mod counts_tests {
-   use super::{TimelineKind, User, counts_promise_posts};
+   use super::{
+      TimelineKind,
+      User,
+      counts_promise_posts,
+   };
 
    fn user(tweets: i64, media: i64) -> User {
       User {
@@ -1207,14 +1262,22 @@ mod counts_tests {
    #[test]
    fn tabs_without_a_count_believe_x() {
       let busy = user(2_236, 765);
-      assert!(!counts_promise_posts(&busy, TimelineKind::Tweets, "highlights"));
+      assert!(!counts_promise_posts(
+         &busy,
+         TimelineKind::Tweets,
+         "highlights"
+      ));
       assert!(!counts_promise_posts(&busy, TimelineKind::Reposts, ""));
       assert!(!counts_promise_posts(&busy, TimelineKind::Articles, ""));
    }
 
    #[test]
    fn a_zero_count_believes_x() {
-      assert!(!counts_promise_posts(&user(0, 0), TimelineKind::Replies, ""));
+      assert!(!counts_promise_posts(
+         &user(0, 0),
+         TimelineKind::Replies,
+         ""
+      ));
       assert!(!counts_promise_posts(&user(40, 0), TimelineKind::Media, ""));
    }
 

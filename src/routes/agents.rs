@@ -4,32 +4,52 @@
 //! server. Agents read pages as markdown, or call the read-only MCP endpoint.
 
 use axum::{
-   Json, Router,
+   Json,
+   Router,
    body::Body,
-   extract::{Request, State},
-   http::{HeaderMap, HeaderValue, StatusCode, header, uri::PathAndQuery},
+   extract::{
+      Request,
+      State,
+   },
+   http::{
+      HeaderMap,
+      HeaderValue,
+      StatusCode,
+      header,
+      uri::PathAndQuery,
+   },
    middleware::Next,
-   response::{IntoResponse, Response},
-   routing::{get, post},
+   response::{
+      IntoResponse,
+      Response,
+   },
+   routing::{
+      get,
+      post,
+   },
 };
 use http_body_util::BodyExt as _;
-use serde_json::{Value, json};
+use serde_json::{
+   Value,
+   json,
+};
 
-use crate::{AppState, error::Error, types::Tweet};
+use crate::{
+   AppState,
+   error::Error,
+   types::Tweet,
+};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const DISCOVERY_LINKS: &str = "\
-</.well-known/api-catalog>; rel=\"api-catalog\", \
-</openapi.json>; rel=\"service-desc\", \
-</llms.txt>; rel=\"service-doc\", \
-</auth.md>; rel=\"describedby\", \
-</.well-known/mcp/server-card.json>; rel=\"describedby\", \
-</.well-known/agent-card.json>; rel=\"describedby\", \
-</.well-known/agent-skills/index.json>; rel=\"describedby\", \
-</.well-known/ai-catalog.json>; rel=\"describedby\", \
-</.well-known/poppy.json>; rel=\"describedby\", \
-</.well-known/http-message-signatures-directory>; rel=\"describedby\"";
+const DISCOVERY_LINKS: &str =
+   "\
+</.well-known/api-catalog>; rel=\"api-catalog\", </openapi.json>; rel=\"service-desc\", \
+    </llms.txt>; rel=\"service-doc\", </auth.md>; rel=\"describedby\", \
+    </.well-known/mcp/server-card.json>; rel=\"describedby\", </.well-known/agent-card.json>; \
+    rel=\"describedby\", </.well-known/agent-skills/index.json>; rel=\"describedby\", \
+    </.well-known/ai-catalog.json>; rel=\"describedby\", </.well-known/poppy.json>; \
+    rel=\"describedby\", </.well-known/http-message-signatures-directory>; rel=\"describedby\"";
 
 const SKILL_MD: &str = r#"# Read public posts on teapawt
 
@@ -66,16 +86,28 @@ pub fn router() -> Router<AppState> {
       .route("/.well-known/mcp/server-card.json", get(mcp_card))
       .route("/.well-known/agent-card.json", get(agent_card))
       .route("/.well-known/agent-skills/index.json", get(skills_index))
-      .route("/.well-known/agent-skills/read-teapawt/SKILL.md", get(skill_md))
+      .route(
+         "/.well-known/agent-skills/read-teapawt/SKILL.md",
+         get(skill_md),
+      )
       .route("/.well-known/ai-catalog.json", get(ai_catalog))
       .route("/.well-known/poppy.json", get(poppy))
       .route(
          "/.well-known/http-message-signatures-directory",
          get(signature_directory),
       )
-      .route("/.well-known/oauth-protected-resource", get(protected_resource))
-      .route("/.well-known/oauth-authorization-server", get(authorization_server))
-      .route("/.well-known/openid-configuration", get(authorization_server))
+      .route(
+         "/.well-known/oauth-protected-resource",
+         get(protected_resource),
+      )
+      .route(
+         "/.well-known/oauth-authorization-server",
+         get(authorization_server),
+      )
+      .route(
+         "/.well-known/openid-configuration",
+         get(authorization_server),
+      )
       .route("/.well-known/jwks.json", get(jwks))
       .route("/oauth/authorize", get(oauth_public))
       .route("/oauth/token", get(oauth_public).post(oauth_public))
@@ -83,14 +115,14 @@ pub fn router() -> Router<AppState> {
       .route("/a2a", post(a2a).options(preflight))
 }
 
-/// Serve markdown when the client asks for it, and advertise discovery documents.
+/// Serve markdown when the client asks for it, and advertise discovery
+/// documents.
 pub async fn negotiate(mut request: Request, next: Next) -> Response {
    let markdown = wants_markdown(request.headers()) || rewrite_index_md(&mut request);
    let mut response = next.run(request).await;
-   response.headers_mut().insert(
-      header::LINK,
-      HeaderValue::from_static(DISCOVERY_LINKS),
-   );
+   response
+      .headers_mut()
+      .insert(header::LINK, HeaderValue::from_static(DISCOVERY_LINKS));
    // Caches must not reuse an HTML page for a markdown request.
    if is_html(response.headers()) {
       append_vary(response.headers_mut());
@@ -146,7 +178,8 @@ fn strip_index_md(path: &str) -> Option<String> {
    if path == "/index.md" {
       return Some("/".to_owned());
    }
-   path.strip_suffix("/index.md")
+   path
+      .strip_suffix("/index.md")
       .filter(|rest| !rest.is_empty())
       .map(str::to_owned)
 }
@@ -159,7 +192,10 @@ fn is_html(headers: &HeaderMap) -> bool {
 }
 
 fn append_vary(headers: &mut HeaderMap) {
-   let Some(existing) = headers.get(header::VARY).and_then(|value| value.to_str().ok()) else {
+   let Some(existing) = headers
+      .get(header::VARY)
+      .and_then(|value| value.to_str().ok())
+   else {
       headers.insert(header::VARY, HeaderValue::from_static("Accept"));
       return;
    };
@@ -176,7 +212,10 @@ fn append_vary(headers: &mut HeaderMap) {
 
 /// `text/markdown` wins when it is present and at least as preferred as HTML.
 fn wants_markdown(headers: &HeaderMap) -> bool {
-   let Some(accept) = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()) else {
+   let Some(accept) = headers
+      .get(header::ACCEPT)
+      .and_then(|value| value.to_str().ok())
+   else {
       return false;
    };
    let mut markdown = None;
@@ -195,7 +234,7 @@ fn wants_markdown(headers: &HeaderMap) -> bool {
       match mime.as_str() {
          "text/markdown" => markdown = Some(quality),
          "text/html" | "*/*" => html = Some(html.unwrap_or(quality).max(quality)),
-         _ => {}
+         _ => {},
       }
    }
    match (markdown, html) {
@@ -252,7 +291,7 @@ fn html_to_markdown(html: &str) -> String {
                   }
                }
             },
-            _ => {}
+            _ => {},
          }
          continue;
       }
@@ -483,7 +522,9 @@ Any agent may read public pages and call the read tools. The identity type is an
 
 ## Registration
 
-There is no account to create. `/.well-known/oauth-authorization-server` advertises `agent_auth` with `identity_types_supported: [\"anonymous\"]`. The register URI is this document. Do not send a bearer token. `/oauth/token` does not issue one.
+There is no account to create. `/.well-known/oauth-authorization-server` advertises `agent_auth` \
+       with `identity_types_supported: [\"anonymous\"]`. The register URI is this document. Do \
+       not send a bearer token. `/oauth/token` does not issue one.
 
 ## Requests
 
@@ -846,11 +887,13 @@ async fn rpc(state: &AppState, body: Value, mcp: bool) -> Response {
    let params = body.get("params").cloned().unwrap_or_else(|| json!({}));
    let result = if mcp {
       match method {
-         "initialize" => Ok(json!({
-            "protocolVersion": "2025-06-18",
-            "capabilities": {"tools": {"listChanged": false}},
-            "serverInfo": {"name": "teapawt", "version": VERSION}
-         })),
+         "initialize" => {
+            Ok(json!({
+               "protocolVersion": "2025-06-18",
+               "capabilities": {"tools": {"listChanged": false}},
+               "serverInfo": {"name": "teapawt", "version": VERSION}
+            }))
+         },
          "tools/list" => Ok(json!({"tools": tool_specs()})),
          "tools/call" => mcp_call(state, &params).await,
          "ping" => Ok(json!({})),
@@ -869,11 +912,13 @@ async fn rpc(state: &AppState, body: Value, mcp: bool) -> Response {
    };
    let payload = match result {
       Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-      Err(message) => json!({
-         "jsonrpc": "2.0",
-         "id": id,
-         "error": {"code": -32601, "message": message}
-      }),
+      Err(message) => {
+         json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32601, "message": message}
+         })
+      },
    };
    (
       [
@@ -887,10 +932,17 @@ async fn rpc(state: &AppState, body: Value, mcp: bool) -> Response {
 
 async fn mcp_call(state: &AppState, params: &Value) -> Result<Value, String> {
    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-   let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+   let args = params
+      .get("arguments")
+      .cloned()
+      .unwrap_or_else(|| json!({}));
    let text = match name {
       "search_posts" => {
-         let query = args.get("query").and_then(Value::as_str).unwrap_or("").trim();
+         let query = args
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
          if query.is_empty() || query.len() > 400 {
             return Err("query is required".into());
          }
@@ -923,11 +975,12 @@ async fn a2a_message(state: &AppState, params: &Value) -> Result<String, String>
    if text.is_empty() {
       return Err("message text is required".into());
    }
-   if let Some(id) = text
-      .split("/status/")
-      .nth(1)
-      .map(|rest| rest.split(|ch: char| !ch.is_ascii_digit()).next().unwrap_or(""))
-      && !id.is_empty()
+   if let Some(id) = text.split("/status/").nth(1).map(|rest| {
+      rest
+         .split(|ch: char| !ch.is_ascii_digit())
+         .next()
+         .unwrap_or("")
+   }) && !id.is_empty()
    {
       return post_text(state, id).await;
    }
@@ -996,8 +1049,8 @@ async fn search_text(state: &AppState, query: &str) -> Result<String, String> {
 }
 
 async fn profile_text(state: &AppState, username: &str) -> Result<String, String> {
-   let (user, timeline_res) = super::helpers::with_user(state, username, |user_id| async move {
-      state.api.get_user_tweets(&user_id, None).await
+   let (user, timeline_res) = super::helpers::with_user(state, username, |user_id| {
+      async move { state.api.get_user_tweets(&user_id, None).await }
    })
    .await
    .map_err(brief)?;
@@ -1067,27 +1120,27 @@ fn hex(bytes: &[u8]) -> String {
    let mut out = String::with_capacity(bytes.len() * 2);
    for byte in bytes {
       out.push(ALPHABET[(byte >> 4) as usize] as char);
-      out.push(ALPHABET[(byte & 0xf) as usize] as char);
+      out.push(ALPHABET[(byte & 0xF) as usize] as char);
    }
    out
 }
 
 pub(crate) fn sha256(message: &[u8]) -> [u8; 32] {
    const K: [u32; 64] = [
-      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-      0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-      0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-      0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-      0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-      0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-      0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-      0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-      0xc67178f2,
+      0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5, 0x3956C25B, 0x59F111F1, 0x923F82A4,
+      0xAB1C5ED5, 0xD807AA98, 0x12835B01, 0x243185BE, 0x550C7DC3, 0x72BE5D74, 0x80DEB1FE,
+      0x9BDC06A7, 0xC19BF174, 0xE49B69C1, 0xEFBE4786, 0x0FC19DC6, 0x240CA1CC, 0x2DE92C6F,
+      0x4A7484AA, 0x5CB0A9DC, 0x76F988DA, 0x983E5152, 0xA831C66D, 0xB00327C8, 0xBF597FC7,
+      0xC6E00BF3, 0xD5A79147, 0x06CA6351, 0x14292967, 0x27B70A85, 0x2E1B2138, 0x4D2C6DFC,
+      0x53380D13, 0x650A7354, 0x766A0ABB, 0x81C2C92E, 0x92722C85, 0xA2BFE8A1, 0xA81A664B,
+      0xC24B8B70, 0xC76C51A3, 0xD192E819, 0xD6990624, 0xF40E3585, 0x106AA070, 0x19A4C116,
+      0x1E376C08, 0x2748774C, 0x34B0BCB5, 0x391C0CB3, 0x4ED8AA4A, 0x5B9CCA4F, 0x682E6FF3,
+      0x748F82EE, 0x78A5636F, 0x84C87814, 0x8CC70208, 0x90BEFFFA, 0xA4506CEB, 0xBEF9A3F7,
+      0xC67178F2,
    ];
    let mut hash: [u32; 8] = [
-      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-      0x5be0cd19,
+      0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB,
+      0x5BE0CD19,
    ];
    let bit_len = (message.len() as u64).saturating_mul(8);
    let mut padded = message.to_vec();
@@ -1159,8 +1212,9 @@ pub(crate) fn sha256(message: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
-   use super::*;
    use axum::http::HeaderMap;
+
+   use super::*;
 
    #[test]
    fn sha256_matches_the_empty_and_abc_vectors() {
@@ -1194,7 +1248,8 @@ mod tests {
    #[test]
    fn html_keeps_the_heading_and_the_link() {
       let markdown = html_to_markdown(
-         "<html><h1>Hello</h1><p>See <a href=\"/github\">this</a> post.</p><script>nope</script></html>",
+         "<html><h1>Hello</h1><p>See <a href=\"/github\">this</a> \
+          post.</p><script>nope</script></html>",
       );
       assert!(markdown.contains("# Hello"), "{markdown}");
       assert!(markdown.contains("[this](/github)"), "{markdown}");
@@ -1208,6 +1263,9 @@ mod tests {
          strip_index_md("/github/status/1/index.md").as_deref(),
          Some("/github/status/1")
       );
-      assert_eq!(strip_index_md("/.well-known/agent-skills/read-teapawt/SKILL.md"), None);
+      assert_eq!(
+         strip_index_md("/.well-known/agent-skills/read-teapawt/SKILL.md"),
+         None
+      );
    }
 }

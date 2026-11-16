@@ -1,7 +1,14 @@
 use axum::{
    Router,
-   extract::{Path, State},
-   response::{Html, IntoResponse as _, Response},
+   extract::{
+      Path,
+      State,
+   },
+   response::{
+      Html,
+      IntoResponse as _,
+      Response,
+   },
    routing::get,
 };
 use axum_extra::extract::CookieJar;
@@ -12,7 +19,10 @@ use crate::{
    error::Result,
    types::Prefs,
    utils::formatters,
-   views::{layout, renderutils::proxy_media},
+   views::{
+      layout,
+      renderutils::proxy_media,
+   },
 };
 
 pub fn router() -> Router<AppState> {

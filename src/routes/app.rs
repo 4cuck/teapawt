@@ -14,6 +14,7 @@ pub fn router(indexnow_key: &str) -> Router<AppState> {
       .merge(super::donate::router())
       .merge(super::pass::router())
       .merge(super::import::router())
+      .merge(super::admin_stats::router())
       .merge(super::unsupported::router())
       .merge(super::debug::router())
       .merge(super::scrape_gate::router())

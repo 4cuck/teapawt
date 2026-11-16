@@ -8,7 +8,10 @@
 //! Any page off the first route means the pool is short of `UserTweets`
 //! quota, and the report says how many accounts the demand needs.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{
+   AtomicU64,
+   Ordering,
+};
 
 /// Calls one account may make to `UserTweets` per window, as X reports it.
 const USER_TWEETS_PER_WINDOW: u64 = 50;
@@ -116,7 +119,11 @@ mod tests {
       routes.count(Route::Waited);
       let report = routes.report(1_602).unwrap();
       assert!(report.fallback_needed);
-      assert!(report.line.starts_with("5002 first pages: 4000 on UserTweets, 1000 on"));
+      assert!(
+         report
+            .line
+            .starts_with("5002 first pages: 4000 on UserTweets, 1000 on")
+      );
       assert!(report.line.contains("FALLBACK REQUIRED for 20%"));
       // 5002 a minute is 75,030 per 15 minutes, at 50 per account.
       assert!(report.line.contains("about 1501 accounts; 1602 are loaded"));

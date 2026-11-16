@@ -1,7 +1,15 @@
 use axum::{
    Router,
-   extract::{Path, Query, State},
-   response::{Html, IntoResponse as _, Response},
+   extract::{
+      Path,
+      Query,
+      State,
+   },
+   response::{
+      Html,
+      IntoResponse as _,
+      Response,
+   },
    routing::get,
 };
 use axum_extra::extract::CookieJar;
@@ -12,17 +20,30 @@ use super::helpers;
 use crate::{
    AppState,
    cache::keys as cache_keys,
-   error::{Error, Result},
-   types::{List, PaginatedResult, Prefs, Tweet, User},
-   views::{layout, timeline as timeline_view, user_list},
+   error::{
+      Error,
+      Result,
+   },
+   types::{
+      List,
+      PaginatedResult,
+      Prefs,
+      Tweet,
+      User,
+   },
+   views::{
+      layout,
+      timeline as timeline_view,
+      user_list,
+   },
 };
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
-   pub cursor: Option<String>,
+   pub cursor:      Option<String>,
    /// Exclude retweets from list timeline (`?no_retweets=true`).
    pub no_retweets: Option<String>,
-   pub scroll: Option<String>,
+   pub scroll:      Option<String>,
 }
 
 pub fn router() -> Router<AppState> {
@@ -97,7 +118,8 @@ async fn list_by_slug(
    let cursor = timeline.bottom.as_deref();
    let base_url = format!("/{username}/lists/{slug}");
    if query.scroll.as_deref() == Some("true") {
-      let fragment = timeline_view::render_timeline(&groups, &state.config, cursor, Some(&base_url));
+      let fragment =
+         timeline_view::render_timeline(&groups, &state.config, cursor, Some(&base_url));
       return Ok(Html(fragment.into_string()).into_response());
    }
 
@@ -136,7 +158,8 @@ async fn list_by_id(
          helpers::remember_tweets(&state, group);
       }
       let cursor = timeline.bottom.as_deref();
-      let fragment = timeline_view::render_timeline(&groups, &state.config, cursor, Some(&base_url));
+      let fragment =
+         timeline_view::render_timeline(&groups, &state.config, cursor, Some(&base_url));
       return Ok(Html(fragment.into_string()).into_response());
    }
 
@@ -255,11 +278,13 @@ async fn list_members(
             .render();
          Ok(Html(markup.into_string()).into_response())
       },
-      Err(err) => Ok(helpers::api_error_titled(
-         &state.config,
-         &err,
-         "Error loading members",
-      )),
+      Err(err) => {
+         Ok(helpers::api_error_titled(
+            &state.config,
+            &err,
+            "Error loading members",
+         ))
+      },
    }
 }
 

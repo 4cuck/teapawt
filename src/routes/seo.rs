@@ -5,13 +5,22 @@ use std::collections::BTreeSet;
 use axum::{
    Router,
    extract::State,
-   http::{HeaderMap, header},
-   response::{IntoResponse, Response},
+   http::{
+      HeaderMap,
+      header,
+   },
+   response::{
+      IntoResponse,
+      Response,
+   },
    routing::get,
 };
 use time::OffsetDateTime;
 
-use crate::{AppState, config::Config};
+use crate::{
+   AppState,
+   config::Config,
+};
 
 /// Well-known public accounts so crawlers have many entry points on day one.
 const SEED_PROFILES: &[&str] = &[
@@ -430,10 +439,12 @@ async fn robots_txt(State(state): State<AppState>, headers: HeaderMap) -> Respon
    let body = format!(
       "\
 # nitter.cf / xitter.cf — public Twitter/X frontend. Crawl everything.
-# Google, Bing, Yandex, DuckDuckGo, Baidu, and every other crawler are welcome.
+# Google, Bing, Yandex, \
+       DuckDuckGo, Baidu, and every other crawler are welcome.
 
 User-agent: *
-# Cloudflare Content Signals. Bing does not parse this line; crawlers ignore it.
+# Cloudflare Content Signals. \
+       Bing does not parse this line; crawlers ignore it.
 # https://contentsignals.org/
 Content-Signal: ai-train=yes, search=yes, ai-input=yes
 Allow: /
@@ -619,7 +630,8 @@ async fn sitemap_index(State(state): State<AppState>, headers: HeaderMap) -> Res
    let body = format!(
       "\
 <?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<sitemapindex xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">
+<sitemapindex xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\
+       
   <sitemap>
     <loc>{origin}/sitemap-static.xml</loc>
     <lastmod>{lastmod}</lastmod>

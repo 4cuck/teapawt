@@ -89,6 +89,14 @@ pub struct Stats {
    pub view:   i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountIdentity {
+   pub id:       i64,
+   pub username: String,
+   pub kind:     SessionKind,
+   pub pool:     String,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct ImportSummary {
    pub imported:   usize,
@@ -262,6 +270,38 @@ impl AccountStore {
       Ok(())
    }
 
+   /// Whether this account was imported into the search pool.
+   ///
+   /// Read from the store rather than the live slot, because the slot's limits
+   /// are what a probe is trying to correct.
+   pub async fn is_search_account(&self, id: i64) -> bool {
+      let client = self.client.lock().await;
+      client
+         .query_opt(
+            "SELECT 1 FROM account_sessions WHERE id = $1 AND lower(body->>'pool') = 'search'",
+            &[&id],
+         )
+         .await
+         .ok()
+         .flatten()
+         .is_some()
+   }
+
+   /// Put an account back into the pool it was imported for.
+   pub async fn restore_to_search(&self, id: i64) -> Result<()> {
+      let client = self.client.lock().await;
+      require_migration(&*client).await?;
+      client
+         .execute(
+            "UPDATE account_sessions SET body = jsonb_set(body, '{pool}', '\"search\"'::jsonb)
+          WHERE id = $1",
+            &[&id],
+         )
+         .await
+         .map_err(db_error)?;
+      Ok(())
+   }
+
    pub async fn save_ct0(&self, updates: &[(i64, String)]) -> Result<()> {
       let mut client = self.client.lock().await;
       let tx = client.transaction().await.map_err(db_error)?;
@@ -341,12 +381,16 @@ impl AccountStore {
       Ok(summary)
    }
 
-   #[allow(dead_code, reason = "the standalone import CLI does not display recent batches")]
+   #[allow(
+      dead_code,
+      reason = "the standalone import CLI does not display recent batches"
+   )]
    pub async fn recent_import_batches(&self) -> Result<Vec<(i64, ImportSummary)>> {
       let client = self.client.lock().await;
       client
          .query(
-            "SELECT imported_at, imported, duplicates, invalid FROM account_import_batches ORDER BY id DESC LIMIT 10",
+            "SELECT imported_at, imported, duplicates, invalid FROM account_import_batches ORDER \
+             BY id DESC LIMIT 10",
             &[],
          )
          .await
@@ -358,7 +402,9 @@ impl AccountStore {
                usize::try_from(value).map_err(|_| store_error("invalid import batch count"))
             };
             Ok((row.try_get(0).map_err(db_error)?, ImportSummary {
-               imported: count(1)?, duplicates: count(2)?, invalid: count(3)?,
+               imported:   count(1)?,
+               duplicates: count(2)?,
+               invalid:    count(3)?,
             }))
          })
          .collect()
@@ -368,7 +414,9 @@ impl AccountStore {
    pub async fn restore_batch_to_search(&self, text: &str) -> Result<usize> {
       let (accounts, summary) = parse_import(text);
       if accounts.is_empty() || summary.invalid != 0 || summary.duplicates != 0 {
-         return Err(store_error("restore requires a complete, unique account batch"));
+         return Err(store_error(
+            "restore requires a complete, unique account batch",
+         ));
       }
       let mut client = self.client.lock().await;
       let tx = client.transaction().await.map_err(db_error)?;
@@ -376,22 +424,96 @@ impl AccountStore {
       require_migration(&tx).await?;
       let mut restored = 0;
       for (account, _) in accounts {
-         let matched = tx.query(
-            "SELECT id FROM account_sessions WHERE body->>'auth_token' = $1",
-            &[&Secret(&account.auth_token)],
-         ).await.map_err(db_error)?;
+         let matched = tx
+            .query(
+               "SELECT id FROM account_sessions WHERE body->>'auth_token' = $1",
+               &[&Secret(&account.auth_token)],
+            )
+            .await
+            .map_err(db_error)?;
          let [row] = matched.as_slice() else {
-            return Err(store_error("restore batch must match exactly one stored row per account"));
+            return Err(store_error(
+               "restore batch must match exactly one stored row per account",
+            ));
          };
          let id: i64 = row.try_get(0).map_err(db_error)?;
-         let moved = tx.execute("UPDATE account_sessions SET body = jsonb_set(body, '{pool}', '\"search\"') WHERE id = $1 AND coalesce(body->>'pool', '') <> 'search'", &[&id]).await.map_err(db_error)?;
+         let moved = tx
+            .execute(
+               "UPDATE account_sessions SET body = jsonb_set(body, '{pool}', '\"search\"') WHERE \
+                id = $1 AND coalesce(body->>'pool', '') <> 'search'",
+               &[&id],
+            )
+            .await
+            .map_err(db_error)?;
          if moved != 0 {
-            tx.execute("UPDATE session_limits SET body = ((body #- '{refused_ops,SearchTimeline}'::text[]) - 'search_404_at'::text) || '{\"search_banned\":false,\"search_only\":true}'::jsonb WHERE id = $1", &[&id]).await.map_err(db_error)?;
+            tx.execute(
+               "UPDATE session_limits SET body = ((body #- \
+                '{refused_ops,SearchTimeline}'::text[]) - 'search_404_at'::text) || \
+                '{\"search_banned\":false,\"search_only\":true}'::jsonb WHERE id = $1",
+               &[&id],
+            )
+            .await
+            .map_err(db_error)?;
             restored += 1;
          }
       }
       tx.commit().await.map_err(db_error)?;
       Ok(restored)
+   }
+
+   /// Account names are public operational metadata, not credential material.
+   pub async fn identities(&self, ids: &[i64]) -> Result<HashMap<i64, AccountIdentity>> {
+      let client = self.client.lock().await;
+      require_migration(&*client).await?;
+      let rows = client
+         .query(
+            "SELECT id, coalesce(body->>'username', ''), body->>'kind', coalesce(body->>'pool', \
+             '')
+          FROM account_sessions WHERE id = ANY($1)",
+            &[&ids],
+         )
+         .await
+         .map_err(db_error)?;
+      rows
+         .into_iter()
+         .map(|row| {
+            let id = row.try_get(0).map_err(db_error)?;
+            Ok((id, AccountIdentity {
+               id,
+               username: row.try_get(1).map_err(db_error)?,
+               kind: row
+                  .try_get::<_, Option<String>>(2)
+                  .map_err(db_error)?
+                  .and_then(|kind| serde_json::from_value(Value::String(kind)).ok())
+                  .unwrap_or(SessionKind::Cookie),
+               pool: row.try_get(3).map_err(db_error)?,
+            }))
+         })
+         .collect()
+   }
+
+   pub async fn find_identities(&self, query: &str, limit: i64) -> Result<Vec<i64>> {
+      let client = self.client.lock().await;
+      require_migration(&*client).await?;
+      if let Ok(id) = query.parse::<i64>() {
+         let row = client
+            .query_opt("SELECT id FROM account_sessions WHERE id = $1", &[&id])
+            .await
+            .map_err(db_error)?;
+         return Ok(row.map(|row| vec![row.get(0)]).unwrap_or_default());
+      }
+      let pattern = format!("%{}%", query.replace(['\\', '%', '_'], ""));
+      Ok(client
+         .query(
+            "SELECT id FROM account_sessions WHERE body->>'username' ILIKE $1
+          ORDER BY ordinal DESC LIMIT $2",
+            &[&pattern, &limit.clamp(1, 500)],
+         )
+         .await
+         .map_err(db_error)?
+         .into_iter()
+         .map(|row| row.get(0))
+         .collect())
    }
 
    pub async fn stats(&self) -> Result<Stats> {
@@ -566,9 +688,11 @@ fn parse_import(text: &str) -> (Vec<(Session, CookieJar)>, ImportSummary) {
          || line.starts_with("#HttpOnly_")
          || (!line.starts_with('#') && line.bytes().filter(|&byte| byte == b'\t').count() == 6)
    });
-   let mut record = |account| match account {
-      Some(account) => accounts.push(account),
-      None => summary.invalid += 1,
+   let mut record = |account| {
+      match account {
+         Some(account) => accounts.push(account),
+         None => summary.invalid += 1,
+      }
    };
    if let Ok(value) = serde_json::from_str::<Value>(text) {
       parse_json_import(&value, &mut record);
@@ -597,7 +721,8 @@ fn cookie_header(line: &str) -> Option<&str> {
          return Some(value);
       }
    }
-   line.split(';')
+   line
+      .split(';')
       .filter_map(|pair| pair.split_once('='))
       .any(|(name, _)| matches!(name.trim(), AUTH | CSRF))
       .then_some(line)
@@ -605,7 +730,11 @@ fn cookie_header(line: &str) -> Option<&str> {
 
 fn parse_cookie_header(header: &str) -> Option<(Session, CookieJar)> {
    let mut jar = CookieJar::new();
-   for pair in header.split(';').map(str::trim).filter(|pair| !pair.is_empty()) {
+   for pair in header
+      .split(';')
+      .map(str::trim)
+      .filter(|pair| !pair.is_empty())
+   {
       let (name, value) = pair.split_once('=')?;
       insert_import_cookie(&mut jar, name.trim(), value.trim())?;
    }

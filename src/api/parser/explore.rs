@@ -42,9 +42,11 @@ pub fn timeline_posts(data: &Value) -> TimelinePosts {
    let tweets = feed
       .items
       .into_iter()
-      .filter_map(|item| match item {
-         ExploreItem::Tweet(tweet) => Some(*tweet),
-         ExploreItem::Header(_) | ExploreItem::Trend(_) => None,
+      .filter_map(|item| {
+         match item {
+            ExploreItem::Tweet(tweet) => Some(*tweet),
+            ExploreItem::Header(_) | ExploreItem::Trend(_) => None,
+         }
       })
       .collect::<Vec<_>>();
    let bottom = if tweets.is_empty() { None } else { feed.bottom };
@@ -134,12 +136,7 @@ fn parse_entry(entry: &Value, feed: &mut ExploreFeed) {
    }
 }
 
-fn push_module(
-   header: Option<&str>,
-   items: &[Value],
-   parent_id: &str,
-   feed: &mut ExploreFeed,
-) {
+fn push_module(header: Option<&str>, items: &[Value], parent_id: &str, feed: &mut ExploreFeed) {
    let start = feed.items.len();
    for item in items {
       let entry_id = item

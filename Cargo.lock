@@ -2572,8 +2572,6 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 [[package]]
 name = "xitter-txid"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "324c3ac178d69cc2d01aef7a978c4f26b56630353286e10f121a7daa4db552b6"
 dependencies = [
  "data-encoding",
  "hmac-sha256",

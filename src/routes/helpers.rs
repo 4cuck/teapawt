@@ -2,26 +2,51 @@ use std::{
    any::Any,
    collections::BTreeMap,
    future::Future,
-   iter, slice,
+   iter,
+   slice,
    sync::LazyLock,
    time::Duration,
 };
 
 use axum::{
-   http::{StatusCode, header},
-   response::{Html, IntoResponse as _, Response},
+   http::{
+      StatusCode,
+      header,
+   },
+   response::{
+      Html,
+      IntoResponse as _,
+      Response,
+   },
 };
-
-use tokio::{sync::Semaphore, time::timeout};
+use tokio::{
+   sync::Semaphore,
+   time::timeout,
+};
 
 use crate::{
    AppState,
    api::OpenProfile,
-   cache::{Hit, keys as cache_keys, ttl},
+   cache::{
+      Hit,
+      keys as cache_keys,
+      ttl,
+   },
    config::Config,
-   error::{Error, Result},
+   error::{
+      Error,
+      Result,
+   },
    types::{
-      AccountContext, Conversation, PhotoRail, Profile, Timeline, Translation, Tweet, Tweets, User,
+      AccountContext,
+      Conversation,
+      PhotoRail,
+      Profile,
+      Timeline,
+      Translation,
+      Tweet,
+      Tweets,
+      User,
    },
    views::layout,
 };
@@ -34,7 +59,7 @@ const RAIL_GRACE: Duration = Duration::from_millis(60);
 
 #[derive(Clone)]
 struct CachedRss {
-   body: String,
+   body:   String,
    min_id: Option<i64>,
 }
 
@@ -341,9 +366,11 @@ pub async fn get_cached_user(state: &AppState, username: &str) -> Result<User> {
    let cache_key = cache_keys::user(username);
    if let Some(cached) = swr_take(state, &cache_key, {
       let username = username.to_owned();
-      move |state| async move {
-         if let Ok(user) = state.api.get_user(&username).await {
-            store_user(&state, &user);
+      move |state| {
+         async move {
+            if let Ok(user) = state.api.get_user(&username).await {
+               store_user(&state, &user);
+            }
          }
       }
    }) {
@@ -434,14 +461,16 @@ pub async fn load_account_context(state: &AppState, username: &str) -> Option<Ac
    let community = community_contexts(state, slice::from_ref(&username)).await;
    let resolved = match community.into_values().next() {
       Some(context) => context,
-      None => state
-         .api
-         .get_account_context(&username)
-         .await
-         .unwrap_or_else(|err| {
-            tracing::debug!(username, "About Account unavailable: {err}");
-            AccountContext::default()
-         }),
+      None => {
+         state
+            .api
+            .get_account_context(&username)
+            .await
+            .unwrap_or_else(|err| {
+               tracing::debug!(username, "About Account unavailable: {err}");
+               AccountContext::default()
+            })
+      },
    };
    state.cache.set(&key, &resolved, ttl::ACCOUNT_CONTEXT);
    (!resolved.is_empty()).then_some(resolved)
@@ -772,14 +801,17 @@ mod tests {
    use tokio::time::sleep;
 
    use super::beside_rail;
-   use crate::types::{GalleryPhoto, PhotoRail};
+   use crate::types::{
+      GalleryPhoto,
+      PhotoRail,
+   };
 
    async fn rail_after(millis: u64) -> PhotoRail {
       sleep(Duration::from_millis(millis)).await;
       vec![GalleryPhoto {
-         url: "pic".into(),
+         url:      "pic".into(),
          tweet_id: "1".into(),
-         color: String::new(),
+         color:    String::new(),
       }]
    }
 
@@ -802,6 +834,10 @@ mod tests {
       let (page, rail) = beside_rail(page_after(10), rail_after(5_000)).await;
       assert_eq!(page, "page");
       assert!(rail.is_empty());
-      assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+      assert!(
+         started.elapsed() < Duration::from_secs(1),
+         "{:?}",
+         started.elapsed()
+      );
    }
 }

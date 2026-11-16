@@ -127,6 +127,13 @@ pub enum Error {
    #[error("X account settings returned 404 (code 34)")]
    AccountSettingsNotFound,
 
+   /// No transaction id could be minted, so the request was never sent. X
+   /// answers a cookie-session write without one with a bodyless 404, which is
+   /// indistinguishable from an account X refuses, so the write is skipped
+   /// instead of being sent and blamed on the account.
+   #[error("No transaction id is available yet")]
+   NoTransactionId,
+
    #[error("Not found: {0}")]
    NotFound(String),
 

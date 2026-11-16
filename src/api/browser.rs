@@ -8,9 +8,17 @@
 //! is found by a handshake at startup, since a profile can advertise something
 //! X's edge rejects (Chrome 152 did at the time of writing).
 
-use std::{collections::HashMap, fmt, sync::OnceLock, time::Duration};
+use std::{
+   collections::HashMap,
+   fmt,
+   sync::OnceLock,
+   time::Duration,
+};
 
-use primp::{Impersonate, ImpersonateOS};
+use primp::{
+   Impersonate,
+   ImpersonateOS,
+};
 use tokio::task::JoinSet;
 
 use super::http::ProxyConfig;
@@ -37,46 +45,56 @@ impl Engine {
    /// Profiles newest first. Only the newest that X accepts is ever used.
    fn candidates(self) -> &'static [Impersonate] {
       match self {
-         Self::Chrome => &[
-            Impersonate::ChromeV153,
-            Impersonate::ChromeV152,
-            Impersonate::ChromeV151,
-            Impersonate::ChromeV150,
-            Impersonate::ChromeV149,
-            Impersonate::ChromeV148,
-            Impersonate::ChromeV147,
-            Impersonate::ChromeV146,
-         ],
-         Self::Edge => &[
-            Impersonate::EdgeV153,
-            Impersonate::EdgeV152,
-            Impersonate::EdgeV151,
-            Impersonate::EdgeV150,
-            Impersonate::EdgeV149,
-            Impersonate::EdgeV148,
-            Impersonate::EdgeV147,
-            Impersonate::EdgeV146,
-         ],
-         Self::Firefox => &[
-            Impersonate::FirefoxV151,
-            Impersonate::FirefoxV150,
-            Impersonate::FirefoxV149,
-            Impersonate::FirefoxV148,
-            Impersonate::FirefoxV147,
-            Impersonate::FirefoxV146,
-         ],
-         Self::Safari => &[
-            Impersonate::SafariV26_4,
-            Impersonate::SafariV26_3,
-            Impersonate::SafariV26,
-            Impersonate::SafariV18_5,
-         ],
-         Self::Opera => &[
-            Impersonate::OperaV135,
-            Impersonate::OperaV134,
-            Impersonate::OperaV133,
-            Impersonate::OperaV132,
-         ],
+         Self::Chrome => {
+            &[
+               Impersonate::ChromeV153,
+               Impersonate::ChromeV152,
+               Impersonate::ChromeV151,
+               Impersonate::ChromeV150,
+               Impersonate::ChromeV149,
+               Impersonate::ChromeV148,
+               Impersonate::ChromeV147,
+               Impersonate::ChromeV146,
+            ]
+         },
+         Self::Edge => {
+            &[
+               Impersonate::EdgeV153,
+               Impersonate::EdgeV152,
+               Impersonate::EdgeV151,
+               Impersonate::EdgeV150,
+               Impersonate::EdgeV149,
+               Impersonate::EdgeV148,
+               Impersonate::EdgeV147,
+               Impersonate::EdgeV146,
+            ]
+         },
+         Self::Firefox => {
+            &[
+               Impersonate::FirefoxV151,
+               Impersonate::FirefoxV150,
+               Impersonate::FirefoxV149,
+               Impersonate::FirefoxV148,
+               Impersonate::FirefoxV147,
+               Impersonate::FirefoxV146,
+            ]
+         },
+         Self::Safari => {
+            &[
+               Impersonate::SafariV26_4,
+               Impersonate::SafariV26_3,
+               Impersonate::SafariV26,
+               Impersonate::SafariV18_5,
+            ]
+         },
+         Self::Opera => {
+            &[
+               Impersonate::OperaV135,
+               Impersonate::OperaV134,
+               Impersonate::OperaV133,
+               Impersonate::OperaV132,
+            ]
+         },
       }
    }
 }
@@ -98,7 +116,7 @@ impl fmt::Display for Engine {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity {
    pub engine: Engine,
-   pub os: ImpersonateOS,
+   pub os:     ImpersonateOS,
 }
 
 impl Identity {
@@ -124,16 +142,16 @@ impl Identity {
       }
       let user_agent = match self.os {
          ImpersonateOS::Windows => {
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/157.0.0.0 Safari/537.36"
          },
          ImpersonateOS::MacOS => {
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like \
+             Gecko) Chrome/157.0.0.0 Safari/537.36"
          },
          ImpersonateOS::Linux => {
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/157.0.0.0 Safari/537.36"
          },
          _ => return None,
       };
@@ -166,17 +184,21 @@ const ENGINE_WEIGHTS: [(Engine, u64); 5] = [
 /// and Edge on Windows; a Safari-on-Windows user agent does not exist.
 fn os_weights(engine: Engine) -> &'static [(ImpersonateOS, u64)] {
    match engine {
-      Engine::Chrome => &[
-         (ImpersonateOS::Windows, 75),
-         (ImpersonateOS::MacOS, 20),
-         (ImpersonateOS::Linux, 5),
-      ],
+      Engine::Chrome => {
+         &[
+            (ImpersonateOS::Windows, 75),
+            (ImpersonateOS::MacOS, 20),
+            (ImpersonateOS::Linux, 5),
+         ]
+      },
       Engine::Edge => &[(ImpersonateOS::Windows, 90), (ImpersonateOS::MacOS, 10)],
-      Engine::Firefox => &[
-         (ImpersonateOS::Windows, 70),
-         (ImpersonateOS::Linux, 20),
-         (ImpersonateOS::MacOS, 10),
-      ],
+      Engine::Firefox => {
+         &[
+            (ImpersonateOS::Windows, 70),
+            (ImpersonateOS::Linux, 20),
+            (ImpersonateOS::MacOS, 10),
+         ]
+      },
       Engine::Safari => &[(ImpersonateOS::MacOS, 100)],
       Engine::Opera => &[(ImpersonateOS::Windows, 100)],
    }
@@ -375,10 +397,13 @@ mod tests {
          .find(|line| !line.trim().is_empty() && !line.starts_with('#'))
          .expect("an exit");
       let parts: Vec<&str> = line.trim().split(':').collect();
-      let url = format!("socks5h://{}:{}@{}:{}", parts[2], parts[3], parts[0], parts[1]);
+      let url = format!(
+         "socks5h://{}:{}@{}:{}",
+         parts[2], parts[3], parts[0], parts[1]
+      );
       let identity = Identity {
          engine: Engine::Chrome,
-         os: ImpersonateOS::Windows,
+         os:     ImpersonateOS::Windows,
       };
       let client = primp::Client::builder()
          .impersonate(identity.profile())
@@ -409,7 +434,10 @@ mod tests {
          } else {
             "t13d1518h2_8daaf6152771_e2d80978ab2e"
          };
-         assert_eq!(ja4, expected, "round {round} drifted from the Chrome 157 capture");
+         assert_eq!(
+            ja4, expected,
+            "round {round} drifted from the Chrome 157 capture"
+         );
       }
    }
    /// Prints what a Chrome identity actually puts on the wire, to compare with
@@ -423,10 +451,13 @@ mod tests {
          .find(|line| !line.trim().is_empty() && !line.starts_with('#'))
          .expect("an exit");
       let parts: Vec<&str> = line.trim().split(':').collect();
-      let url = format!("socks5h://{}:{}@{}:{}", parts[2], parts[3], parts[0], parts[1]);
+      let url = format!(
+         "socks5h://{}:{}@{}:{}",
+         parts[2], parts[3], parts[0], parts[1]
+      );
       let identity = Identity {
          engine: Engine::Chrome,
-         os: ImpersonateOS::Windows,
+         os:     ImpersonateOS::Windows,
       };
       let builder = primp::Client::builder()
          .impersonate(identity.profile())

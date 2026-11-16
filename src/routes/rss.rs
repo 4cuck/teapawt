@@ -1,21 +1,51 @@
 use axum::{
    Router,
-   extract::{Path, Query, State},
-   http::{HeaderValue, StatusCode, header},
-   response::{IntoResponse, Response},
+   extract::{
+      Path,
+      Query,
+      State,
+   },
+   http::{
+      HeaderValue,
+      StatusCode,
+      header,
+   },
+   response::{
+      IntoResponse,
+      Response,
+   },
    routing::get,
 };
 use axum_extra::extract::CookieJar;
 use serde::Deserialize;
 
-use super::helpers::{
-   cache_rss, check_rss_cache, rss_response, rss_response_with_min_id, with_user,
+use super::{
+   admin_stats,
+   helpers::{
+      cache_rss,
+      check_rss_cache,
+      rss_response,
+      rss_response_with_min_id,
+      with_user,
+   },
 };
 use crate::{
    AppState,
-   cache::{Hit, keys as cache_keys},
-   error::{Error, Result},
-   types::{Prefs, Profile, Query as SearchQuery, QueryKind, Tweet},
+   cache::{
+      Hit,
+      keys as cache_keys,
+   },
+   error::{
+      Error,
+      Result,
+   },
+   types::{
+      Prefs,
+      Profile,
+      Query as SearchQuery,
+      QueryKind,
+      Tweet,
+   },
    views::rss as rss_view,
 };
 
@@ -49,13 +79,10 @@ fn cached_profile_page(state: &AppState, username: &str, cursor: Option<&str>) -
    }
 }
 
-/// A proxied feed must not be served from the direct-media cache, or the other way around.
+/// A proxied feed must not be served from the direct-media cache, or the other
+/// way around.
 fn feed_key(key: String, proxy: bool) -> String {
-   if proxy {
-      format!("{key}:proxy")
-   } else {
-      key
-   }
+   if proxy { format!("{key}:proxy") } else { key }
 }
 
 /// A search feed with no pass. Not 403: Cloudflare keeps a 403 on search paths
@@ -139,17 +166,19 @@ async fn user_rss_handler(
       return Ok(rss_response(rss, &tweets));
    }
 
-   let (user, timeline) = with_user(state, username, |user_id| async move {
-      match kind {
-         UserRssKind::Tweets => state.api.get_user_tweets(&user_id, cursor).await,
-         UserRssKind::Replies => {
-            state
-               .api
-               .get_user_tweets_and_replies(&user_id, cursor)
-               .await
-         },
-         UserRssKind::Reposts => state.api.get_user_reposts(&user_id, cursor).await,
-         UserRssKind::Media => state.api.get_user_media(&user_id, cursor).await,
+   let (user, timeline) = with_user(state, username, |user_id| {
+      async move {
+         match kind {
+            UserRssKind::Tweets => state.api.get_user_tweets(&user_id, cursor).await,
+            UserRssKind::Replies => {
+               state
+                  .api
+                  .get_user_tweets_and_replies(&user_id, cursor)
+                  .await
+            },
+            UserRssKind::Reposts => state.api.get_user_reposts(&user_id, cursor).await,
+            UserRssKind::Media => state.api.get_user_media(&user_id, cursor).await,
+         }
       }
    })
    .await?;
@@ -249,7 +278,9 @@ async fn search_rss(
 
    let rss_cache_key = feed_key(cache_keys::rss_search(search_query), proxy);
    if let Some(cached) = check_rss_cache(&state, &rss_cache_key) {
-      return Ok(cached);
+      // The cached response includes Min-Id exactly when the search had tweets.
+      let empty = !cached.headers().contains_key("min-id");
+      return Ok(admin_stats::search_result(cached, empty));
    }
    if !super::search_gate::cleared(&state, &jar) {
       return Ok(search_feed_blocked(&state));
@@ -272,7 +303,10 @@ async fn search_rss(
       &rss,
       tweets.iter().map(|tweet| tweet.id).min(),
    );
-   Ok(rss_response(rss, &tweets))
+   Ok(admin_stats::search_result(
+      rss_response(rss, &tweets),
+      tweets.is_empty(),
+   ))
 }
 
 /// User search RSS - search tweets from a specific user.
@@ -298,7 +332,9 @@ async fn user_search_rss(
    let api_query = format!("from:{username} {search_query}");
    let rss_cache_key = feed_key(cache_keys::rss_user_search(&username, search_query), proxy);
    if let Some(cached) = check_rss_cache(&state, &rss_cache_key) {
-      return Ok(cached);
+      // The cached response includes Min-Id exactly when the search had tweets.
+      let empty = !cached.headers().contains_key("min-id");
+      return Ok(admin_stats::search_result(cached, empty));
    }
    if !super::search_gate::cleared(&state, &jar) {
       return Ok(search_feed_blocked(&state));
@@ -319,7 +355,10 @@ async fn user_search_rss(
       &rss,
       tweets.iter().map(|tweet| tweet.id).min(),
    );
-   Ok(rss_response(rss, &tweets))
+   Ok(admin_stats::search_result(
+      rss_response(rss, &tweets),
+      tweets.is_empty(),
+   ))
 }
 
 /// RSS feed for a conversation thread (main tweet + self-thread).

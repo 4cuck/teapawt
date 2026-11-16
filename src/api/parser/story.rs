@@ -1,4 +1,5 @@
-//! The page behind `/i/trending/{id}`: title, writeup, and the posts X attached.
+//! The page behind `/i/trending/{id}`: title, writeup, and the posts X
+//! attached.
 
 use std::fmt::Write as _;
 
@@ -11,7 +12,12 @@ use super::{
 };
 use crate::{
    api::schema::TweetData,
-   types::{ExploreItem, Trend, TrendStory, Tweet},
+   types::{
+      ExploreItem,
+      Trend,
+      TrendStory,
+      Tweet,
+   },
 };
 
 /// Timeline ids and tweet ids hanging off `post_timelines`. The story payload
@@ -39,7 +45,10 @@ fn collect_refs(value: &Value, in_posts: bool, refs: &mut StoryPostRefs) {
       },
       Value::Object(object) => {
          for (key, child) in object {
-            let posts = in_posts || key == "post_timelines" || key == "post_timeline" || key == "postTimelines";
+            let posts = in_posts
+               || key == "post_timelines"
+               || key == "post_timeline"
+               || key == "postTimelines";
             if posts && let Some(text) = child.as_str() {
                classify_ref(text, refs);
             }
@@ -64,7 +73,8 @@ fn classify_ref(text: &str, refs: &mut StoryPostRefs) {
          .chars()
          .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '=' | '+' | '/'))
       && text.chars().any(|ch| ch.is_ascii_alphabetic());
-   if timeline && !refs.timeline_ids.iter().any(|seen| seen == text) && refs.timeline_ids.len() < 4 {
+   if timeline && !refs.timeline_ids.iter().any(|seen| seen == text) && refs.timeline_ids.len() < 4
+   {
       refs.timeline_ids.push(text.to_owned());
    }
 }
@@ -154,11 +164,9 @@ fn push_related(story: &mut TrendStory, trend: Trend) {
    if trend.name.is_empty() || trend.name == story.title {
       return;
    }
-   if story
-      .related
-      .iter()
-      .any(|seen| seen.name == trend.name || (!trend.story_id.is_empty() && seen.story_id == trend.story_id))
-   {
+   if story.related.iter().any(|seen| {
+      seen.name == trend.name || (!trend.story_id.is_empty() && seen.story_id == trend.story_id)
+   }) {
       return;
    }
    story.related.push(trend);
@@ -252,7 +260,9 @@ fn collect_tweets(value: &Value, tweets: &mut Vec<Tweet>) {
          }
       },
       Value::Object(object) => {
-         if let Some(result) = object.get("tweet_results").and_then(|value| value.get("result"))
+         if let Some(result) = object
+            .get("tweet_results")
+            .and_then(|value| value.get("result"))
             && let Ok(data) = serde_json::from_value::<TweetData>(result.clone())
             && let Ok(tweet) = parse_tweet_object(&data)
             && tweet.available
@@ -289,8 +299,9 @@ fn plain(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-   use super::parse_trend_story;
    use serde_json::json;
+
+   use super::parse_trend_story;
 
    #[test]
    fn a_story_keeps_its_title_and_writeup() {

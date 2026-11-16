@@ -4,34 +4,51 @@
 //! stable across restarts. Existing pins are read-only; other sessions use a
 //! deterministic port from the configured list, including after a live import.
 
-use std::{collections::BTreeMap, net::IpAddr, path::Path, time::Duration};
+use std::{
+   collections::BTreeMap,
+   net::IpAddr,
+   path::Path,
+   time::Duration,
+};
 
 use tokio::{
    fs,
-   net::{TcpStream, lookup_host},
+   net::{
+      TcpStream,
+      lookup_host,
+   },
    process::Command,
    task::JoinSet,
-   time::{Instant, timeout},
+   time::{
+      Instant,
+      timeout,
+   },
 };
 
-use super::http::{ProxyConfig, ProxyKind};
+use super::http::{
+   ProxyConfig,
+   ProxyKind,
+};
 use crate::{
    config::Config,
-   error::{Error, Result},
+   error::{
+      Error,
+      Result,
+   },
 };
 
 struct Endpoint {
-   port: u16,
+   port:     u16,
    username: String,
    password: String,
 }
 
 /// Resolved SOCKS5 endpoints plus the session→port map.
 pub struct ProxyPool {
-   connect_host: String,
-   endpoints: Vec<Endpoint>,
+   connect_host:   String,
+   endpoints:      Vec<Endpoint>,
    fallback_ports: Vec<u16>,
-   pins: BTreeMap<i64, u16>,
+   pins:           BTreeMap<i64, u16>,
 }
 
 impl ProxyPool {
@@ -91,14 +108,26 @@ impl ProxyPool {
       Ok(Some(Self::with_pins(connect_host, endpoints, pins)))
    }
 
-   fn with_pins(connect_host: String, endpoints: Vec<Endpoint>, mut pins: BTreeMap<i64, u16>) -> Self {
+   fn with_pins(
+      connect_host: String,
+      endpoints: Vec<Endpoint>,
+      mut pins: BTreeMap<i64, u16>,
+   ) -> Self {
       // Canonical fallback order, without changing the configured order used
       // by first() and all() for unscoped clients.
-      let mut fallback_ports = endpoints.iter().map(|endpoint| endpoint.port).collect::<Vec<_>>();
+      let mut fallback_ports = endpoints
+         .iter()
+         .map(|endpoint| endpoint.port)
+         .collect::<Vec<_>>();
       fallback_ports.sort_unstable();
       fallback_ports.dedup();
       pins.retain(|_, port| fallback_ports.binary_search(port).is_ok());
-      Self { connect_host, endpoints, fallback_ports, pins }
+      Self {
+         connect_host,
+         endpoints,
+         fallback_ports,
+         pins,
+      }
    }
 
    /// SOCKS5 config for this session, always the same port once pinned.
@@ -142,9 +171,9 @@ impl ProxyPool {
          .find(|endpoint| endpoint.port == port)
          .unwrap_or(&self.endpoints[0]);
       ProxyConfig {
-         host: self.connect_host.clone(),
-         port: endpoint.port,
-         kind: ProxyKind::Socks5,
+         host:     self.connect_host.clone(),
+         port:     endpoint.port,
+         kind:     ProxyKind::Socks5,
          username: Some(endpoint.username.clone()),
          password: Some(endpoint.password.clone()),
       }
@@ -158,12 +187,21 @@ mod tests {
    #[test]
    fn live_and_restart_pins_preserve_legacy_ports_and_ignore_file_order() {
       fn pool(ports: [u16; 3]) -> ProxyPool {
-         let endpoints = ports.into_iter().map(|port| Endpoint {
-            port,
-            username: String::new(),
-            password: String::new(),
-         }).collect();
-         ProxyPool::with_pins("localhost".into(), endpoints, BTreeMap::from([(1, 1000), (2, 9999)]))
+         let endpoints = ports
+            .into_iter()
+            .map(|port| {
+               Endpoint {
+                  port,
+                  username: String::new(),
+                  password: String::new(),
+               }
+            })
+            .collect();
+         ProxyPool::with_pins(
+            "localhost".into(),
+            endpoints,
+            BTreeMap::from([(1, 1000), (2, 9999)]),
+         )
       }
       let live = pool([3000, 1000, 2000]);
       let restart = pool([2000, 3000, 1000]);
@@ -201,7 +239,8 @@ pub async fn load_fallback_proxies(path: &str) -> Result<Vec<ProxyConfig>> {
       }
       let Some(entry) = parse_fallback_line(line) else {
          return Err(Error::InvalidConfig(format!(
-            "fallbackProxiesFile line {}: expected scheme://user:pass@host:port or host:port:user:pass",
+            "fallbackProxiesFile line {}: expected scheme://user:pass@host:port or \
+             host:port:user:pass",
             idx + 1
          )));
       };
@@ -225,9 +264,11 @@ pub async fn load_fallback_proxies(path: &str) -> Result<Vec<ProxyConfig>> {
    };
    let proxies = parsed
       .into_iter()
-      .map(|entry| ProxyConfig {
-         host: gateway.clone(),
-         ..entry
+      .map(|entry| {
+         ProxyConfig {
+            host: gateway.clone(),
+            ..entry
+         }
       })
       .collect::<Vec<_>>();
    tracing::info!(
@@ -344,14 +385,15 @@ async fn load_pins(path: &str) -> BTreeMap<i64, u16> {
       return BTreeMap::new();
    }
    match fs::read_to_string(path).await {
-      Ok(content) => serde_json::from_str(&content).unwrap_or_else(|err| {
-         tracing::warn!("Ignoring unreadable session proxy pins: {err}");
-         BTreeMap::new()
-      }),
+      Ok(content) => {
+         serde_json::from_str(&content).unwrap_or_else(|err| {
+            tracing::warn!("Ignoring unreadable session proxy pins: {err}");
+            BTreeMap::new()
+         })
+      },
       Err(_) => BTreeMap::new(),
    }
 }
-
 
 /// Resolve `hostname` and pick the A record with the lowest ping.
 async fn pick_fastest_host(hostname: &str, probe_port: u16) -> String {

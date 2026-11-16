@@ -43,24 +43,24 @@ struct Operation {
    /// The endpoint as last asked for, query id included, so the pool can be
    /// read for the same key it is charged against.
    endpoint: String,
-   leased: u64,
-   waited: u64,
-   spent: u64,
-   nobody: u64,
+   leased:   u64,
+   waited:   u64,
+   spent:    u64,
+   nobody:   u64,
    /// Turned away instead of waiting on a line that would not clear.
-   shed: u64,
+   shed:     u64,
    /// Bare 429s from X that sat an account out of this operation.
-   rested: u64,
+   rested:   u64,
    /// Milliseconds per lease since the last report, sampled once full.
-   ring: Vec<u32>,
-   seen: u64,
-   longest: u32,
+   ring:     Vec<u32>,
+   seen:     u64,
+   longest:  u32,
 }
 
 /// The minute's lines, and the endpoints that queued for an account often
 /// enough to be worth a look at the pool.
 pub struct Report {
-   pub lines: Vec<String>,
+   pub lines:   Vec<String>,
    pub crowded: Vec<String>,
 }
 
@@ -96,8 +96,14 @@ impl Operation {
 /// A cheap uniform draw below `n`. Statistical sampling only.
 fn fastrand_below(n: u64) -> u64 {
    use std::{
-      hash::{BuildHasher as _, RandomState},
-      sync::atomic::{AtomicU64, Ordering},
+      hash::{
+         BuildHasher as _,
+         RandomState,
+      },
+      sync::atomic::{
+         AtomicU64,
+         Ordering,
+      },
    };
    static COUNTER: AtomicU64 = AtomicU64::new(0);
    let tick = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -154,7 +160,7 @@ impl AccountQueue {
    pub fn report(&self) -> Report {
       let Ok(mut operations) = self.operations.lock() else {
          return Report {
-            lines: Vec::new(),
+            lines:   Vec::new(),
             crowded: Vec::new(),
          };
       };
@@ -166,9 +172,7 @@ impl AccountQueue {
       drained.sort_by_key(|(_, op)| Reverse(op.leased + op.spent + op.nobody + op.shed));
       let crowded = drained
          .iter()
-         .filter(|(_, op)| {
-            op.shed > 0 || op.waited * 100 >= op.leased.max(1) * CROWDED_PERCENT
-         })
+         .filter(|(_, op)| op.shed > 0 || op.waited * 100 >= op.leased.max(1) * CROWDED_PERCENT)
          .map(|(_, op)| op.endpoint.clone())
          .collect();
       let lines = drained
@@ -177,8 +181,8 @@ impl AccountQueue {
             let mut line = String::new();
             let _ = write!(
                line,
-               "{name}: {} leased, {} waited, p50 {} ms, p90 {} ms, p99 {} ms, max {} ms, {} \
-                out of quota, {} no account, {} rested, {} shed",
+               "{name}: {} leased, {} waited, p50 {} ms, p90 {} ms, p99 {} ms, max {} ms, {} out \
+                of quota, {} no account, {} rested, {} shed",
                op.leased,
                op.waited,
                percentile(&mut op.ring, 50),
@@ -205,7 +209,11 @@ mod tests {
    fn reports_waits_and_refusals_per_operation_then_resets() {
       let queue = AccountQueue::default();
       for millis in [0, 1, 2, 300, 900] {
-         queue.record("q1/UserTweets", Duration::from_millis(millis), Outcome::Leased);
+         queue.record(
+            "q1/UserTweets",
+            Duration::from_millis(millis),
+            Outcome::Leased,
+         );
       }
       queue.record("q2/UserTweets", Duration::ZERO, Outcome::Spent);
       queue.record("q1/TweetDetail", Duration::ZERO, Outcome::Nobody);
@@ -216,10 +224,14 @@ mod tests {
       assert_eq!(lines.len(), 2);
       assert_eq!(
          lines[0],
-         "UserTweets: 5 leased, 2 waited, p50 2 ms, p90 300 ms, p99 300 ms, max 900 ms, 1 out \
-          of quota, 0 no account, 1 rested, 0 shed"
+         "UserTweets: 5 leased, 2 waited, p50 2 ms, p90 300 ms, p99 300 ms, max 900 ms, 1 out of \
+          quota, 0 no account, 1 rested, 0 shed"
       );
-      assert!(lines[1].starts_with("TweetDetail: 0 leased"), "{}", lines[1]);
+      assert!(
+         lines[1].starts_with("TweetDetail: 0 leased"),
+         "{}",
+         lines[1]
+      );
       // Two of five waited, and the pool is read under the newest query id.
       assert_eq!(report.crowded, ["q2/UserTweets"]);
       assert!(queue.report().lines.is_empty());

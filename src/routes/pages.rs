@@ -3,17 +3,33 @@
 use axum::{
    Router,
    extract::State,
-   http::{HeaderMap, HeaderValue, header},
-   response::{Html, IntoResponse, Redirect, Response},
+   http::{
+      HeaderMap,
+      HeaderValue,
+      header,
+   },
+   response::{
+      Html,
+      IntoResponse,
+      Redirect,
+      Response,
+   },
    routing::get,
 };
 use axum_extra::extract::CookieJar;
-use maud::{PreEscaped, html};
+use maud::{
+   PreEscaped,
+   html,
+};
 
 use crate::{
    AppState,
    types::Prefs,
-   views::{donate as donate_view, layout::PageLayout, search as search_view},
+   views::{
+      donate as donate_view,
+      layout::PageLayout,
+      search as search_view,
+   },
 };
 
 fn request_host(config: &crate::config::Config) -> (String, String) {
@@ -27,13 +43,15 @@ fn request_host(config: &crate::config::Config) -> (String, String) {
 
 fn home_description(host: &str) -> String {
    format!(
-      "{host} is a public Nitter replacement — a privacy-focused Twitter/X frontend. nitter.net shut down; this instance is a drop-in successor."
+      "{host} is a public Nitter replacement — a privacy-focused Twitter/X frontend. nitter.net \
+       shut down; this instance is a drop-in successor."
    )
 }
 
 fn about_description(host: &str) -> String {
    format!(
-      "About {host}, a public Nitter replacement. After nitter.net shut down, this teapawt instance lets you browse Twitter/X without JavaScript or tracking."
+      "About {host}, a public Nitter replacement. After nitter.net shut down, this teapawt \
+       instance lets you browse Twitter/X without JavaScript or tracking."
    )
 }
 
@@ -120,19 +138,23 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn pool_counts(State(state): State<AppState>) -> impl IntoResponse {
-   use axum::http::StatusCode;
-   use axum::Json;
+   use axum::{
+      Json,
+      http::StatusCode,
+   };
    match state.accounts.stats().await {
-      Ok(stats) => (
-         StatusCode::OK,
-         [(header::CACHE_CONTROL, "public, max-age=60")],
-         Json(serde_json::json!({
-            "search": stats.search,
-            "view": stats.view,
-            "total": stats.total,
-         })),
-      )
-         .into_response(),
+      Ok(stats) => {
+         (
+            StatusCode::OK,
+            [(header::CACHE_CONTROL, "public, max-age=60")],
+            Json(serde_json::json!({
+               "search": stats.search,
+               "view": stats.view,
+               "total": stats.total,
+            })),
+         )
+            .into_response()
+      },
       Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
    }
 }
@@ -141,7 +163,8 @@ async fn contact(State(state): State<AppState>, jar: CookieJar) -> impl IntoResp
    let prefs = Prefs::from_cookies(&jar, &state.config);
    let (_, host) = request_host(&state.config);
    let title = format!("Contact {host}");
-   let description = format!("Support and contact details for {host}, and how donors get a search pass.");
+   let description =
+      format!("Support and contact details for {host}, and how donors get a search pass.");
    let price = crate::donations::format_usd(state.passes.price_cents());
    let content = crate::views::scrape::render_contact(&state.config.contact, &price);
    let markup = PageLayout::new(&state.config, &title, content)

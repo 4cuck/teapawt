@@ -1,6 +1,15 @@
 //! HTTP routes.
 
+pub(crate) mod admin_stats;
 pub(crate) mod agents;
+pub(crate) use admin_stats::{
+   AccountData,
+   InvestigationData,
+   InvestigationQuery,
+   Observation,
+   admin_no_store,
+   record_search,
+};
 mod app;
 mod broadcast;
 mod community;
@@ -32,5 +41,9 @@ mod unsupported;
 
 pub use agents::negotiate;
 pub use app::router;
-pub use middleware::{client_middleware, prefs_middleware, snowflake_guard};
+pub use middleware::{
+   client_middleware,
+   prefs_middleware,
+   snowflake_guard,
+};
 pub use scrape_gate::scrape_gate;

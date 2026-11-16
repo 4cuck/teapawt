@@ -2,8 +2,16 @@
 
 use axum::{
    Router,
-   extract::{Path, Query, State},
-   response::{Html, IntoResponse as _, Response},
+   extract::{
+      Path,
+      Query,
+      State,
+   },
+   response::{
+      Html,
+      IntoResponse as _,
+      Response,
+   },
    routing::get,
 };
 use axum_extra::extract::CookieJar;
@@ -11,11 +19,27 @@ use serde::Deserialize;
 
 use crate::{
    AppState,
-   api::{self, ScheduledGame},
-   cache::{Hit, keys as cache_keys, ttl},
-   error::{Error, Result},
-   types::{Prefs, Tweet},
-   views::{game as game_view, layout},
+   api::{
+      self,
+      ScheduledGame,
+   },
+   cache::{
+      Hit,
+      keys as cache_keys,
+      ttl,
+   },
+   error::{
+      Error,
+      Result,
+   },
+   types::{
+      Prefs,
+      Tweet,
+   },
+   views::{
+      game as game_view,
+      layout,
+   },
 };
 
 #[derive(Debug, Deserialize)]
@@ -29,7 +53,8 @@ pub fn router() -> Router<AppState> {
 
 pub async fn sports_games(state: &AppState) -> Vec<ScheduledGame> {
    let key = cache_keys::nfl_schedule();
-   if let Some(Hit::Fresh(games) | Hit::Stale(games)) = state.cache.lookup::<Vec<ScheduledGame>>(&key)
+   if let Some(Hit::Fresh(games) | Hit::Stale(games)) =
+      state.cache.lookup::<Vec<ScheduledGame>>(&key)
    {
       return games;
    }
@@ -39,7 +64,9 @@ pub async fn sports_games(state: &AppState) -> Vec<ScheduledGame> {
          if games.is_empty() {
             tracing::debug!(shape = %api::json_skeleton(&data), "nfl schedule had no games");
          }
-         state.cache.set_swr(&key, &games, ttl::EXPLORE, ttl::EXPLORE_STALE);
+         state
+            .cache
+            .set_swr(&key, &games, ttl::EXPLORE, ttl::EXPLORE_STALE);
          games
       },
       Err(err) => {

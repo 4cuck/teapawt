@@ -47,9 +47,16 @@ pub struct SessionLimits {
    pub filters_cleared: bool,
    /// X refused the settings write itself, as it does for a suspended account
    /// ("not permitted to access this feature"). Waiting does not fix that, so
-   /// a restart does not spend the same POSTs again.
+   /// the account is not asked again before `filters_retry_at`.
    #[serde(default)]
    pub filters_failed: bool,
+   /// Unix seconds before which the write is not retried. Zero means the next
+   /// pass may try. A refusal recorded before this was kept has no time, so it
+   /// is retried instead of being trusted: the writer that recorded it minted
+   /// transaction ids X refused, and that verdict said nothing about the
+   /// account.
+   #[serde(default)]
+   pub filters_retry_at: i64,
    pub apis: HashMap<String, RateLimit>,
    /// Operations X answers with an empty 404 from this account while another
    /// account gets a result, by operation name, with when that was seen.
@@ -77,6 +84,22 @@ pub struct SessionLimits {
    /// It stays in the pool for profile reads and stops being tried for search.
    #[serde(default)]
    pub search_banned: bool,
+   /// X refused the account itself with a 403 the settings write also gets
+   /// ("not permitted to access this feature"). The account is out of search,
+   /// and the view pool gets exactly one attempt to show it can still read
+   /// profiles.
+   #[serde(default)]
+   pub suspended: bool,
+   /// That one view attempt also came back suspended, so this account is done:
+   /// no search, no view, no settings write, ever. Persisted, because a restart
+   /// that forgot it would put the account straight back into rotation and
+   /// spend calls re-learning what is already known.
+   ///
+   /// This is the same verdict a dead `ct0` carries, reached from the account
+   /// side: the credentials are kept, and re-importing the account is how it
+   /// gets another chance.
+   #[serde(default)]
+   pub retired: bool,
    /// The `ct0` this account holds is no longer the one X accepts.
    ///
    /// Every call teapot makes is csrf-protected, so an account whose token has
@@ -141,6 +164,22 @@ const SEARCH_404_COOLDOWN_SECS: i64 = 30 * 60;
 /// outlives a change of query id.
 pub(crate) fn operation_name(api: &str) -> &str {
    api.rsplit('/').next().unwrap_or(api)
+}
+
+/// Calls an account makes about itself rather than on a visitor's behalf.
+///
+/// A search account is kept out of every non-search call so view traffic
+/// cannot burn it, but these two are how it turns its own NSFW filters off:
+/// the settings write, and the `verify_credentials` lookup that names the
+/// numeric id the search-safety write is keyed by. Without them a search
+/// account refuses its own settings write, and its filters stay on forever.
+///
+/// Both the operation name (`account/settings`) and a full URL
+/// (`.../account/settings.json`) are accepted, so a caller cannot land on the
+/// wrong side of this by passing the other form.
+pub(crate) fn is_self_service(name: &str) -> bool {
+   let name = name.strip_suffix(".json").unwrap_or(name);
+   matches!(name, "settings" | "verify_credentials")
 }
 
 /// A profile read. One 429 sits the account out for the window. A second
@@ -261,8 +300,8 @@ impl SessionLimits {
 
    /// Whether X refuses this account `api`. A confirmed suspension is
    /// permanent; every other refusal, search included, expires. A search-only
-   /// account refuses every call that is not search, so view traffic cannot
-   /// burn it.
+   /// account refuses every call that is not search — and not about itself —
+   /// so view traffic cannot burn it.
    #[must_use]
    pub fn refuses(&self, api: &str) -> bool {
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -274,7 +313,19 @@ impl SessionLimits {
       if self.ct0_dead {
          return true;
       }
-      if self.search_only && name != "SearchTimeline" {
+      // X refused the account itself twice: once at the settings write, then
+      // again on the one view attempt. Nothing is asked of it again.
+      if self.retired {
+         return true;
+      }
+      // A suspended account does not get another settings write. The write is
+      // what confirmed the suspension, so repeating it only spends a call to
+      // learn the same thing. Its one view attempt is still allowed — that is
+      // how a suspended account shows whether it can read profiles.
+      if self.suspended && is_self_service(name) {
+         return true;
+      }
+      if self.search_only && name != "SearchTimeline" && !is_self_service(name) {
          return true;
       }
       if name == "SearchTimeline"
@@ -491,6 +542,7 @@ impl Session {
             rejected: false,
             filters_cleared: false,
             filters_failed: false,
+            filters_retry_at: 0,
             apis: self.apis,
             refused_ops: HashMap::new(),
             verified_ops: HashMap::new(),
@@ -499,6 +551,8 @@ impl Session {
             search_404_at: None,
             search_only: self.pool.eq_ignore_ascii_case("search"),
             search_banned: false,
+            suspended: false,
+            retired: false,
             ct0_dead: false,
             resting: HashMap::new(),
          },
@@ -589,6 +643,24 @@ mod tests {
       let (_, limits) = session.into_credentials_and_limits();
       assert!(limits.search_only);
       assert!(limits.refuses("x/UserTweets"));
+      assert!(!limits.refuses("ph2f/SearchTimeline"));
+   }
+
+   #[test]
+   fn a_search_account_still_may_turn_its_own_filters_off() {
+      let mut limits = SessionLimits::default();
+      limits.reserve_for_search();
+
+      // Kept out of everything a visitor's page would ask for...
+      for api in ["x/UserTweets", "x/UserByScreenName", "x/TweetDetail"] {
+         assert!(limits.refuses(api), "{api}");
+      }
+
+      // ...but not out of the two calls that are how it stops hiding NSFW
+      // posts. Refusing those left every search-pool account with its filters
+      // on, which is the opposite of what the pool is for.
+      assert!(!limits.refuses("account/settings"));
+      assert!(!limits.refuses("/1.1/account/verify_credentials.json"));
       assert!(!limits.refuses("ph2f/SearchTimeline"));
    }
 

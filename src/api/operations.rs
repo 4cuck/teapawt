@@ -8,21 +8,37 @@
 //! first read and the operations the web client does not have.
 
 use std::{
-   collections::{BTreeMap, HashMap, HashSet},
-   sync::{Arc, LazyLock},
+   collections::{
+      BTreeMap,
+      HashMap,
+      HashSet,
+   },
+   sync::{
+      Arc,
+      LazyLock,
+   },
 };
 
 use axum::http::HeaderMap;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::{
+   Deserialize,
+   Serialize,
+};
 use serde_json::Value;
 use tokio::{
    fs,
-   sync::{RwLock, Semaphore},
+   sync::{
+      RwLock,
+      Semaphore,
+   },
    task::JoinSet,
 };
 
-use super::http::{Egress, HttpClient};
+use super::http::{
+   Egress,
+   HttpClient,
+};
 
 /// Operations sent from cookie sessions that the web client also sends.
 /// `UserResultByIdQuery`, `MediaTimelineV2`, `AboutAccountQuery` and the
@@ -83,26 +99,26 @@ static CHUNK_ENTRY_RE: LazyLock<Regex> =
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Operation {
-   id: String,
+   id:       String,
    /// Feature names, in the order the web client sends them.
-   names: Vec<String>,
+   names:    Vec<String>,
    /// The `features` query value: `names` with the homepage's values.
    #[serde(default)]
    features: String,
    /// Lazy chunk id and URL it was found in. `None` means the main bundle.
    #[serde(default, skip_serializing_if = "Option::is_none")]
-   chunk: Option<(String, String)>,
+   chunk:    Option<(String, String)>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Book {
    /// Main bundle the entries were read from.
-   bundle: String,
+   bundle:     String,
    operations: BTreeMap<String, Operation>,
    /// Operations no chunk of this build had. They are not searched for again
    /// until X deploys.
    #[serde(default)]
-   absent: Vec<String>,
+   absent:     Vec<String>,
 }
 
 /// Live query ids and features, shared by every request.
@@ -183,12 +199,14 @@ impl Operations {
 
       // A lazy entry stands while its chunk is the same file.
       let mut hint = HashSet::new();
-      operations.retain(|_, operation| match &operation.chunk {
-         None => true,
-         Some((id, url)) => {
-            hint.insert(id.clone());
-            chunks.get(id) == Some(url)
-         },
+      operations.retain(|_, operation| {
+         match &operation.chunk {
+            None => true,
+            Some((id, url)) => {
+               hint.insert(id.clone());
+               chunks.get(id) == Some(url)
+            },
+         }
       });
 
       let missing: Vec<&str> = WEB_OPERATIONS
@@ -348,15 +366,12 @@ fn operations_in(js: &str) -> HashMap<String, Operation> {
             .captures_iter(&caps[3])
             .map(|name| name[1].to_owned())
             .collect();
-         (
-            caps[2].to_owned(),
-            Operation {
-               id: caps[1].to_owned(),
-               names,
-               features: String::new(),
-               chunk: None,
-            },
-         )
+         (caps[2].to_owned(), Operation {
+            id: caps[1].to_owned(),
+            names,
+            features: String::new(),
+            chunk: None,
+         })
       })
       .collect()
 }
@@ -440,14 +455,11 @@ mod tests {
       let operations = operations_in(MAIN);
       let search = &operations["SearchTimeline"];
       assert_eq!(search.id, "ph2fARFabkwfxqmSKQ1OPw");
-      assert_eq!(
-         search.names,
-         vec![
-            "rweb_video_screen_enabled",
-            "rweb_conversational_replies_downvote_enabled",
-            "articles_preview_enabled",
-         ]
-      );
+      assert_eq!(search.names, vec![
+         "rweb_video_screen_enabled",
+         "rweb_conversational_replies_downvote_enabled",
+         "articles_preview_enabled",
+      ]);
       assert!(operations["UserByScreenName"].names.is_empty());
    }
 
@@ -490,15 +502,17 @@ mod tests {
             .await
             .is_none()
       );
-      operations.book.write().await.operations.insert(
-         "SearchTimeline".into(),
-         Operation {
-            id: "ph2fARFabkwfxqmSKQ1OPw".into(),
-            names: Vec::new(),
+      operations
+         .book
+         .write()
+         .await
+         .operations
+         .insert("SearchTimeline".into(), Operation {
+            id:       "ph2fARFabkwfxqmSKQ1OPw".into(),
+            names:    Vec::new(),
             features: "{}".into(),
-            chunk: None,
-         },
-      );
+            chunk:    None,
+         });
       let (endpoint, features) = operations
          .resolve("hyPfJYJ_XAtDYoslQc-Rgg/SearchTimeline")
          .await
