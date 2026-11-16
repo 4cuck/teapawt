@@ -9,6 +9,8 @@
 //! This is the manual escape hatch. One account, one call, on demand. It is
 //! never scheduled: nothing here runs unless an administrator asks for it.
 
+use axum::http::header;
+use bytes::Bytes;
 use serde::Deserialize;
 
 use super::{
@@ -20,13 +22,21 @@ use crate::error::{
    Result,
 };
 
+/// Form body for the settings write used as the probe. Same payload the filter
+/// batch uses; it only toggles display_sensitive_media so it is idempotent.
+const PROBE_SETTINGS_BODY: &str = concat!(
+   "include_mention_filter=true&include_nsfw_user_flag=true&include_nsfw_admin_flag=true",
+   "&include_ranked_timeline=true&include_alt_text_compose=true",
+   "&include_ext_dm_av_call_settings=true&display_sensitive_media=true",
+);
+
 /// What X said about one account, asked once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeVerdict {
-   /// X answered for the account. The credentials are alive and the account is
-   /// not suspended, whatever the stored verdict says.
+   /// X accepted the settings write. The account is live and can act.
    Alive,
-   /// X refused the account itself: 403 code 64, or code 63 in a JSON body.
+   /// X refused the account itself with 403 code 64 on a real write path,
+   /// which is distinct from the settings gate that refuses some live accounts.
    Suspended,
    /// The credentials were refused outright (401, 403 code 326, bad csrf). The
    /// account cannot act, but this says nothing about a suspension.
@@ -48,25 +58,29 @@ impl ProbeVerdict {
    reason = "the probe is split from GraphQL endpoint methods"
 )]
 impl ApiClient {
-   /// Ask X about one account with `verify_credentials`.
+   /// Ask X about one account with a settings write.
    ///
-   /// The call is the one the pool already uses to resolve an account's own id,
-   /// so it is known to answer for a cookie session without a transaction id
-   /// for the settings path. A suspended account refuses it with code 64, which
-   /// is the same answer the settings write gives — and that is exactly why a
-   /// settings refusal alone was never proof of anything.
+   /// A successful POST to `account/settings` proves the account can act:
+   /// a suspended account cannot write settings. `verify_credentials` only
+   /// checks whether credentials are accepted, which a suspended account can
+   /// pass while still being unable to perform any real action.
    pub async fn probe_account(&self, session_id: i64) -> Result<ProbeVerdict> {
       // A probe deliberately ignores the pool's verdict: that is the point.
       let session = self.sessions.probe_lease(session_id).await?;
-      let path = "/1.1/account/verify_credentials.json";
-      let headers = self
-         .settings_headers(&session, "GET", path, "application/x-www-form-urlencoded")
+      let path = "/1.1/account/settings.json";
+      let mut headers = self
+         .settings_headers(&session, "POST", path, "application/x-www-form-urlencoded")
          .await?;
+      headers.insert(
+         header::REFERER,
+         header::HeaderValue::from_static("https://x.com/settings/content_you_see"),
+      );
       let response = self
          .client
-         .get_on(
-            endpoints::VERIFY_CREDENTIALS_URL,
+         .post_on(
+            endpoints::ACCOUNT_SETTINGS_URL,
             &headers,
+            Bytes::from_static(PROBE_SETTINGS_BODY.as_bytes()),
             Some(&self.egress_for(&session)),
          )
          .await?;
@@ -74,14 +88,14 @@ impl ApiClient {
       let body = response.text().await.unwrap_or_default();
 
       if status.is_success() {
-         // A body without an id is not an answer about this account.
          #[derive(Deserialize)]
-         struct Own {
-            id_str: String,
+         struct Settings {
+            display_sensitive_media: bool,
          }
-         return match serde_json::from_str::<Own>(&body) {
-            Ok(own) if !own.id_str.is_empty() => Ok(ProbeVerdict::Alive),
-            _ => Err(Error::TransientUpstream),
+         return match serde_json::from_str::<Settings>(&body) {
+            Ok(_) => Ok(ProbeVerdict::Alive),
+            // A 200 without a parseable settings body is not a confirmed answer.
+            Err(_) => Err(Error::TransientUpstream),
          };
       }
 

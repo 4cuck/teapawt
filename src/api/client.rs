@@ -1828,15 +1828,23 @@ impl ApiClient {
          // settings probe to re-learn a verdict already known.
          let code = twitter_error_code(&body);
          if status.as_u16() == 403 && code == Some(64) {
-            self.sessions.record_event(
-               crate::stats::AccountEvent::new(
-                  session.id,
-                  crate::stats::Restriction::Suspended,
-                  endpoint,
-                  "Upstream reports account suspension or access refusal",
-               )
-               .upstream(status.as_u16(), code),
-            );
+            // The settings endpoint is gated separately from search and profile
+            // reads: X returns code 64 there for accounts that answer search
+            // calls with 200 and posts. Treating that as a confirmed suspension
+            // would bench accounts that are working fine. Route it through the
+            // Settings probe so it only paces the next write, not the account.
+            let is_settings = endpoint == endpoints::ACCOUNT_SETTINGS;
+            if !is_settings {
+               self.sessions.record_event(
+                  crate::stats::AccountEvent::new(
+                     session.id,
+                     crate::stats::Restriction::Suspended,
+                     endpoint,
+                     "Upstream reports account suspension or access refusal",
+                  )
+                  .upstream(status.as_u16(), code),
+               );
+            }
             tracing::debug!(
                session_id = session.id,
                session_user = %session.username,
@@ -1844,10 +1852,14 @@ impl ApiClient {
                "X refuses this account: {shown}"
             );
             self.sessions.disarm_meter(session);
-            // `None` because the event above already recorded the suspension;
-            // counting it again here would double the census.
+            let (probe, evidence) = if is_settings {
+               (SuspensionProbe::Settings, "Settings write refused (code 64)")
+            } else {
+               // `None` restriction: the event above already recorded it.
+               (SuspensionProbe::Data, "Account suspended")
+            };
             self.sessions
-               .note_suspended(session.id, SuspensionProbe::Data, None, "Account suspended")
+               .note_suspended(session.id, probe, None, evidence)
                .await;
             return Err(Error::UserSuspended(format!("Status {status}: {shown}")));
          }

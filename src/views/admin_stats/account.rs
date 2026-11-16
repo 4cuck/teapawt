@@ -50,14 +50,14 @@ pub(crate) fn account(_theme: &str, id: i64, data: Option<&AccountData>) -> Mark
             }
          }
          section class="admin-stats-panel admin-probe-panel" data-session=(id) {
-            h2 { "Health probe" }
+            h2 { "Account health check" }
             p class="admin-hint" {
-               "Asks X about this account once with " code { "verify_credentials" }
-               ". A live answer clears a stored suspension and returns the account to the pool it was imported for. "
-               "This is the only call spent on a benched account, and nothing schedules it."
+               "Writes account settings once to test whether this account can act. "
+               "A successful write clears a stored suspension and returns the account to its pool. "
+               "Nothing schedules this — it only runs when you ask."
             }
             div class="admin-probe-actions" {
-               button id="run-probe" type="button" { "Probe this account" }
+               button id="run-probe" type="button" { "Check account health" }
             }
             p id="probe-status" role="status" {}
             div id="probe-result" hidden {
