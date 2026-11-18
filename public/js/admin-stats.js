@@ -5,12 +5,12 @@
   const FETCH_TIMEOUT_MS = 15000;
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
-  const VIEWBOX_WIDTH = 640;
+  const VIEWBOX_WIDTH = 760;
   const PLOT_LEFT = 16;
-  const PLOT_RIGHT = 624;
-  const PLOT_WIDTH = 608;
-  const PLOT_BOTTOM = 164;
-  const PLOT_HEIGHT = 148;
+  const PLOT_RIGHT = 744;
+  const PLOT_WIDTH = 728;
+  const PLOT_BOTTOM = 240;
+  const PLOT_HEIGHT = 224;
   const CLICK_MAX_DRAG_PX = 6;
   const BRUSH_MIN_DRAG_PX = 8;
 

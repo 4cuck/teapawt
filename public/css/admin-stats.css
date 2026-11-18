@@ -178,7 +178,7 @@ body {
   padding: 0;
   background: var(--admin-bg);
   color: var(--admin-fg);
-  font: 14.5px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font: 15.5px/1.55 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -328,13 +328,13 @@ dd,
 main.admin-stats,
 #admin-stats-main {
   width: 100%;
-  max-width: 1600px;
+  max-width: none;
   min-width: 0;
-  margin: 0 auto;
-  padding: 32px 36px 72px;
+  margin: 0;
+  padding: 32px 40px 72px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 26px;
 }
 
 /* ── Page Header & Sections ──────────────────────────────────────────────── */
@@ -1067,18 +1067,18 @@ button:disabled,
 
 .admin-panel-header h3,
 .admin-panel-head h3 {
-  margin: 0 0 3px;
+  margin: 0 0 4px;
   color: var(--admin-fg-strong);
-  font-size: 14.5px;
+  font-size: 16.5px;
   font-weight: 650;
 }
 
 .admin-panel-note {
   margin: 0;
   color: var(--admin-muted);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.45;
-  max-width: 52ch;
+  max-width: 60ch;
 }
 
 .admin-panel-stats,
@@ -1087,7 +1087,7 @@ button:disabled,
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 10px 16px;
+  gap: 10px 18px;
   text-align: right;
   flex: none;
 }
@@ -1099,7 +1099,7 @@ dl.admin-panel-stat {
 .admin-panel-stats dt,
 .admin-panel-stat dt {
   color: var(--admin-muted);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -1109,53 +1109,42 @@ dl.admin-panel-stat {
 .admin-panel-stat dd {
   margin: 2px 0 0;
   color: var(--admin-fg-strong);
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 700;
   line-height: 1.15;
 }
 
 .admin-chart {
   display: grid;
-  grid-template-columns: 52px minmax(0, 1fr);
-  gap: 8px;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 10px;
   align-items: stretch;
+  width: 100%;
 }
 
 .admin-chart svg {
+  grid-column: 2;
   display: block;
   width: 100%;
-  height: 136px;
+  min-height: 230px;
+  height: auto;
+  aspect-ratio: 760 / 260;
 }
 
 .admin-panel-axis {
+  grid-column: 1;
+  position: static;
+  width: auto;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   align-items: flex-end;
-  padding: 2px 0;
+  padding: 6px 0;
   color: var(--admin-muted);
-  font-size: 11px;
+  font-size: 12.5px;
   line-height: 1;
   white-space: nowrap;
   user-select: none;
-}
-
-/* Support legacy .admin-panel-plot structure alongside .admin-chart */
-.admin-panel-plot {
-  position: relative;
-  padding-left: 56px;
-}
-
-.admin-panel-plot svg {
-  display: block;
-  width: 100%;
-  height: 136px;
-}
-
-.admin-panel-plot > .admin-panel-axis {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 48px;
 }
 
 .admin-panel-xaxis {
@@ -1164,12 +1153,12 @@ dl.admin-panel-stat {
   align-items: center;
   gap: 8px;
   color: var(--admin-muted);
-  font-size: 11px;
+  font-size: 12.5px;
   line-height: 1.2;
 }
 
 .admin-chart + .admin-panel-xaxis {
-  padding-left: 60px;
+  padding-left: 74px;
 }
 
 .admin-chart > .admin-panel-xaxis {
@@ -1968,11 +1957,12 @@ svg [hidden] {
   display: none !important;
 }
 
-.admin-chart .admin-panel-svg,
-.admin-panel-plot .admin-panel-svg {
+.admin-chart .admin-panel-svg {
+  grid-column: 2;
   width: 100%;
+  min-height: 230px;
   height: auto;
-  aspect-ratio: 640 / 180;
+  aspect-ratio: 760 / 260;
   display: block;
   user-select: none;
   -webkit-user-select: none;

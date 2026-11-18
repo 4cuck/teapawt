@@ -381,8 +381,8 @@ pub(crate) fn frame(
             meta name="viewport" content="width=device-width, initial-scale=1";
             meta name="robots" content="noindex, nofollow";
             title { (title) " · Teapot administration" }
-            link rel="stylesheet" href="/css/admin-stats.css?v=7";
-            script src="/js/admin-stats.js?v=7" defer="" {}
+            link rel="stylesheet" href="/css/admin-stats.css?v=8";
+            script src="/js/admin-stats.js?v=8" defer="" {}
          }
          body data-theme=(mode) {
             div class="admin-layout admin-workspace" {
@@ -1144,9 +1144,9 @@ fn panel(
    let max_gap = if hourly { 7200_i64 } else { 180_i64 };
 
    let x_at = |minute: i64| -> f64 {
-      16.0 + 608.0 * ((minute - window_start).clamp(0, span) as f64 / span_denom)
+      16.0 + 728.0 * ((minute - window_start).clamp(0, span) as f64 / span_denom)
    };
-   let y_at = |value: f64| -> f64 { 164.0 - 148.0 * (value.clamp(0.0, maximum) / maximum) };
+   let y_at = |value: f64| -> f64 { 240.0 - 224.0 * (value.clamp(0.0, maximum) / maximum) };
 
    // Split into contiguous runs so missing minutes are not connected by fake lines.
    let mut segments: Vec<Vec<(f64, f64)>> = Vec::new();
@@ -1188,13 +1188,13 @@ fn panel(
             let _ = write!(line, " L{pt_x:.2} {pt_y:.2}");
             let _ = write!(area, " L{pt_x:.2} {pt_y:.2}");
          }
-         let _ = write!(area, " L{last_x:.2} 164 L{first_x:.2} 164 Z");
+         let _ = write!(area, " L{last_x:.2} 240 L{first_x:.2} 240 Z");
       }
    }
 
    let threshold = panel.threshold.map(|value| {
       let pt_y = y_at(value);
-      format!("M16 {pt_y:.2} H624")
+      format!("M16 {pt_y:.2} H744")
    });
 
    let mid_unix = window_start + span / 2;
@@ -1227,7 +1227,7 @@ fn panel(
                }
             }
          }
-         div class="admin-chart admin-panel-plot" {
+         div class="admin-chart" {
             div class="admin-panel-axis" aria-hidden="true" {
                span data-axis="max" { (format_panel_val(maximum, panel.unit)) }
                span data-axis="mid" { (format_panel_val(maximum / 2.0, panel.unit)) }
@@ -1235,14 +1235,14 @@ fn panel(
             }
             svg
                class="admin-panel-svg"
-               viewBox="0 0 640 180"
+               viewBox="0 0 760 260"
                role="img"
                aria-label=(format!("{} over selected window", panel.title))
             {
                path
                   class="stats-grid"
                   vector-effect="non-scaling-stroke"
-                  d="M16 16 H624 M16 53 H624 M16 90 H624 M16 127 H624 M16 164 H624"
+                  d="M16 16 H744 M16 72 H744 M16 128 H744 M16 184 H744 M16 240 H744"
                {}
                @if let Some(path_d) = threshold {
                   path class="stats-threshold" vector-effect="non-scaling-stroke" d=(path_d) {}
@@ -1251,14 +1251,14 @@ fn panel(
                path class="stats-line" vector-effect="non-scaling-stroke" d=(line) {}
                g class="stats-dots" {
                   @for (cx, cy) in &dots {
-                     circle class="stats-dot" cx=(cx) cy=(cy) r="3.5" {}
+                     circle class="stats-dot" cx=(cx) cy=(cy) r="4" {}
                   }
                }
-               rect class="stats-brush" x="16" y="16" width="0" height="148" hidden {}
-               line class="stats-crosshair" x1="16" y1="16" x2="16" y2="164" hidden {}
-               circle class="stats-hover-ring" cx="0" cy="0" r="7" hidden {}
-               circle class="stats-hover-dot" cx="0" cy="0" r="3.8" hidden {}
-               rect class="stats-hit-area" x="16" y="12" width="608" height="156" {}
+               rect class="stats-brush" x="16" y="16" width="0" height="224" hidden {}
+               line class="stats-crosshair" x1="16" y1="16" x2="16" y2="240" hidden {}
+               circle class="stats-hover-ring" cx="0" cy="0" r="8" hidden {}
+               circle class="stats-hover-dot" cx="0" cy="0" r="4.2" hidden {}
+               rect class="stats-hit-area" x="16" y="12" width="728" height="236" {}
             }
          }
          div class="admin-panel-xaxis" aria-hidden="true" {
@@ -1410,8 +1410,8 @@ mod tests {
 
       let markup = page("light", Some(&dashboard), WEEK_MINUTES).into_string();
       assert!(markup.contains("data-theme=\"light\""));
-      assert!(markup.contains("/css/admin-stats.css?v=7"));
-      assert!(markup.contains("/js/admin-stats.js?v=7"));
+      assert!(markup.contains("/css/admin-stats.css?v=8"));
+      assert!(markup.contains("/js/admin-stats.js?v=8"));
       assert!(!markup.contains("style=\""));
       assert!(!markup.contains("<script>"));
       assert!(markup.contains("Anti-DDoS &amp; timeline pressure"));
@@ -1439,7 +1439,7 @@ mod tests {
       assert!(markup.contains("data-xaxis=\"start\""));
       assert!(markup.contains("data-xaxis=\"mid\""));
       assert!(markup.contains("data-xaxis=\"end\""));
-      assert!(markup.contains("<svg class=\"admin-panel-svg\" viewBox=\"0 0 640 180\" role=\"img\""));
+      assert!(markup.contains("<svg class=\"admin-panel-svg\" viewBox=\"0 0 760 260\" role=\"img\""));
       assert!(markup.contains("class=\"stats-dots\""));
       assert!(markup.contains("class=\"stats-brush\""));
       assert!(markup.contains("class=\"stats-crosshair\""));
@@ -1469,7 +1469,7 @@ mod tests {
       assert!(markup.contains("data-window-end=\"3600\""));
       assert!(markup.contains("data-hourly=\"false\""));
       assert!(markup.contains("data-include-date=\"false\""));
-      assert!(markup.contains("class=\"stats-dot\" cx=\"624.00\" cy=\"16.00\" r=\"3.5\""));
+      assert!(markup.contains("class=\"stats-dot\" cx=\"744.00\" cy=\"16.00\" r=\"4\""));
 
       let empty_markup = page("dark", None, 15).into_string();
       assert!(empty_markup.contains("class=\"admin-chart-controls\" hidden"));
