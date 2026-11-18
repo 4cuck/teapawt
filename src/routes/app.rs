@@ -1,6 +1,9 @@
 //! The route table.
 
-use axum::Router;
+use axum::{
+   Router,
+   routing::post,
+};
 
 use crate::AppState;
 
@@ -17,7 +20,8 @@ pub fn router(indexnow_key: &str) -> Router<AppState> {
       .merge(super::admin_stats::router())
       .merge(super::unsupported::router())
       .merge(super::debug::router())
-      .merge(super::scrape_gate::router())
+      .merge(super::anti_ddos::router())
+      .route("/.scrape-check", post(super::anti_ddos::check))
       .merge(super::redirect::router())
       .merge(super::intent::router())
       .merge(super::search::router())

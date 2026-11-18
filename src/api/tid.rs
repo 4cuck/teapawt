@@ -52,7 +52,7 @@ pub struct TidClient {
    http:         HttpClient,
    /// Loads the web client's script chunks from abs.twimg.com.
    scripts:      HttpClient,
-   sessions:     SessionPool,
+   sessions:     Option<SessionPool>,
    proxies:      Option<Arc<ProxyPool>>,
    operations:   Operations,
    last_fetch:   Arc<Mutex<Instant>>,
@@ -90,7 +90,7 @@ impl TidClient {
          inner: Arc::new(RwLock::new(None)),
          http,
          scripts,
-         sessions,
+         sessions: Some(sessions),
          proxies,
          operations,
          last_fetch: Arc::new(Mutex::new(
@@ -142,13 +142,17 @@ impl TidClient {
    }
 
    /// Record that X answered this request with a bodyless 404, which is how it
-   /// refuses a transaction ID it will not accept.
-   pub async fn note_refused(&self, method: &str, path: &str) {
-      self
-         .refused
-         .write()
-         .await
-         .insert(Self::refusal_key(method, path), Instant::now());
+   /// refuses a transaction ID it will not accept. Returns `true` when the
+   /// refusal is new or its previous window had expired.
+   pub async fn note_refused(&self, method: &str, path: &str) -> bool {
+      let mut guard = self.refused.write().await;
+      let key = Self::refusal_key(method, path);
+      let now = Instant::now();
+      let newly_refused = guard
+         .insert(key, now)
+         .is_none_or(|prev| prev.elapsed() >= REFUSAL_INTERVAL);
+      drop(guard);
+      newly_refused
    }
 
    /// Forget a refusal once a call with a transaction ID works again.
@@ -333,7 +337,8 @@ impl TidClient {
       // to reach the client-web app the transaction ID is derived from.
       let (session_id, cookie) = self
          .sessions
-         .cookie_header()
+         .as_ref()
+         .and_then(SessionPool::cookie_header)
          .ok_or("no cookie session available for TID bootstrap")?;
       headers.insert(
          header::COOKIE,
@@ -366,4 +371,49 @@ fn now_millis() -> u64 {
       .duration_since(UNIX_EPOCH)
       .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
       .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+   use crate::api::http::Purpose;
+
+   fn test_client() -> TidClient {
+      TidClient {
+         inner:        Arc::new(RwLock::new(None)),
+         http:         HttpClient::new("", "", Purpose::Api),
+         scripts:      HttpClient::new("", "", Purpose::Script),
+         sessions:     None,
+         proxies:      None,
+         operations:   Operations::load(),
+         last_fetch:   Arc::new(Mutex::new(
+            Instant::now().checked_sub(REFRESH_INTERVAL).unwrap(),
+         )),
+         next_refresh: Arc::new(AtomicU64::new(0)),
+         refused:      Arc::new(RwLock::new(HashMap::new())),
+         rechecked:    Arc::new(Mutex::new(None)),
+      }
+   }
+
+   #[tokio::test]
+   async fn note_refused_returns_true_first_then_false_on_duplicate() {
+      let tid = test_client();
+      let path = "/i/api/graphql/abc/TweetDetail";
+
+      assert!(tid.note_refused("GET", path).await);
+      assert!(!tid.note_refused("GET", path).await);
+      assert!(tid.is_refused("GET", path).await);
+
+      assert!(tid.note_refused("POST", path).await);
+      assert!(!tid.note_refused("POST", path).await);
+
+      tid.clear_refused("GET", path).await;
+      assert!(tid.note_refused("GET", path).await);
+
+      tid.refused.write().await.insert(
+         TidClient::refusal_key("GET", path),
+         Instant::now().checked_sub(REFUSAL_INTERVAL).unwrap(),
+      );
+      assert!(tid.note_refused("GET", path).await);
+   }
 }

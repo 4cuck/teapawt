@@ -2,6 +2,7 @@
 
 pub(crate) mod admin_stats;
 pub(crate) mod agents;
+pub(crate) mod anti_ddos;
 pub(crate) use admin_stats::{
    AccountData,
    InvestigationData,
@@ -30,7 +31,6 @@ mod pass;
 mod preferences;
 mod redirect;
 mod rss;
-mod scrape_gate;
 mod search;
 mod search_gate;
 mod seo;
@@ -40,10 +40,10 @@ mod trending;
 mod unsupported;
 
 pub use agents::negotiate;
+pub use anti_ddos::gate;
 pub use app::router;
 pub use middleware::{
    client_middleware,
    prefs_middleware,
    snowflake_guard,
 };
-pub use scrape_gate::scrape_gate;

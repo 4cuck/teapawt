@@ -55,7 +55,7 @@ fn page(theme: &str, title: &str, dashboard: bool, content: Markup) -> Markup {
    }
 }
 
-pub(crate) fn dashboard(theme: &str, snapshot: Option<&Snapshot>) -> Markup {
+pub(crate) fn dashboard(theme: &str, snapshot: Option<&Snapshot>, is_admin: bool) -> Markup {
    page(
       theme,
       "Account inventory",
@@ -64,7 +64,9 @@ pub(crate) fn dashboard(theme: &str, snapshot: Option<&Snapshot>) -> Markup {
          p class="import-lead" {
             "Pool totals and recent import batches. No individual accounts are shown."
             a href=(PUBLIC_PATH) { "Refresh" }
-            a class="import-submit import-action" href=(ADMIN_PATH) { "Import accounts" }
+            @if is_admin {
+               a class="import-submit import-action" href=(ADMIN_PATH) { "Import accounts" }
+            }
          }
          div hx-get=(REFRESH_PATH) hx-trigger="every 60s" hx-swap="innerHTML" aria-live="polite" {
             (figures(snapshot))
@@ -143,10 +145,12 @@ fn summary_line(values: &ImportSummary) -> Markup {
 pub(crate) fn admin(
    theme: &str,
    csrf: &str,
+   selected_pool: &str,
    max_chars: usize,
    max_lines: usize,
    notice: Option<&AdminNotice>,
 ) -> Markup {
+   let search_selected = selected_pool == "search";
    page(
       theme,
       "Import accounts",
@@ -171,8 +175,8 @@ pub(crate) fn admin(
                div class="import-field" {
                   label for="import-pool" { "Pool" }
                   select id="import-pool" name="pool" required {
-                     option value="view" { "View" }
-                     option value="search" { "Search" }
+                     option value="view" selected[!search_selected] { "View" }
+                     option value="search" selected[search_selected] { "Search" }
                   }
                }
                div class="import-field" {
@@ -209,4 +213,26 @@ pub(crate) fn forbidden(theme: &str) -> Markup {
          }
       },
    )
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn admin_form_preserves_selected_pool_and_dashboard_gates_admin_link() {
+      let default_form = admin("Teapot", "token", "view", 1024, 10, None).into_string();
+      assert!(default_form.contains("<option value=\"view\" selected>View</option>"));
+      assert!(default_form.contains("<option value=\"search\">Search</option>"));
+
+      let search_form = admin("Teapot", "token", "search", 1024, 10, None).into_string();
+      assert!(search_form.contains("<option value=\"view\">View</option>"));
+      assert!(search_form.contains("<option value=\"search\" selected>Search</option>"));
+
+      let visitor_page = dashboard("Teapot", None, false).into_string();
+      assert!(!visitor_page.contains(ADMIN_PATH));
+
+      let admin_page = dashboard("Teapot", None, true).into_string();
+      assert!(admin_page.contains(ADMIN_PATH));
+   }
 }

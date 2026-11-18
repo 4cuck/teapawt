@@ -10,7 +10,14 @@ use std::{
    env,
    fmt,
    io,
-   sync::Arc,
+   sync::{
+      Arc,
+      Mutex as StdMutex,
+   },
+   time::{
+      Duration,
+      Instant,
+   },
 };
 
 use serde::Serialize;
@@ -48,6 +55,7 @@ const MIGRATION: &str = "legacy-v1";
 const SEARCH: &str = "search";
 const AUTH: &str = "auth_token";
 const CSRF: &str = "ct0";
+const STATS_CACHE_TTL: Duration = Duration::from_secs(5);
 
 const SCHEMA: &str = "\
    CREATE TABLE IF NOT EXISTS account_sessions (
@@ -79,8 +87,11 @@ const INSERT_COOKIE: &str =
 /// transaction's statements cannot interleave with another operation.
 #[derive(Clone)]
 pub struct AccountStore {
-   client: Arc<Mutex<Client>>,
+   client:      Arc<Mutex<Client>>,
+   stats_cache: Arc<StdMutex<CachedStats>>,
 }
+
+type CachedStats = Option<(Instant, Stats)>;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Stats {
@@ -187,8 +198,16 @@ impl AccountStore {
       tx.batch_execute(SCHEMA).await.map_err(db_error)?;
       tx.commit().await.map_err(db_error)?;
       Ok(Self {
-         client: Arc::new(Mutex::new(client)),
+         client:      Arc::new(Mutex::new(client)),
+         stats_cache: Arc::default(),
       })
+   }
+
+   fn invalidate_stats_cache(&self) {
+      *self
+         .stats_cache
+         .lock()
+         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
    }
 
    pub async fn load(&self) -> Result<Vec<Session>> {
@@ -261,16 +280,19 @@ impl AccountStore {
       require_migration(&*client).await?;
       client
          .execute(
-            "UPDATE account_sessions SET body = jsonb_set(body, '{pool}', '\"\"'::jsonb)
+            "UPDATE account_sessions
+          SET body = body || '{\"pool\":\"\",\"demoted_from\":\"search\"}'::jsonb
           WHERE id = $1 AND lower(body->>'pool') = 'search'",
             &[&id],
          )
          .await
          .map_err(db_error)?;
+      self.invalidate_stats_cache();
       Ok(())
    }
 
-   /// Whether this account was imported into the search pool.
+   /// Whether this account was imported into the search pool or demoted from
+   /// it.
    ///
    /// Read from the store rather than the live slot, because the slot's limits
    /// are what a probe is trying to correct.
@@ -278,7 +300,9 @@ impl AccountStore {
       let client = self.client.lock().await;
       client
          .query_opt(
-            "SELECT 1 FROM account_sessions WHERE id = $1 AND lower(body->>'pool') = 'search'",
+            "SELECT 1 FROM account_sessions
+          WHERE id = $1
+            AND (lower(body->>'pool') = 'search' OR lower(body->>'demoted_from') = 'search')",
             &[&id],
          )
          .await
@@ -293,12 +317,32 @@ impl AccountStore {
       require_migration(&*client).await?;
       client
          .execute(
-            "UPDATE account_sessions SET body = jsonb_set(body, '{pool}', '\"search\"'::jsonb)
+            "UPDATE account_sessions
+          SET body = (body - 'demoted_from') || '{\"pool\":\"search\"}'::jsonb
           WHERE id = $1",
             &[&id],
          )
          .await
          .map_err(db_error)?;
+      self.invalidate_stats_cache();
+      Ok(())
+   }
+
+   /// Explicitly move an account into the view pool, clearing any demotion
+   /// marker.
+   pub async fn move_to_view(&self, id: i64) -> Result<()> {
+      let client = self.client.lock().await;
+      require_migration(&*client).await?;
+      client
+         .execute(
+            "UPDATE account_sessions
+          SET body = (body - 'demoted_from') || '{\"pool\":\"\"}'::jsonb
+          WHERE id = $1",
+            &[&id],
+         )
+         .await
+         .map_err(db_error)?;
+      self.invalidate_stats_cache();
       Ok(())
    }
 
@@ -378,6 +422,7 @@ impl AccountStore {
       .await
       .map_err(db_error)?;
       tx.commit().await.map_err(db_error)?;
+      self.invalidate_stats_cache();
       Ok(summary)
    }
 
@@ -439,8 +484,9 @@ impl AccountStore {
          let id: i64 = row.try_get(0).map_err(db_error)?;
          let moved = tx
             .execute(
-               "UPDATE account_sessions SET body = jsonb_set(body, '{pool}', '\"search\"') WHERE \
-                id = $1 AND coalesce(body->>'pool', '') <> 'search'",
+               "UPDATE account_sessions SET body = (body - 'demoted_from') || \
+                '{\"pool\":\"search\"}'::jsonb WHERE id = $1 AND (coalesce(lower(body->>'pool'), \
+                '') <> 'search' OR body ? 'demoted_from')",
                &[&id],
             )
             .await
@@ -449,7 +495,8 @@ impl AccountStore {
             tx.execute(
                "UPDATE session_limits SET body = ((body #- \
                 '{refused_ops,SearchTimeline}'::text[]) - 'search_404_at'::text) || \
-                '{\"search_banned\":false,\"search_only\":true}'::jsonb WHERE id = $1",
+                '{\"search_banned\":false,\"search_only\":true,\"suspended\":false,\"retired\":\
+                false,\"demoted_from_search\":false}'::jsonb WHERE id = $1",
                &[&id],
             )
             .await
@@ -458,6 +505,7 @@ impl AccountStore {
          }
       }
       tx.commit().await.map_err(db_error)?;
+      self.invalidate_stats_cache();
       Ok(restored)
    }
 
@@ -517,6 +565,17 @@ impl AccountStore {
    }
 
    pub async fn stats(&self) -> Result<Stats> {
+      {
+         let cached = self
+            .stats_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+         if let Some((fetched_at, stats)) = *cached
+            && fetched_at.elapsed() < STATS_CACHE_TTL
+         {
+            return Ok(stats);
+         }
+      }
       let client = self.client.lock().await;
       require_migration(&*client).await?;
       let row = client
@@ -529,11 +588,16 @@ impl AccountStore {
          .map_err(db_error)?;
       let total = row.try_get(0).map_err(db_error)?;
       let search = row.try_get(1).map_err(db_error)?;
-      Ok(Stats {
+      let stats = Stats {
          total,
          search,
          view: total - search,
-      })
+      };
+      *self
+         .stats_cache
+         .lock()
+         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((Instant::now(), stats));
+      Ok(stats)
    }
 
    /// First boot only: import sessions in JSONL order, then attach their jars.
@@ -577,6 +641,7 @@ impl AccountStore {
       .await
       .map_err(db_error)?;
       tx.commit().await.map_err(db_error)?;
+      self.invalidate_stats_cache();
       if orphan_jars != 0 {
          tracing::warn!(
             orphan_jars,
@@ -1004,5 +1069,23 @@ mod tests {
       assert_eq!(ids.len(), 2);
       assert!(audit_legacy(&format!("{source}\n{{\"id\":42}}")).is_err());
       assert!(audit_legacy(&format!("{source}\ninvalid")).is_err());
+   }
+
+   #[test]
+   fn demoted_session_body_keeps_empty_pool_and_records_search_origin() {
+      let mut saved: Session =
+         serde_json::from_str(r#"{"id":45,"pool":"","demoted_from":"search","auth_token":"a"}"#)
+            .unwrap();
+      assert!(saved.pool.is_empty());
+      assert_eq!(saved.demoted_from, "search");
+      let (_, limits) = saved.clone().into_credentials_and_limits();
+      assert!(!limits.search_only);
+      assert!(limits.demoted_from_search);
+
+      SEARCH.clone_into(&mut saved.pool);
+      saved.demoted_from.clear();
+      let (_, restored_limits) = saved.into_credentials_and_limits();
+      assert!(restored_limits.search_only);
+      assert!(!restored_limits.demoted_from_search);
    }
 }

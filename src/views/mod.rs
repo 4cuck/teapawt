@@ -1,4 +1,6 @@
 pub(crate) mod admin_stats;
+pub mod anti_ddos;
+pub mod contact;
 pub mod donate;
 pub mod embed;
 pub mod explore;
@@ -11,7 +13,6 @@ pub mod preferences;
 pub mod profile;
 pub mod renderutils;
 pub mod rss;
-pub mod scrape;
 pub mod search;
 pub mod timeline;
 pub mod tweet;

@@ -9,106 +9,268 @@ use super::{
 };
 use crate::routes::AccountData;
 
-pub(crate) fn account(_theme: &str, id: i64, data: Option<&AccountData>) -> Markup {
-   let identity = data.and_then(|data| data.identity.as_ref());
-   let account = data.and_then(|data| data.account.as_ref());
-   let name = account
-      .map(|account| account.username.as_str())
-      .or_else(|| identity.map(|identity| identity.username.as_str()))
-      .unwrap_or("Unknown account");
-   frame("Account investigation", "restrictions", html! {
-      header class="admin-page-header" {
-         a class="admin-text-link" href="/admin/stats/restrictions" { "← Restriction observations" }
-         p class="admin-eyebrow" { "Account #" (id) }
-         h1 { "@" (name) }
-         p { "Persisted observations and current runtime health. Cookie credentials are hidden until explicitly requested." }
-      }
-      @if let Some(account) = account {
-         section class="admin-stats-panel" {
-            h2 { "Current runtime state" }
-            dl class="admin-account-state" {
-               div { dt { "Pool" } dd { (account.pool) } }
-               div { dt { "Authentication" } dd { (format!("{:?}", account.kind)) } }
-               div { dt { "Availability" } dd { (if account.available { "Available" } else { "Unavailable" }) } }
-               div { dt { "Active calls" } dd { (account.active_calls) } }
-               div { dt { "Profile strikes" } dd { (account.profile_strikes) } }
-               div { dt { "Last upstream activity" } dd { @if let Some(time) = account.last_active { (minute_label(time)) } @else { "Not observed" } } }
-            }
-            div class="admin-state-list" {
-               (flag("Credentials rejected", account.credentials_rejected))
-               (flag("Stale CSRF", account.ct0_dead))
-               (flag("Suspended", account.suspended))
-               (flag("Retired", account.retired))
-               (flag("Search ban", account.search_banned))
-               (flag("Profile ban", account.profile_banned))
-               (flag("Filters cleared", account.filters_cleared))
-               (flag("Settings write refused", account.filters_failed))
-               (flag("Global rate limit", account.globally_limited))
-            }
-            @if account.filters_retry_at > 0 {
-               p class="admin-hint" { "Settings write retry after " (minute_label(account.filters_retry_at)) }
-            }
+pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Markup {
+   let identity = data.and_then(|item| item.identity.as_ref());
+   let runtime = data.and_then(|item| item.account.as_ref());
+   let raw_name = runtime
+      .map(|acct| acct.username.trim())
+      .filter(|name| !name.is_empty())
+      .or_else(|| {
+         identity
+            .map(|ident| ident.username.trim())
+            .filter(|name| !name.is_empty())
+      });
+   let heading = match raw_name {
+      Some(username) => format!("Account #{id} — @{username}"),
+      None => format!("Account #{id} (unnamed)"),
+   };
+
+   frame(
+      theme,
+      &heading,
+      "account",
+      Some(id),
+      html! {
+         header class="admin-page-header" {
+            a class="admin-text-link" href="/admin/stats/restrictions" { "← Restriction log" }
+            p class="admin-eyebrow" { "Operations / session #" (id) }
+            h1 { (heading) }
+            p { "Live runtime pool flags, authenticated probe & pool reassignment controls, and 30-day restriction evidence." }
          }
-         section class="admin-stats-panel admin-probe-panel" data-session=(id) {
-            h2 { "Account health check" }
-            p class="admin-hint" {
-               "Writes account settings once to test whether this account can act. "
-               "A successful write clears a stored suspension and returns the account to its pool. "
-               "Nothing schedules this — it only runs when you ask."
-            }
-            div class="admin-probe-actions" {
-               button id="run-probe" type="button" { "Check account health" }
-            }
-            p id="probe-status" role="status" {}
-            div id="probe-result" hidden {
-               dl class="admin-account-state" {
-                  div { dt { "Verdict" } dd id="probe-verdict" {} }
-                  div { dt { "Suspended" } dd id="probe-suspended" {} }
-                  div { dt { "Retired" } dd id="probe-retired" {} }
-                  div { dt { "Pool" } dd id="probe-pool" {} }
+
+         @if let Some(acct) = runtime {
+            @let in_search = acct.pool == "search";
+            @let in_clean_view = acct.pool != "search" && !acct.demoted_from_search;
+            section class="admin-stats-panel admin-actions-card" data-session=(id) {
+               h2 { "Operator actions" }
+               p class="admin-hint" {
+                  "Run Health Probe checks account/settings and falls back to an authenticated GraphQL read over the account's pinned SOCKS5 exit (never loading x.com HTML or triggering bulk Cloudflare challenges). Pool moves apply immediately in memory and PostgreSQL."
                }
-               p id="probe-detail" class="admin-hint" {}
+               div class="admin-action-buttons admin-probe-actions" {
+                  button
+                     id="run-probe"
+                     class="admin-btn admin-btn--primary"
+                     type="button"
+                     data-session=(id)
+                  {
+                     "Run Health Probe"
+                  }
+                  button
+                     id="move-pool-search"
+                     class="admin-btn"
+                     type="button"
+                     data-session=(id)
+                     data-pool="search"
+                     disabled[in_search]
+                  {
+                     "Move to Search Pool"
+                  }
+                  button
+                     id="move-pool-view"
+                     class="admin-btn"
+                     type="button"
+                     data-session=(id)
+                     data-pool="view"
+                     disabled[in_clean_view]
+                  {
+                     "Move to View Pool"
+                  }
+               }
+               p id="account-action-status" class="admin-notice" role="status" hidden {}
+            }
+
+            section id="account-runtime-panel" class="admin-stats-panel" {
+               h2 { "Current runtime state" }
+               dl class="admin-account-state" {
+                  div {
+                     dt { "Assigned pool" }
+                     dd {
+                        span class=(if in_search { "admin-badge admin-badge--search" } else { "admin-badge admin-badge--view" }) {
+                           (if acct.pool.is_empty() { "view" } else { acct.pool })
+                        }
+                        @if acct.demoted_from_search {
+                           " "
+                           span class="admin-badge admin-badge--warn" { "demoted from search" }
+                        }
+                     }
+                  }
+                  div { dt { "Authentication" } dd { (format!("{:?}", acct.kind)) } }
+                  div {
+                     dt { "Rotation status" }
+                     dd {
+                        @if acct.available {
+                           span class="admin-badge admin-badge--ok" { "In rotation" }
+                        } @else {
+                           span class="admin-badge admin-badge--bad" { "Out of rotation" }
+                        }
+                     }
+                  }
+                  div { dt { "Active calls" } dd { (acct.active_calls) } }
+                  div { dt { "Profile strikes" } dd { (acct.profile_strikes) } }
+                  div {
+                     dt { "Last upstream activity" }
+                     dd {
+                        @if let Some(time) = acct.last_active { (minute_label(time)) }
+                        @else { "None since start" }
+                     }
+                  }
+               }
+
+               div class="admin-flags admin-state-list" {
+                  (good_flag("Available", acct.available))
+                  (good_flag("Filters cleared", acct.filters_cleared))
+                  (warn_flag("Demoted from search", acct.demoted_from_search))
+                  (bad_flag("Suspended", acct.suspended))
+                  (bad_flag("Retired", acct.retired))
+                  (bad_flag("Credentials rejected", acct.credentials_rejected))
+                  (bad_flag("Stale CSRF (ct0)", acct.ct0_dead))
+                  (bad_flag("Search banned", acct.search_banned))
+                  (bad_flag("Profile banned", acct.profile_banned))
+                  (warn_flag("Settings write refused", acct.filters_failed))
+                  (warn_flag("Global 15m limit", acct.globally_limited))
+               }
+
+               @if acct.filters_retry_at > 0 && acct.filters_retry_at < 4_000_000_000 {
+                  p class="admin-hint" {
+                     "Next settings-write attempt after " (minute_label(acct.filters_retry_at))
+                  }
+               }
+            }
+
+            section class="admin-stats-panel" {
+               h2 { "Endpoint rate-limit windows & verified operations" }
+               @if !acct.verified_operations.is_empty() {
+                  div class="admin-badge-row" {
+                     @for op in acct.verified_operations.keys() {
+                        span class="admin-badge admin-badge--ok" { "✓ " (op) }
+                     }
+                  }
+               }
+               @if acct.rate_limits.is_empty() {
+                  p class="admin-empty" { "No active endpoint rate-limit windows recorded." }
+               } @else {
+                  div class="admin-table-wrap" {
+                     table class="admin-table" {
+                        thead {
+                           tr {
+                              th scope="col" { "Endpoint" }
+                              th scope="col" { "Remaining" }
+                              th scope="col" { "Limit" }
+                              th scope="col" { "Window resets (UTC)" }
+                           }
+                        }
+                        tbody {
+                           @for (endpoint, limit) in &acct.rate_limits {
+                              tr {
+                                 th scope="row" { (endpoint) }
+                                 td { (limit.remaining) }
+                                 td { (limit.limit) }
+                                 td class="admin-col-time" { (minute_label(limit.reset)) }
+                              }
+                           }
+                        }
+                     }
+                  }
+               }
+               @if !acct.refused_operations.is_empty() {
+                  h3 { "Operation cooldowns" }
+                  ul {
+                     @for (operation, seen) in &acct.refused_operations {
+                        li { strong { (operation) } " — refused at " (minute_label(*seen)) }
+                     }
+                  }
+               }
+            }
+         } @else {
+            p class="admin-notice admin-notice--warn" {
+               "This account is not currently loaded in the runtime session pool. Stored restriction history is shown below."
             }
          }
+
+         section class="admin-stats-panel admin-cookie-panel" data-session=(id) {
+            h2 { "Cookie export" }
+            p class="admin-hint" {
+               "Exports a Cookie-Editor JSON bundle with the latest in-memory ct0 token. Keep exported credentials private."
+            }
+            div class="admin-cookie-actions" {
+               button id="show-cookies" class="admin-btn" type="button" { "Reveal cookies" }
+               a
+                  id="download-cookies"
+                  class="admin-btn"
+                  href=(format!("/admin/stats/sessions/{id}/cookies"))
+                  download=(format!("account-{id}-cookies.json"))
+               {
+                  "Download JSON"
+               }
+            }
+            div id="cookie-confirmation" hidden {
+               p class="admin-hint" { "Confirm revealing raw authentication cookies on screen?" }
+               button id="confirm-cookies" type="button" class="admin-btn admin-btn--danger" {
+                  "Confirm reveal"
+               }
+            }
+            p id="cookie-status" class="admin-notice" role="status" hidden {}
+            div id="cookie-export" hidden {
+               div class="admin-cookie-actions" {
+                  button id="copy-cookies" class="admin-btn" type="button" { "Copy JSON" }
+               }
+               textarea id="cookie-json" readonly rows="10" aria-label="Cookie-Editor JSON" {}
+            }
+         }
+
          section class="admin-stats-panel" {
-            h2 { "Endpoint windows" }
-            @if account.rate_limits.is_empty() { p class="admin-empty" { "No endpoint rate-limit windows are recorded." } }
-            @else { div class="admin-table-wrap" { table { thead { tr { th { "Endpoint" } th { "Remaining" } th { "Limit" } th { "Resets" } } }
-               tbody { @for (endpoint, limit) in &account.rate_limits { tr { th scope="row" { (endpoint) } td { (limit.remaining) } td { (limit.limit) } td { (minute_label(limit.reset)) } } } }
-            } } }
-            @if !account.refused_operations.is_empty() { h3 { "Operation cooldowns" } ul { @for (operation, seen) in &account.refused_operations { li { strong { (operation) } " — last refused " (minute_label(*seen)) } } } }
+            h2 { "Restriction evidence timeline" }
+            p class="admin-hint" { "Retained for 30 days. Historical entries remain visible after an account is reinstated." }
+            @if let Some(item) = data {
+               @if item.events.is_empty() {
+                  p class="admin-empty" { "No restriction events recorded for this account." }
+               } @else {
+                  ol class="admin-timeline" {
+                     @for event in &item.events {
+                        li {
+                           (minute_label(event.observed_unix))
+                           strong { (event.kind.label()) }
+                           p { (event.evidence) }
+                           small {
+                              (event.endpoint)
+                              @if let Some(status) = event.http_status { " · HTTP " (status) }
+                              @if let Some(code) = event.upstream_code { " · code " (code) }
+                           }
+                        }
+                     }
+                  }
+               }
+            } @else {
+               p class="admin-empty" { "Account was not found." }
+            }
          }
-      } @else { p class="admin-notice" { "This account is not in the current runtime pool. Historical evidence may still be available." } }
-      section class="admin-stats-panel admin-cookie-panel" data-session=(id) {
-         h2 { "Cookie export" }
-         p { "Exports a Cookie-Editor-compatible JSON array using the latest runtime CSRF token. Anyone with these cookies can act as this account." }
-         button id="show-cookies" type="button" { "Show cookies" }
-         div id="cookie-confirmation" hidden {
-            p { "Reveal account credentials on this screen?" }
-            button id="confirm-cookies" type="button" class="admin-danger" { "Reveal credentials" }
-         }
-         p id="cookie-status" role="status" {}
-         div id="cookie-export" hidden {
-            div class="admin-cookie-actions" { button id="copy-cookies" type="button" { "Copy JSON" } a id="download-cookies" href=(format!("/admin/stats/sessions/{id}/cookies")) download=(format!("account-{id}-cookies.json")) { "Download JSON" } }
-            textarea id="cookie-json" readonly rows="12" aria-label="Cookie-Editor JSON" {}
-         }
-      }
-      section class="admin-stats-panel" {
-         h2 { "Evidence timeline" }
-         p { "Events are retained for 30 days. A temporary cooldown or rate limit does not mean the account is suspended." }
-         @if let Some(data) = data {
-            @if data.events.is_empty() { p class="admin-empty" { "No restriction evidence has been recorded for this account." } }
-            @else { ol class="admin-timeline" { @for event in &data.events { li {
-               (minute_label(event.observed_unix))
-               strong { (event.kind.label()) }
-               p { (event.evidence) }
-               small { (event.endpoint) @if let Some(status) = event.http_status { " · HTTP " (status) } @if let Some(code) = event.upstream_code { " · code " (code) } }
-            } } } }
-         }
-      }
-   })
+      },
+   )
 }
 
-fn flag(label: &str, active: bool) -> Markup {
-   html! { span class=(if active { "admin-state admin-state--active" } else { "admin-state" }) { (label) ": " (if active { "active" } else { "clear" }) } }
+fn good_flag(label: &str, yes: bool) -> Markup {
+   let (class_name, state) = if yes {
+      ("admin-state admin-state--ok", "yes")
+   } else {
+      ("admin-state admin-state--inactive", "no")
+   };
+   html! { span class=(class_name) { (label) ": " (state) } }
+}
+
+fn warn_flag(label: &str, active: bool) -> Markup {
+   let (class_name, state) = if active {
+      ("admin-state admin-state--warn", "yes")
+   } else {
+      ("admin-state admin-state--inactive", "no")
+   };
+   html! { span class=(class_name) { (label) ": " (state) } }
+}
+
+fn bad_flag(label: &str, active: bool) -> Markup {
+   let (class_name, state) = if active {
+      ("admin-state admin-state--active", "active")
+   } else {
+      ("admin-state admin-state--inactive", "clear")
+   };
+   html! { span class=(class_name) { (label) ": " (state) } }
 }

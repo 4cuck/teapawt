@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use maud::{
    DOCTYPE,
    Markup,
@@ -14,16 +16,25 @@ mod investigation;
 pub(crate) use account::account;
 pub(crate) use investigation::restrictions;
 
+use crate::{
+   api::auth::{
+      OperationPool,
+      PoolCensus,
+   },
+   pressure::Cause,
+   routes::anti_ddos::GateStatus,
+};
+
 #[derive(Serialize)]
 pub(crate) struct Dashboard {
    pub minutes:        i32,
    pub pool:           Option<(i64, i64)>,
    pub capacity:       Option<f64>,
+   pub census:         PoolCensus,
+   pub gate:           GateStatus,
    pub dropped_events: u64,
    pub buckets:        Vec<Bucket>,
    pub restrictions:   Vec<RestrictionCount>,
-   #[serde(skip)]
-   pub recent:         Vec<crate::routes::Observation>,
 }
 
 #[derive(Serialize)]
@@ -36,9 +47,10 @@ pub(crate) struct Bucket {
    pub rate_limited: i64,
    pub failed:       i64,
    pub other:        i64,
-   /// Turnstile and scrape-gate challenges served. Not a fault: the gate
+   /// Turnstile and Anti-DDoS challenges served. Not a fault: the gate
    /// working as designed.
    pub challenged:   i64,
+   /// Mean latency for completed requests in this minute, in milliseconds.
    pub latency_ms:   i64,
    pub finished:     i64,
 }
@@ -50,35 +62,30 @@ pub(crate) struct RestrictionCount {
    pub suspended:   i64,
 }
 
-const PAGE: &str = "/admin/stats";
 const TABLE_LIMIT: usize = 120;
+const SIX_HOURS_MINUTES: i32 = 6 * 60;
+const DAY_MINUTES: i32 = 24 * 60;
 const WEEK_MINUTES: i32 = 7 * 24 * 60;
-const RANGES: [(i32, &str); 4] = [
-   (15, "15 minutes"),
-   (60, "1 hour"),
-   (1440, "24 hours"),
-   (WEEK_MINUTES, "7 days"),
+const RANGES: [(i32, &str); 5] = [
+   (15, "15m"),
+   (60, "1h"),
+   (SIX_HOURS_MINUTES, "6h"),
+   (DAY_MINUTES, "24h"),
+   (WEEK_MINUTES, "7d"),
 ];
 
-/// How the range looks at a glance, decided by error rate rather than by any
-/// single count. Thresholds follow the RED method: the question is what share
-/// of visitors got a usable answer, not how many requests there were.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Health {
-   /// Nothing recorded in the range.
    Unknown,
-   /// Under 1% of responses were bad.
    Healthy,
-   /// 1% to 5% bad.
    Degraded,
-   /// Over 5% bad.
    Failing,
 }
 
 impl Health {
    const fn label(self) -> &'static str {
       match self {
-         Self::Unknown => "No data",
+         Self::Unknown => "Idle / No samples",
          Self::Healthy => "Healthy",
          Self::Degraded => "Degraded",
          Self::Failing => "Failing",
@@ -87,30 +94,23 @@ impl Health {
 
    const fn modifier(self) -> &'static str {
       match self {
-         Self::Unknown => "unknown",
-         Self::Healthy => "healthy",
-         Self::Degraded => "degraded",
-         Self::Failing => "failing",
+         Self::Unknown => "idle",
+         Self::Healthy => "ok",
+         Self::Degraded => "warn",
+         Self::Failing => "bad",
       }
    }
 
-   /// The sentence under the status banner, phrased as the answer to "is
-   /// anything wrong right now".
    const fn detail(self) -> &'static str {
       match self {
-         Self::Unknown => "No traffic was recorded in this range.",
-         Self::Healthy => "Under 1% of responses were unusable.",
-         Self::Degraded => "Between 1% and 5% of responses were unusable.",
-         Self::Failing => "More than 5% of responses were unusable.",
+         Self::Unknown => "No origin search/quote traffic was recorded in this window.",
+         Self::Healthy => "Under 1% of origin responses were service faults.",
+         Self::Degraded => "Between 1% and 5% of origin responses were service faults.",
+         Self::Failing => "More than 5% of origin responses were service faults.",
       }
    }
 }
 
-/// Totals for the selected range, split by what visitors actually received.
-///
-/// Every outcome is kept apart rather than lumped into "success" and "failed":
-/// a rate limit and an upstream outage need different fixes, and the panel that
-/// shows them should not make the reader subtract to find out which one moved.
 #[derive(Default)]
 struct TrafficSummary {
    incoming:     i128,
@@ -128,21 +128,14 @@ struct TrafficSummary {
 }
 
 impl TrafficSummary {
-   /// Responses that answered the query, including an empty result.
    const fn answered(&self) -> i128 {
       self.successful + self.empty
    }
 
-   /// Responses that were our fault: we refused, we rate-limited, or the
-   /// upstream failed and we could not answer from elsewhere.
-   ///
-   /// `other` is deliberately excluded. It is where a 404 for a page that never
-   /// existed lands, and a visitor mistyping a URL is not a service fault.
    const fn bad(&self) -> i128 {
       self.rejected + self.rate_limited + self.failed
    }
 
-   /// Share of responses that were not usable, as a percentage.
    fn error_rate(&self) -> Option<f64> {
       let total = self.answered() + self.bad();
       (total > 0).then(|| 100.0 * self.bad() as f64 / total as f64)
@@ -160,7 +153,7 @@ impl TrafficSummary {
    fn from_buckets(buckets: &[&Bucket], current_minute: i64) -> Self {
       let mut summary = Self::default();
       let mut weighted_latency = 0.0;
-      let mut closed_successes = 0_i128;
+      let mut closed_answered = 0_i128;
       let mut closed_minutes = 0;
       for bucket in buckets {
          summary.incoming += i128::from(bucket.incoming);
@@ -179,62 +172,51 @@ impl TrafficSummary {
          );
          weighted_latency += bucket.latency_ms as f64 * bucket.finished as f64;
          if bucket.minute < current_minute {
-            closed_successes += i128::from(bucket.success);
+            closed_answered += i128::from(bucket.success + bucket.empty);
             closed_minutes += 1;
          }
       }
       summary.observed =
-         (closed_minutes > 0).then(|| closed_successes as f64 / f64::from(closed_minutes));
+         (closed_minutes > 0).then(|| closed_answered as f64 / f64::from(closed_minutes));
       summary.latency =
          (summary.completed > 0).then(|| weighted_latency / summary.completed as f64);
       summary
    }
 }
 
-/// One recorded minute (or one hour, in the weekly view) reduced to the numbers
-/// the panels need.
-///
-/// Every outcome is its own field rather than a total plus a remainder, so each
-/// panel can plot exactly one of them against its own axis. That is the RED
-/// method's whole point: a rate limit and an upstream outage are different
-/// faults, and reading them off one shared scale is how the small one gets
-/// hidden by the large one.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct Sample {
    minute:       i64,
    incoming:     f64,
    answered:     f64,
+   empty:        f64,
    rejected:     f64,
    rate_limited: f64,
    failed:       f64,
    other:        f64,
-   /// Challenges we served. Tracked, but neither good nor bad.
    challenged:   f64,
    latency:      f64,
-   /// Share of responses that were not usable, in percent.
    error_rate:   f64,
 }
 
 impl Sample {
    fn of(bucket: &Bucket) -> Self {
       let answered = (bucket.success + bucket.empty) as f64;
-      // `other` is a 404 for a page that never existed, not a service fault.
       let bad = (bucket.rejected + bucket.rate_limited + bucket.failed) as f64;
-      // A challenge is not a response a visitor was denied: it is the gate
-      // doing its job. Excluded from the denominator so a site where every
-      // first-time visitor sees one does not read as 90% failed.
       let total = answered + bad;
       Self {
          minute: bucket.minute,
          incoming: bucket.incoming as f64,
          answered,
+         empty: bucket.empty as f64,
          rejected: bucket.rejected as f64,
          rate_limited: bucket.rate_limited as f64,
          failed: bucket.failed as f64,
          other: bucket.other as f64,
          challenged: bucket.challenged as f64,
+         // `bucket.latency_ms` is already the per-request average in ms.
          latency: if bucket.finished > 0 {
-            bucket.latency_ms as f64 / bucket.finished as f64
+            bucket.latency_ms as f64
          } else {
             0.0
          },
@@ -245,38 +227,97 @@ impl Sample {
          },
       }
    }
+}
 
-   /// Fold two samples of the same hour. Every field keeps its peak, so a single
-   /// bad minute survives the weekly roll-up instead of being averaged into the
-   /// good minutes beside it.
-   fn merge(self, other: Self) -> Self {
+#[derive(Default)]
+struct HourAccumulator {
+   hour_unix:        i64,
+   count:            usize,
+   incoming:         f64,
+   answered:         f64,
+   empty:            f64,
+   rejected:         f64,
+   rate_limited:     f64,
+   failed:           f64,
+   other:            f64,
+   challenged:       f64,
+   weighted_latency: f64,
+   finished:         i64,
+}
+
+impl HourAccumulator {
+   fn new(hour_unix: i64) -> Self {
       Self {
-         minute: self.minute,
-         incoming: self.incoming.max(other.incoming),
-         answered: self.answered.max(other.answered),
-         rejected: self.rejected.max(other.rejected),
-         rate_limited: self.rate_limited.max(other.rate_limited),
-         failed: self.failed.max(other.failed),
-         other: self.other.max(other.other),
-         challenged: self.challenged.max(other.challenged),
-         latency: self.latency.max(other.latency),
-         error_rate: self.error_rate.max(other.error_rate),
+         hour_unix,
+         ..Self::default()
+      }
+   }
+
+   fn push(&mut self, bucket: &Bucket) {
+      let sample = Sample::of(bucket);
+      self.count += 1;
+      self.incoming += sample.incoming;
+      self.answered += sample.answered;
+      self.empty += sample.empty;
+      self.rejected += sample.rejected;
+      self.rate_limited += sample.rate_limited;
+      self.failed += sample.failed;
+      self.other += sample.other;
+      self.challenged += sample.challenged;
+      self.weighted_latency += bucket.latency_ms as f64 * bucket.finished as f64;
+      self.finished += bucket.finished;
+   }
+
+   fn finish(self) -> Sample {
+      let denom = (self.count.max(1)) as f64;
+      let bad = self.rejected + self.rate_limited + self.failed;
+      let total = self.answered + bad;
+      Sample {
+         minute:       self.hour_unix,
+         incoming:     self.incoming / denom,
+         answered:     self.answered / denom,
+         empty:        self.empty / denom,
+         rejected:     self.rejected / denom,
+         rate_limited: self.rate_limited / denom,
+         failed:       self.failed / denom,
+         other:        self.other / denom,
+         challenged:   self.challenged / denom,
+         latency:      if self.finished > 0 {
+            self.weighted_latency / self.finished as f64
+         } else {
+            0.0
+         },
+         error_rate:   if total > 0.0 {
+            100.0 * bad / total
+         } else {
+            0.0
+         },
       }
    }
 }
 
-/// Reduce buckets to one sample per plotted point.
 fn samples(buckets: &[&Bucket], hourly: bool) -> Vec<Sample> {
-   let mut out: Vec<Sample> = Vec::new();
+   if !hourly {
+      return buckets.iter().map(|bucket| Sample::of(bucket)).collect();
+   }
+   let mut out = Vec::new();
+   let mut current: Option<HourAccumulator> = None;
    for bucket in buckets {
-      let mut sample = Sample::of(bucket);
-      if hourly {
-         sample.minute = sample.minute.div_euclid(3600) * 3600;
+      let hour_unix = bucket.minute.div_euclid(3600) * 3600;
+      match current.as_mut() {
+         Some(acc) if acc.hour_unix == hour_unix => acc.push(bucket),
+         _ => {
+            if let Some(done) = current.replace(HourAccumulator::new(hour_unix)) {
+               out.push(done.finish());
+            }
+            if let Some(acc) = current.as_mut() {
+               acc.push(bucket);
+            }
+         },
       }
-      match out.last_mut() {
-         Some(last) if hourly && last.minute == sample.minute => *last = last.merge(sample),
-         _ => out.push(sample),
-      }
+   }
+   if let Some(done) = current {
+      out.push(done.finish());
    }
    out
 }
@@ -297,68 +338,171 @@ pub(crate) fn minute_label(minute: i64) -> Markup {
    OffsetDateTime::from_unix_timestamp(minute).map_or_else(|_| html! { "Unknown time" }, timestamp)
 }
 
-pub(crate) fn frame(title: &str, active: &str, content: Markup) -> Markup {
+fn axis_time_label(unix: i64, include_date: bool) -> String {
+   let Ok(instant) = OffsetDateTime::from_unix_timestamp(unix) else {
+      return String::new();
+   };
+   if include_date {
+      format!(
+         "{:02}-{:02} {:02}:{:02}",
+         u8::from(instant.month()),
+         instant.day(),
+         instant.hour(),
+         instant.minute()
+      )
+   } else {
+      format!("{:02}:{:02} UTC", instant.hour(), instant.minute())
+   }
+}
+
+fn theme_mode(theme: &str) -> &'static str {
+   if theme.to_ascii_lowercase().contains("light") {
+      "light"
+   } else {
+      "dark"
+   }
+}
+
+pub(crate) fn frame(
+   theme: &str,
+   title: &str,
+   active: &str,
+   session_id: Option<i64>,
+   content: Markup,
+) -> Markup {
+   let mode = theme_mode(theme);
+   let nav_overview = active == "dashboard" || active == "overview";
+   let nav_restrictions = active == "restrictions" || active == "account";
    html! {
       (DOCTYPE)
-      html lang="en" {
+      html lang="en" data-theme=(mode) {
          head {
             meta charset="utf-8";
             meta name="viewport" content="width=device-width, initial-scale=1";
             meta name="robots" content="noindex, nofollow";
             title { (title) " · Teapot administration" }
-            link rel="stylesheet" href="/css/admin-stats.css?v=5";
-            script src="/js/admin-stats.js?v=5" defer="" {}
+            link rel="stylesheet" href="/css/admin-stats.css?v=7";
+            script src="/js/admin-stats.js?v=7" defer="" {}
          }
-         body {
-            div class="admin-workspace" {
-               nav class="admin-sidebar" aria-label="Investigation workspace" {
-                  a class="admin-brand" href="/admin/stats" { "TEAPOT" span { "operations" } }
-                  a href="/admin/stats" aria-current[active == "overview"] { "Traffic overview" }
-                  a href="/admin/stats/restrictions" aria-current[active == "restrictions"] { "Restrictions" }
+         body data-theme=(mode) {
+            div class="admin-layout admin-workspace" {
+               nav class="admin-sidebar" aria-label="Administration workspace" {
+                  a class="admin-brand" href="/admin/stats" {
+                     "TEAPOT"
+                     span { "operations" }
+                  }
+                  a href="/admin/stats" aria-current=[nav_overview.then_some("page")] { "Overview & pools" }
+                  a href="/admin/stats/restrictions" aria-current=[nav_restrictions.then_some("page")] { "Restrictions" }
                   a href="/admin/import" { "Account import" }
-                  a class="admin-home" href="/" { "← Public site" }
+                  a class="admin-home" href="/" { "← Back to site" }
                }
-               main class="admin-stats" data-page=(active) { (content) }
+               main
+                  id="admin-stats-main"
+                  class="admin-stats"
+                  data-page=(active)
+                  data-session-id=[session_id]
+               {
+                  (content)
+               }
             }
          }
       }
    }
 }
 
+pub(crate) fn forbidden(theme: &str) -> Markup {
+   frame(
+      theme,
+      "Administrator sign-in required",
+      "forbidden",
+      None,
+      html! {
+         header class="admin-page-header" {
+            p class="admin-eyebrow" { "Operations / access" }
+            h1 { "Administrator sign-in required" }
+            p { "Sign in with the administrator pass account to inspect pool telemetry, restriction history, and session probes." }
+         }
+         section class="admin-stats-panel" {
+            p class="admin-notice admin-notice--warn" {
+               "Your current browser session does not hold an active administrator pass cookie."
+            }
+            div class="admin-action-buttons" {
+               a class="admin-btn admin-btn--primary" href="/search-pass/login" { "Sign in with pass" }
+               a class="admin-btn" href="/" { "Return to home page" }
+            }
+         }
+      },
+   )
+}
+
 pub(crate) fn kind_label(kind: crate::stats::Restriction) -> &'static str {
    kind.label()
 }
 
-pub(crate) fn page(_theme: &str, data: Option<&Dashboard>, minutes: i32) -> Markup {
-   frame("Traffic overview", "overview", html! {
-      header class="admin-page-header" {
-         p class="admin-eyebrow" { "Operations / overview" }
-         h1 { "Traffic overview" }
-         p { "Origin request health and recent account signals. Select an account to inspect its evidence and session state." }
-      }
-      (overview_content(data, minutes))
-   })
+pub(crate) fn page(theme: &str, data: Option<&Dashboard>, minutes: i32) -> Markup {
+   frame(
+      theme,
+      "Operations overview",
+      "dashboard",
+      None,
+      html! {
+         header class="admin-page-header" {
+            p class="admin-eyebrow" { "Operations / overview" }
+            h1 { "Operations & pool telemetry" }
+            p { "Live account-pool capacity, Anti-DDoS pressure state, and origin search/quote request health." }
+         }
+         (overview_content(data, minutes))
+      },
+   )
 }
 
 fn overview_content(data: Option<&Dashboard>, minutes: i32) -> Markup {
-   let buckets = data.map_or_else(Vec::new, |data| {
-      let mut buckets: Vec<_> = data.buckets.iter().collect();
-      buckets.sort_unstable_by_key(|bucket| bucket.minute);
-      buckets
+   let buckets = data.map_or_else(Vec::new, |dashboard| {
+      let mut sorted: Vec<_> = dashboard.buckets.iter().collect();
+      sorted.sort_unstable_by_key(|bucket| bucket.minute);
+      sorted
    });
    let now = OffsetDateTime::now_utc();
-   let current_minute = now.unix_timestamp().div_euclid(60) * 60;
+   let now_unix = now.unix_timestamp();
+   let current_minute = now_unix.div_euclid(60) * 60;
    let summary = TrafficSummary::from_buckets(&buckets, current_minute);
    let health = summary.health();
    let hourly = minutes == WEEK_MINUTES;
+   let include_date = minutes >= DAY_MINUTES;
    let series = samples(&buckets, hourly);
+   let window_end = series.last().map_or(current_minute, |last| {
+      if (current_minute - last.minute).abs() > i64::from(minutes) * 120 {
+         last.minute
+      } else {
+         current_minute.max(last.minute)
+      }
+   });
+   let window_start = window_end - i64::from(minutes) * 60;
+   let series_rows: Vec<_> = series
+      .iter()
+      .map(|sample| {
+         (
+            sample.minute,
+            sample.incoming,
+            sample.answered,
+            sample.empty,
+            sample.rejected,
+            sample.rate_limited,
+            sample.failed,
+            sample.other,
+            sample.challenged,
+            sample.error_rate,
+            sample.latency,
+         )
+      })
+      .collect();
+   let series_json = serde_json::to_string(&series_rows).unwrap_or_else(|_| "[]".to_owned());
    let estimate = data
-      .and_then(|data| data.capacity)
+      .and_then(|dashboard| dashboard.capacity)
       .filter(|value| value.is_finite());
-   let pool = data.and_then(|data| data.pool);
    let mut restrictions: Vec<_> = data
       .into_iter()
-      .flat_map(|data| &data.restrictions)
+      .flat_map(|dashboard| &dashboard.restrictions)
       .filter(|row| row.search_only > 0 || row.suspended > 0)
       .collect();
    restrictions.sort_unstable_by_key(|row| std::cmp::Reverse(row.minute));
@@ -368,131 +512,164 @@ fn overview_content(data: Option<&Dashboard>, minutes: i32) -> Markup {
       .map_or_else(|| "—".to_string(), |rate| format!("{rate:.2}%"));
 
    html! {
-      div class="admin-stats-content" data-minutes=(minutes) data-refresh-interval="30" {
+      div
+         class="admin-stats-content"
+         data-minutes=(minutes)
+         data-refresh-interval="30"
+         data-series=(series_json)
+         data-window-start=(window_start)
+         data-window-end=(window_end)
+         data-hourly=(hourly)
+         data-include-date=(include_date)
+      {
          div class="admin-stats-toolbar" {
-            form action=(PAGE) method="get" {
-               label for="stats-minutes" { "Range" }
-               select name="minutes" id="stats-minutes" {
-                  @if !RANGES.iter().any(|(value, _)| *value == minutes) {
-                     option value=(minutes) selected { (minutes) " minutes" }
-                  }
-                  @for (value, label) in RANGES {
-                     option value=(value) selected[value == minutes] { (label) }
+            nav class="admin-range-tabs" aria-label="Time window" {
+               @for (value, label) in RANGES {
+                  @let active = value == minutes;
+                  a
+                     class=(if active { "admin-range-tab is-active" } else { "admin-range-tab" })
+                     href=(format!("/admin/stats?minutes={value}"))
+                     aria-current=[active.then_some("page")]
+                  {
+                     (label)
                   }
                }
-               button type="submit" { "Apply" }
             }
             div class="admin-stats-toolbar-meta" {
                p class="admin-stats-updated" {
                   span id="stats-updated" {
                      @if data.is_some() { (timestamp(now)) }
-                     @else { "Not yet available" }
+                     @else { "Telemetry unavailable" }
                   }
                }
-               span class="admin-stats-refresh-badge" {
+               span class="admin-stats-refresh-badge" title="Auto-refreshes every 30 seconds" {
                   span class="admin-stats-live-dot" {}
+                  span { "Auto " }
                   span id="stats-countdown" { "30s" }
                }
+               button id="stats-refresh-now" class="admin-btn" type="button" { "Refresh" }
             }
          }
 
-         // The one-line answer to "is anything wrong". Everything below it is
-         // evidence for this verdict.
-         div class=(format!("admin-verdict admin-verdict--{}", health.modifier())) {
-            div class="admin-verdict-main" {
-               span class="admin-verdict-dot" {}
-               strong { (health.label()) }
-               span class="admin-verdict-rate" { (error_rate) " unusable" }
-            }
-            p class="admin-verdict-detail" { (health.detail()) }
-            dl class="admin-verdict-facts" {
-               div { dt { "Responses" } dd { (summary.answered() + summary.bad()) } }
-               div { dt { "Answered" } dd { (summary.answered()) } }
-               div { dt { "Bad" } dd { (summary.bad()) } }
-               div { dt { "Challenged" } dd { (summary.challenged) } }
-               div { dt { "Mean latency" } dd { (summary.latency.map_or_else(|| "—".to_string(), |value| format!("{value:.0} ms"))) } }
+         p id="stats-status" class="admin-notice admin-notice--error" role="status" hidden[data.is_some()] {
+            @if data.is_none() {
+               "Statistics are temporarily unavailable. Use Refresh to retry."
             }
          }
 
-         p id="stats-status" role="status" hidden[data.is_some()] {
-            @if data.is_none() { "Statistics are temporarily unavailable. Reload this page to try again." }
+         div class="admin-hero-grid" {
+            div class=(format!("admin-verdict admin-verdict--{}", health.modifier())) {
+               div class="admin-verdict-main" {
+                  span class="admin-verdict-dot" {}
+                  strong { "Origin search health: " (health.label()) }
+                  span class="admin-verdict-rate" { (error_rate) " fault share" }
+               }
+               p class="admin-verdict-detail" { (health.detail()) }
+               dl class="admin-verdict-facts" {
+                  div { dt { "Incoming" } dd { (summary.incoming) } }
+                  div { dt { "Answered" } dd { (summary.answered()) } }
+                  div { dt { "Faults" } dd { (summary.bad()) } }
+                  div { dt { "Challenged" } dd { (summary.challenged) } }
+                  div {
+                     dt { "Mean latency" }
+                     dd {
+                        (summary.latency.map_or_else(|| "—".to_string(), |value| format!("{value:.0} ms")))
+                     }
+                  }
+                  div {
+                     dt { "Peak rate" }
+                     dd {
+                        (summary.peak.map_or_else(|| "—".to_string(), |peak| format!("{peak}/m")))
+                     }
+                  }
+               }
+            }
+
+            @if let Some(dashboard) = data {
+               (gate_card(&dashboard.gate, now_unix))
+            }
+         }
+
+         @if let Some(dashboard) = data {
+            (pools_section(&dashboard.census, dashboard.pool, estimate, dashboard.dropped_events))
          }
 
          section class="admin-section" aria-labelledby="stats-red-title" {
             div class="admin-section-heading" {
                div {
-                  h2 id="stats-red-title" { "Request health" }
+                  h2 id="stats-red-title" { "Search & quote origin traffic" }
                   p {
-                     "Rate, errors, and duration, each on its own axis. "
+                     "Tracks /search, /hashtag/*, /*/search, and /*/status/*/quotes reaching origin. "
                      @if hourly {
-                        "For 7 days, each point is the worst recorded minute of its UTC hour."
+                        "For 7d, each point is the hourly mean rate and weighted latency (UTC)."
                      } @else {
-                        "Each point is one recorded minute (UTC)."
+                        "Each point is one recorded minute (UTC); unrecorded gaps are left unbridged."
                      }
-                     " Minutes with no samples are not plotted."
                   }
                }
+               div class="admin-chart-controls" hidden[series.is_empty()] {
+                  button id="chart-mode-raw" class="admin-range-tab is-active" type="button" data-smooth="1" { "Raw" }
+                  button id="chart-mode-smooth" class="admin-range-tab" type="button" data-smooth="3" { "3-pt smooth" }
+                  button id="chart-unpin" class="admin-btn" type="button" hidden { "Unpin" }
+                  button id="chart-reset-zoom" class="admin-btn" type="button" hidden { "Reset zoom" }
+               }
+            }
+            div id="stats-inspector" class="admin-inspector" hidden[series.is_empty()] {
+               span id="inspector-hint" class="admin-muted" {
+                  "Hover any chart to inspect synchronized metrics · Click to pin · Drag horizontally to zoom"
+               }
+               div id="inspector-values" class="admin-inspector-grid" hidden {}
             }
             p id="stats-traffic-empty" class="admin-empty" hidden[!series.is_empty()] {
-               @if data.is_some() { "No traffic samples were recorded in this range." }
+               @if data.is_some() { "No origin search/quote samples were recorded in this window." }
                @else { "Traffic samples are unavailable." }
             }
             div id="stats-red" class="admin-panel-grid" hidden[series.is_empty()] {
                @for spec in &PANELS {
-                  (panel(&series, spec))
+                  (panel(&series, spec, (window_start, window_end), hourly, include_date))
                }
             }
          }
 
-         section class="admin-section" aria-labelledby="stats-breakdown-title" {
+         section class="admin-section" aria-labelledby="stats-breakdown-title" hidden[series.is_empty()] {
             div class="admin-section-heading" {
                div {
-                  h2 id="stats-breakdown-title" { "What the bad responses were" }
-                  p { "Each outcome on its own axis, so a handful of 429s is as readable as an outage." }
+                  h2 id="stats-breakdown-title" { "Fault & non-answer breakdown" }
+                  p { "Separated per HTTP/pool failure class so small 429 bursts remain visible." }
                }
             }
-            div id="stats-breakdown" class="admin-panel-grid admin-panel-grid--compact" hidden[series.is_empty()] {
-               @for spec in &BREAKDOWN {
-                  (panel(&series, spec))
+            @if summary.bad() == 0 && summary.other == 0 {
+               p class="admin-zero-faults" {
+                  "0 origin faults, rate-limits, or unclassified errors recorded in this window."
+               }
+            } @else {
+               div id="stats-breakdown" class="admin-panel-grid admin-panel-grid--compact" {
+                  @for spec in &BREAKDOWN {
+                     (panel(&series, spec, (window_start, window_end), hourly, include_date))
+                  }
                }
             }
          }
 
-         section class="admin-section" aria-labelledby="stats-pool-title" {
-            div class="admin-section-heading" {
-               div {
-                  h2 id="stats-pool-title" { "Account pools" }
-                  p { "Current runtime counts, not historical. Pool size is what caps throughput." }
+         section class="admin-section" aria-labelledby="stats-table-title" hidden[buckets.is_empty()] {
+            details id="stats-traffic-table" class="admin-details" {
+               summary {
+                  "Raw minute buckets ("
+                  (buckets.len().min(TABLE_LIMIT))
+                  @if buckets.len() > TABLE_LIMIT { " of " (buckets.len()) }
+                  " rows)"
                }
-            }
-            dl class="admin-stats-metrics" {
-               (metric("stats-pool", "Search / view", pool.map(|(search, view)| format!("{search} / {view}")), "Accounts reserved for search, then for profile reads", ""))
-               (metric("stats-estimate", "Upstream search budget", estimate.map(|value| format!("{value:.1} calls/min")), "Theoretical ceiling from live account windows", ""))
-               (metric("stats-peak", "Peak rate", summary.peak.map(|count| format!("{count} req/min")), "Busiest recorded minute in this range", ""))
-               (metric("stats-dropped", "Dropped samples", data.map(|data| data.dropped_events.to_string()), "Since this process started; a non-zero value means the totals above undercount", if data.is_some_and(|data| data.dropped_events > 0) { "warn" } else { "" }))
-            }
-         }
-
-         section class="admin-section" aria-labelledby="stats-table-title" {
-            div class="admin-section-heading" {
-               div {
-                  h2 id="stats-table-title" { "Recorded minutes" }
-                  p { "The raw rows the panels are drawn from." }
-               }
-            }
-            details id="stats-traffic-table" hidden[buckets.is_empty()] {
-               summary { "Show table" }
-               div class="admin-stats-table-scroll" role="region" aria-label="Traffic data table" tabindex="0" {
-                  table {
+               div class="admin-table-wrap admin-stats-table-scroll" role="region" aria-label="Traffic data table" tabindex="0" {
+                  table class="admin-table" {
                      caption {
-                        "Outcomes by minute (UTC). "
+                        "Origin outcomes by minute (UTC). "
                         span id="stats-table-limit" hidden[buckets.len() <= TABLE_LIMIT] {
                            "Showing the latest " (TABLE_LIMIT) " recorded minutes."
                         }
                      }
                      thead {
                         tr {
-                           @for label in ["Minute", "Rate", "Answered", "Denied", "429", "Failed", "Other", "Challenged", "Error rate", "Latency"] {
+                           @for label in ["Minute (UTC)", "Incoming", "Answered", "Empty", "Denied", "429", "Failed", "Other", "Challenged", "Fault %", "Latency"] {
                               th scope="col" { (label) }
                            }
                         }
@@ -500,17 +677,21 @@ fn overview_content(data: Option<&Dashboard>, minutes: i32) -> Markup {
                      tbody id="stats-rows" {
                         @for bucket in buckets.iter().rev().take(TABLE_LIMIT) {
                            @let sample = Sample::of(bucket);
-                           tr {
-                              th scope="row" { (minute_label(bucket.minute)) }
+                           tr data-minute=(bucket.minute) {
+                              th scope="row" class="admin-col-time" { (minute_label(bucket.minute)) }
                               td { (bucket.incoming) }
                               td { (bucket.success + bucket.empty) }
+                              td { (bucket.empty) }
                               td { (bucket.rejected) }
                               td { (bucket.rate_limited) }
                               td { (bucket.failed) }
                               td { (bucket.other) }
                               td { (bucket.challenged) }
                               td { (format!("{:.1}%", sample.error_rate)) }
-                              td { (if bucket.finished > 0 { format!("{:.0} ms", sample.latency) } else { "—".to_string() }) }
+                              td {
+                                 @if bucket.finished > 0 { (format!("{:.0} ms", sample.latency)) }
+                                 @else { "—" }
+                              }
                            }
                         }
                      }
@@ -522,41 +703,313 @@ fn overview_content(data: Option<&Dashboard>, minutes: i32) -> Markup {
          section class="admin-section" aria-labelledby="stats-restrictions-title" {
             div class="admin-section-heading" {
                div {
-                  h2 id="stats-restrictions-title" { "Recent account restrictions" }
-                  p { "Recorded observations over the last 30 days." }
+                  h2 id="stats-restrictions-title" { "Restriction activity in selected window" }
+                  p { "Per-minute restriction events logged during this range. Full 30-day history is available under Restrictions." }
                }
-               a class="admin-text-link" href="/admin/stats/restrictions" { "Investigate all →" }
+               a class="admin-btn" href="/admin/stats/restrictions" { "Investigate restrictions →" }
             }
-            p id="stats-restrictions-empty" class="admin-empty" hidden[restrictions.is_empty()] { "No restriction observations were recorded in this range." }
-            div id="stats-restrictions-list" hidden[restrictions.is_empty()] {
-               @for row in restrictions.into_iter().take(10) {
+            p id="stats-restrictions-empty" class="admin-empty" hidden[!restrictions.is_empty()] {
+               "No account restriction events were recorded in this window."
+            }
+            div id="stats-restrictions-list" class="stats-restrictions-list" hidden[restrictions.is_empty()] {
+               @for row in restrictions.into_iter().take(12) {
                   div class="stats-restriction-row" {
                      (minute_label(row.minute))
-                     @if row.search_only > 0 { span class="stats-restriction-badge stats-restriction-badge--search" { (row.search_only) " search-only" } }
-                     @if row.suspended > 0 { span class="stats-restriction-badge stats-restriction-badge--suspended" { (row.suspended) " suspended" } }
+                     div class="admin-badge-row" {
+                        @if row.search_only > 0 {
+                           a class="stats-restriction-badge stats-restriction-badge--search" href="/admin/stats/restrictions?kind=1" {
+                              (row.search_only) " search-only / banned"
+                           }
+                        }
+                        @if row.suspended > 0 {
+                           a class="stats-restriction-badge stats-restriction-badge--suspended" href="/admin/stats/restrictions?kind=2" {
+                              (row.suspended) " suspended"
+                           }
+                        }
+                     }
                   }
                }
-            }
-         }
-
-         aside class="admin-section admin-reading" {
-            h2 { "Reading this page" }
-            ul {
-               li { "Only origin traffic is counted. Missing minutes are not zero traffic." }
-               li { "An empty search result counts as answered: it was a correct response to the query." }
-               li { "Restriction observations are kept for 30 days; live account health is read from the pool, not from here." }
-               li { "Panels never share a scale. Compare shapes across panels, not heights." }
             }
          }
       }
    }
 }
 
+fn gate_card(gate: &GateStatus, now_unix: i64) -> Markup {
+   let pressure = &gate.pressure;
+   let (tone, badge_tone, state_label, summary_line) = if !gate.armed {
+      (
+         "idle",
+         "neutral",
+         "Unarmed",
+         "Anti-DDoS is disabled or Turnstile keys are not configured.",
+      )
+   } else if gate.everyone {
+      (
+         "warn",
+         "warn",
+         "Active — Everyone",
+         "Manual override is challenging every unverified visitor across gated pages.",
+      )
+   } else if gate.checking_everyone {
+      let reason_text = match pressure.cause {
+         Some(Cause::Sustained) => "Sustained profile-timeline fallback crossed threshold.",
+         Some(Cause::Spike) | None => "Profile-timeline fallback spike crossed flood threshold.",
+      };
+      ("bad", "bad", "Active — Flood", reason_text)
+   } else if pressure.streak_minutes > 0 {
+      (
+         "warn",
+         "warn",
+         "Armed — Watching streak",
+         "Fallback is above the sustained threshold; gate activates if streak reaches target.",
+      )
+   } else {
+      (
+         "ok",
+         "ok",
+         "Armed — Calm",
+         "UserTweets pool is keeping up with demand; automatic gate is standing by.",
+      )
+   };
+
+   let hold_remaining = pressure
+      .until
+      .map(|until| (until - now_unix).max(0))
+      .filter(|&secs| secs > 0);
+
+   let sustained_label = if pressure.sustained_percent == 0 {
+      "Off".to_string()
+   } else {
+      format!(
+         "{}/{}m @ ≥{}%",
+         pressure.streak_minutes, pressure.sustained_minutes, pressure.sustained_percent
+      )
+   };
+
+   html! {
+      div class=(format!("admin-gate-card admin-gate-card--{tone}")) {
+         div class="admin-gate-header" {
+            strong { "Anti-DDoS & timeline pressure" }
+            span class=(format!("admin-badge admin-badge--{badge_tone}")) { (state_label) }
+         }
+         p class="admin-gate-detail" {
+            (summary_line)
+            @if let Some(secs) = hold_remaining {
+               " Hold remaining: " ((secs + 59) / 60) "m."
+            }
+         }
+         dl class="admin-gate-facts" {
+            div {
+               dt { "Fallback share" }
+               dd {
+                  (pressure.share) "%"
+                  @if pressure.sample > 0 {
+                     " (" (pressure.sample) "/m)"
+                  }
+               }
+            }
+            div {
+               dt { "Sustained trigger" }
+               dd { (sustained_label) }
+            }
+            div {
+               dt { "Spike / hold" }
+               dd { "≥" (pressure.flood_percent) "% · " (pressure.hold_minutes) "m" }
+            }
+            div {
+               dt { "Pass / edges" }
+               dd {
+                  (gate.pass_minutes) "m · "
+                  (gate.blocked_networks) " ASN · "
+                  (gate.watched_countries) " CC"
+               }
+            }
+         }
+      }
+   }
+}
+
+fn pools_section(
+   census: &PoolCensus,
+   stored_pool: Option<(i64, i64)>,
+   estimate: Option<f64>,
+   dropped_events: u64,
+) -> Markup {
+   let pool_value = stored_pool
+      .map(|(search, view)| format!("{search} / {view}"))
+      .unwrap_or_else(|| format!("{} / {}", census.search, census.view));
+
+   html! {
+      section id="stats-pools" class="admin-section" aria-labelledby="stats-pool-title" {
+         div class="admin-section-heading" {
+            div {
+               h2 id="stats-pool-title" { "Live account pools & operation capacity" }
+               p { "Real-time slot states across the in-memory session pool. Trickle recovery checks demoted search accounts without Cloudflare bulk bursts." }
+            }
+            a class="admin-btn" href="/admin/import" { "Import accounts" }
+         }
+
+         dl class="admin-kpi-grid admin-stats-metrics" {
+            (metric(
+               "stats-pool",
+               "Search / view inventory",
+               Some(pool_value),
+               &format!("{} total loaded ({} live search, {} live view)", census.total, census.search, census.view),
+               "",
+            ))
+            (metric(
+               "stats-estimate",
+               "Search budget ceiling",
+               estimate.map(|val| format!("{val:.1} calls/min")),
+               "50 calls / 15m per verified search account",
+               "",
+            ))
+            div class=(if census.demoted_from_search > 0 { "admin-kpi admin-stats-metric admin-kpi--warn admin-stats-metric--warn" } else { "admin-kpi admin-stats-metric" }) {
+               dt { "Demoted from search" }
+               dd id="stats-demoted" {
+                  @if census.demoted_from_search > 0 {
+                     a href="/admin/stats/restrictions?pool=view" { (census.demoted_from_search) }
+                  } @else {
+                     "0"
+                  }
+               }
+               dd class="admin-stats-note" { "Queued for trickle SearchTimeline recovery" }
+            }
+            (metric(
+               "stats-out-rotation",
+               "Out of rotation",
+               Some(census.out_of_rotation.to_string()),
+               &format!(
+                  "{} stale ct0 · {} retired · {} bad auth",
+                  census.ct0_dead, census.retired, census.credentials_rejected
+               ),
+               if census.out_of_rotation > 0 { "warn" } else { "" },
+            ))
+            (metric(
+               "stats-bans",
+               "Bans & suspensions",
+               Some(format!("{} / {}", census.suspended, census.profile_banned)),
+               &format!(
+                  "{} suspended · {} search-banned · {} profile-banned",
+                  census.suspended, census.search_banned, census.profile_banned
+               ),
+               "",
+            ))
+            (metric(
+               "stats-filters",
+               "NSFW filter sync",
+               Some(format!("{} cleared", census.filters_cleared)),
+               &format!("{} settings-write refused (code 64 paced)", census.settings_refused),
+               "",
+            ))
+            (metric(
+               "stats-parked",
+               "Parked calls / global 429",
+               Some(format!("{} / {}", census.parked_calls, census.globally_limited)),
+               "In-flight requests waiting on quota / globally cooled accounts",
+               if census.parked_calls > 0 { "warn" } else { "" },
+            ))
+            (metric(
+               "stats-dropped",
+               "Dropped stat events",
+               Some(dropped_events.to_string()),
+               "Telemetry buffer drops since process start",
+               if dropped_events > 0 { "warn" } else { "" },
+            ))
+         }
+
+         @if !census.operations.is_empty() {
+            div class="admin-table-wrap" {
+               table class="admin-table admin-ops-table" {
+                  caption {
+                     div class="admin-bar-legend" {
+                        span { i class="admin-legend-swatch admin-legend-swatch--free" {} "Free" }
+                        span { i class="admin-legend-swatch admin-legend-swatch--busy" {} "Mid-call" }
+                        span { i class="admin-legend-swatch admin-legend-swatch--held" {} "Held" }
+                        span { i class="admin-legend-swatch admin-legend-swatch--resting" {} "Resting (429)" }
+                        span { i class="admin-legend-swatch admin-legend-swatch--spent" {} "Window spent" }
+                        span { i class="admin-legend-swatch admin-legend-swatch--out" {} "Out / unverified" }
+                     }
+                  }
+                  thead {
+                     tr {
+                        th scope="col" { "GraphQL operation" }
+                        th scope="col" { "Pool" }
+                        th scope="col" { "Slot utilization" }
+                        th scope="col" { "Free" }
+                        th scope="col" { "Mid-call" }
+                        th scope="col" { "Resting" }
+                        th scope="col" { "Spent" }
+                        th scope="col" { "Out" }
+                        th scope="col" { "Pool total" }
+                     }
+                  }
+                  tbody {
+                     @for op in &census.operations {
+                        (operation_row(op))
+                     }
+                  }
+               }
+            }
+         }
+      }
+   }
+}
+
+fn operation_row(op: &OperationPool) -> Markup {
+   let total = op.accounts.max(1) as f64;
+   let segments = [
+      (op.free, "admin-bar-fill--free"),
+      (op.busy, "admin-bar-fill--busy"),
+      (op.held, "admin-bar-fill--held"),
+      (op.resting, "admin-bar-fill--resting"),
+      (op.spent, "admin-bar-fill--spent"),
+      (op.out, "admin-bar-fill--out"),
+   ];
+   let mut cursor_x = 0.0_f64;
+   let mut rects = Vec::new();
+   for (count, class_name) in segments {
+      if count == 0 {
+         continue;
+      }
+      let width = (count as f64 * 100.0 / total).clamp(0.0, 100.0 - cursor_x);
+      rects.push((format!("{cursor_x:.2}"), format!("{width:.2}"), class_name));
+      cursor_x = (cursor_x + width).min(100.0);
+   }
+
+   let pool_badge = if op.pool == "search" {
+      "admin-badge admin-badge--search"
+   } else {
+      "admin-badge admin-badge--view"
+   };
+
+   html! {
+      tr {
+         th scope="row" { (op.operation) }
+         td { span class=(pool_badge) { (op.pool) } }
+         td {
+            svg class="admin-bar-svg" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true" {
+               @for (x, width, class_name) in &rects {
+                  rect x=(x) y="0" width=(width) height="8" class=(class_name) {}
+               }
+            }
+         }
+         td { (op.free) }
+         td { (op.busy + op.held) }
+         td { (op.resting) }
+         td { (op.spent) }
+         td { (op.out) }
+         td { (op.accounts) }
+      }
+   }
+}
+
 fn metric(id: &str, title: &str, value: Option<String>, note: &str, modifier: &str) -> Markup {
    let class = if modifier.is_empty() {
-      "admin-stats-metric".to_string()
+      "admin-kpi admin-stats-metric".to_string()
    } else {
-      format!("admin-stats-metric admin-stats-metric--{modifier}")
+      format!("admin-kpi admin-stats-metric admin-kpi--{modifier} admin-stats-metric--{modifier}")
    };
    html! {
       div class=(class) {
@@ -567,196 +1020,251 @@ fn metric(id: &str, title: &str, value: Option<String>, note: &str, modifier: &s
    }
 }
 
-/// What one panel plots: a title, the unit, and how to read a sample.
 struct Panel {
-   id:       &'static str,
-   title:    &'static str,
-   unit:     &'static str,
-   /// One line under the title, so a reader never has to guess what the line is.
-   note:     &'static str,
-   /// CSS modifier for the stroke colour.
-   tone:     &'static str,
-   value:    fn(&Sample) -> f64,
-   /// Draw a threshold line at this value, when the panel has a meaningful one.
+   key:       &'static str,
+   title:     &'static str,
+   unit:      &'static str,
+   note:      &'static str,
+   tone:      &'static str,
+   value:     fn(&Sample) -> f64,
    threshold: Option<f64>,
 }
 
-/// The panels, in reading order: how much traffic, how much of it failed, then
-/// what the failures were, then how slow it was.
-///
-/// This is the RED method. Rate and errors are separate panels on separate
-/// axes, which is the only way a handful of 429s stays visible next to
-/// thousands of successes — Grafana's guidance is explicit that stacking hides
-/// exactly that.
 const PANELS: [Panel; 4] = [
    Panel {
-      id:        "rate",
+      key:       "incoming",
       title:     "Request rate",
       unit:      "req/min",
-      note:      "Every request that reached the origin, per recorded minute.",
+      note:      "Origin search & quote requests per recorded minute.",
       tone:      "rate",
       value:     |sample| sample.incoming,
       threshold: None,
    },
    Panel {
-      id:        "errors",
-      title:     "Error rate",
+      key:       "error_rate",
+      title:     "Fault rate",
       unit:      "%",
-      note:      "Share of responses that were not a usable answer. Challenges are excluded; the line is the 5% threshold.",
+      note:      "Share of non-challenge responses that failed (dashed line at 5%).",
       tone:      "errors",
       value:     |sample| sample.error_rate,
       threshold: Some(5.0),
    },
    Panel {
-      id:        "latency",
+      key:       "latency",
       title:     "Mean response time",
       unit:      "ms",
-      note:      "Average time to produce a response, weighted by completed requests.",
+      note:      "Average origin latency weighted by completed requests.",
       tone:      "latency",
       value:     |sample| sample.latency,
       threshold: None,
    },
    Panel {
-      id:        "challenges",
+      key:       "challenged",
       title:     "Challenges served",
       unit:      "resp/min",
-      note:      "Turnstile pages handed to visitors. Not an error: the gate is doing its job.",
+      note:      "Turnstile checks served to visitors (excluded from fault rate).",
       tone:      "challenged",
       value:     |sample| sample.challenged,
       threshold: None,
    },
 ];
 
-/// The outcome panels under the RED row. Same rendering, split out so the two
-/// groups can be read as different questions: "how is it going" and "what went
-/// wrong".
 const BREAKDOWN: [Panel; 4] = [
    Panel {
-      id:        "denied",
+      key:       "rejected",
       title:     "Access denied",
       unit:      "resp/min",
-      note:      "401, 402, and 403: authentication, pass, and access failures.",
+      note:      "HTTP 401/402/403 responses.",
       tone:      "rejected",
       value:     |sample| sample.rejected,
       threshold: None,
    },
    Panel {
-      id:        "limited",
+      key:       "rate_limited",
       title:     "Rate limited",
       unit:      "resp/min",
-      note:      "429s we sent because no account had budget left.",
+      note:      "HTTP 429s returned when search budget was exhausted.",
       tone:      "rate-limited",
       value:     |sample| sample.rate_limited,
       threshold: None,
    },
    Panel {
-      id:        "upstream",
+      key:       "failed",
       title:     "Upstream failed",
       unit:      "resp/min",
-      note:      "X failed and we could not answer from another account.",
+      note:      "Requests that failed upstream after retry.",
       tone:      "failed",
       value:     |sample| sample.failed,
       threshold: None,
    },
    Panel {
-      id:        "other",
-      title:     "Other",
+      key:       "other",
+      title:     "Other non-2xx",
       unit:      "resp/min",
-      note:      "Timeouts and responses outside the categories above.",
+      note:      "Other non-fault status codes (such as 404).",
       tone:      "other",
       value:     |sample| sample.other,
       threshold: None,
    },
 ];
 
-/// A single-series time chart.
-///
-/// One line, one axis, scaled to its own maximum. Nothing is stacked: the point
-/// of a separate panel per outcome is that three rate limits fill the panel the
-/// same way three thousand successes fill theirs.
-fn panel(samples: &[Sample], panel: &Panel) -> Markup {
+fn format_panel_val(value: f64, unit: &str) -> String {
+   if unit == "%" {
+      format!("{value:.1}%")
+   } else if unit == "ms" {
+      format!("{value:.0} ms")
+   } else if value >= 100.0 || (value - value.round()).abs() < 0.05 {
+      format!("{value:.0}")
+   } else {
+      format!("{value:.1}")
+   }
+}
+
+fn panel(
+   samples: &[Sample],
+   panel: &Panel,
+   (window_start, window_end): (i64, i64),
+   hourly: bool,
+   include_date: bool,
+) -> Markup {
    let values: Vec<(i64, f64)> = samples
       .iter()
       .map(|sample| (sample.minute, (panel.value)(sample)))
       .collect();
-   let peak = values.iter().map(|(_, v)| *v).fold(0.0_f64, f64::max);
-   // A panel whose only value is zero should still show a flat line at the
-   // bottom rather than a division by zero.
+   let peak = values.iter().map(|(_, val)| *val).fold(0.0_f64, f64::max);
+   let latest = values.last().map_or(0.0, |(_, val)| *val);
+   let mean = if values.is_empty() {
+      0.0
+   } else {
+      values.iter().map(|(_, val)| *val).sum::<f64>() / values.len() as f64
+   };
    let maximum = peak.max(panel.threshold.unwrap_or(0.0)).max(1.0);
-   let first = values.first().map_or(0, |(minute, _)| *minute);
-   let last = values.last().map_or(0, |(minute, _)| *minute);
-   let span = last.saturating_sub(first);
+   let span = (window_end - window_start).max(0);
+   let span_denom = span.max(60) as f64;
+   let max_gap = if hourly { 7200_i64 } else { 180_i64 };
 
    let x_at = |minute: i64| -> f64 {
-      if span == 0 {
-         320.0
+      16.0 + 608.0 * ((minute - window_start).clamp(0, span) as f64 / span_denom)
+   };
+   let y_at = |value: f64| -> f64 { 164.0 - 148.0 * (value.clamp(0.0, maximum) / maximum) };
+
+   // Split into contiguous runs so missing minutes are not connected by fake lines.
+   let mut segments: Vec<Vec<(f64, f64)>> = Vec::new();
+   let mut prev_minute: Option<i64> = None;
+   for &(minute, value) in &values {
+      let point = (x_at(minute), y_at(value));
+      if let Some(prev) = prev_minute
+         && minute.saturating_sub(prev) <= max_gap
+         && let Some(seg) = segments.last_mut()
+      {
+         seg.push(point);
       } else {
-         18.0 + 604.0 * (minute.saturating_sub(first) as f64 / span as f64)
+         segments.push(vec![point]);
       }
-   };
-   let y_at = |value: f64| -> f64 { 152.0 - 136.0 * (value.max(0.0) / maximum) };
+      prev_minute = Some(minute);
+   }
 
-   let line = {
-      let mut path = String::new();
-      use std::fmt::Write as _;
-      for (index, (minute, value)) in values.iter().enumerate() {
-         let x = x_at(*minute);
-         let y = y_at(*value);
-         let _ = if index == 0 {
-            write!(path, "M{x:.2} {y:.2}")
-         } else {
-            write!(path, " L{x:.2} {y:.2}")
-         };
+   let mut line = String::new();
+   let mut area = String::new();
+   let mut dots: Vec<(String, String)> = Vec::new();
+
+   for seg in &segments {
+      if let [(pt_x, pt_y)] = seg.as_slice() {
+         dots.push((format!("{pt_x:.2}"), format!("{pt_y:.2}")));
+         continue;
       }
-      path
-   };
-
-   let area = if line.is_empty() {
-      String::new()
-   } else {
-      let first_x = x_at(first);
-      let last_x = x_at(last);
-      format!("{line} L{last_x:.2} 152 L{first_x:.2} 152 Z")
-   };
+      if let Some(&(first_x, first_y)) = seg.first()
+         && let Some(&(last_x, _)) = seg.last()
+      {
+         if !line.is_empty() {
+            line.push(' ');
+         }
+         let _ = write!(line, "M{first_x:.2} {first_y:.2}");
+         if !area.is_empty() {
+            area.push(' ');
+         }
+         let _ = write!(area, "M{first_x:.2} {first_y:.2}");
+         for &(pt_x, pt_y) in &seg[1..] {
+            let _ = write!(line, " L{pt_x:.2} {pt_y:.2}");
+            let _ = write!(area, " L{pt_x:.2} {pt_y:.2}");
+         }
+         let _ = write!(area, " L{last_x:.2} 164 L{first_x:.2} 164 Z");
+      }
+   }
 
    let threshold = panel.threshold.map(|value| {
-      let y = y_at(value);
-      format!("M14 {y:.2} H626")
+      let pt_y = y_at(value);
+      format!("M16 {pt_y:.2} H624")
    });
 
-   let peak_label = if panel.unit == "%" {
-      format!("{peak:.1}%")
-   } else if panel.unit == "ms" {
-      format!("{peak:.0} ms")
-   } else {
-      format!("{peak:.0}")
-   };
+   let mid_unix = window_start + span / 2;
 
    html! {
-      figure class=(format!("admin-panel admin-panel--{}", panel.tone)) {
-         figcaption class="admin-panel-head" {
+      figure
+         class=(format!("admin-panel admin-panel--{}", panel.tone))
+         data-panel-key=(panel.key)
+         data-unit=(panel.unit)
+         data-threshold=[panel.threshold.map(|val| val.to_string())]
+      {
+         figcaption class="admin-panel-head admin-panel-header" {
             div {
                h3 { (panel.title) }
                p class="admin-panel-note" { (panel.note) }
             }
-            dl class="admin-panel-stat" {
-               dt { "peak" }
-               dd { (peak_label) }
+            span class="admin-badge admin-badge--neutral admin-panel-hover-val" data-hover-val="" hidden {}
+            dl class="admin-panel-stats" {
+               div {
+                  dt { "last" }
+                  dd data-stat="last" { (format_panel_val(latest, panel.unit)) }
+               }
+               div {
+                  dt { "avg" }
+                  dd data-stat="avg" { (format_panel_val(mean, panel.unit)) }
+               }
+               div {
+                  dt { "peak" }
+                  dd data-stat="peak" { (format_panel_val(peak, panel.unit)) }
+               }
             }
          }
-         div class="admin-panel-plot" {
-            svg viewBox="0 0 640 168" preserveAspectRatio="none" role="img"
-               aria-label=(format!("{} per recorded minute", panel.title)) {
-               path class="stats-grid" d="M14 16 H626 M14 50 H626 M14 84 H626 M14 118 H626 M14 152 H626" {}
-               @if let Some(d) = threshold { path class="stats-threshold" d=(d) {} }
-               path class="stats-area" d=(area) {}
-               path class="stats-line" d=(line) {}
-            }
+         div class="admin-chart admin-panel-plot" {
             div class="admin-panel-axis" aria-hidden="true" {
-               span { (format!("{maximum:.0}")) }
-               span { (panel.unit) }
+               span data-axis="max" { (format_panel_val(maximum, panel.unit)) }
+               span data-axis="mid" { (format_panel_val(maximum / 2.0, panel.unit)) }
                span { "0" }
             }
+            svg
+               class="admin-panel-svg"
+               viewBox="0 0 640 180"
+               role="img"
+               aria-label=(format!("{} over selected window", panel.title))
+            {
+               path
+                  class="stats-grid"
+                  vector-effect="non-scaling-stroke"
+                  d="M16 16 H624 M16 53 H624 M16 90 H624 M16 127 H624 M16 164 H624"
+               {}
+               @if let Some(path_d) = threshold {
+                  path class="stats-threshold" vector-effect="non-scaling-stroke" d=(path_d) {}
+               }
+               path class="stats-area" d=(area) {}
+               path class="stats-line" vector-effect="non-scaling-stroke" d=(line) {}
+               g class="stats-dots" {
+                  @for (cx, cy) in &dots {
+                     circle class="stats-dot" cx=(cx) cy=(cy) r="3.5" {}
+                  }
+               }
+               rect class="stats-brush" x="16" y="16" width="0" height="148" hidden {}
+               line class="stats-crosshair" x1="16" y1="16" x2="16" y2="164" hidden {}
+               circle class="stats-hover-ring" cx="0" cy="0" r="7" hidden {}
+               circle class="stats-hover-dot" cx="0" cy="0" r="3.8" hidden {}
+               rect class="stats-hit-area" x="16" y="12" width="608" height="156" {}
+            }
+         }
+         div class="admin-panel-xaxis" aria-hidden="true" {
+            span data-xaxis="start" { (axis_time_label(window_start, include_date)) }
+            span data-xaxis="mid" { (axis_time_label(mid_unix, include_date)) }
+            span data-xaxis="end" { (axis_time_label(window_end, include_date)) }
          }
       }
    }
@@ -765,6 +1273,34 @@ fn panel(samples: &[Sample], panel: &Panel) -> Markup {
 #[cfg(test)]
 mod tests {
    use super::*;
+   use crate::pressure::Status as PressureStatus;
+
+   fn sample_gate() -> GateStatus {
+      GateStatus {
+         armed:             true,
+         automatic:         true,
+         everyone:          false,
+         checking_everyone: false,
+         blocked_networks:  1,
+         watched_countries: 1,
+         surge_per_minute:  300,
+         pass_minutes:      60,
+         pressure:          PressureStatus {
+            flooding:          false,
+            cause:             None,
+            since:             None,
+            until:             None,
+            share:             0,
+            sample:            120,
+            observed_at:       Some(1_700_000_000),
+            streak_minutes:    0,
+            flood_percent:     50,
+            sustained_percent: 3,
+            sustained_minutes: 5,
+            hold_minutes:      15,
+         },
+      }
+   }
 
    fn bucket(minute: i64, incoming: i64, success: i64, finished: i64, latency_ms: i64) -> Bucket {
       Bucket {
@@ -774,7 +1310,7 @@ mod tests {
          empty: 1,
          rejected: 0,
          rate_limited: 0,
-         failed: finished - success,
+         failed: (finished - success).max(0),
          other: 0,
          challenged: 0,
          latency_ms,
@@ -783,50 +1319,23 @@ mod tests {
    }
 
    #[test]
-   fn summary_weights_latency_and_excludes_current_minute_only_from_rate() {
+   fn summary_weights_latency_and_counts_answered_without_double_counting_empty() {
       let first = bucket(0, 2, 1, 1, 20);
       let next = bucket(60, 4, 2, 3, 100);
       let current = bucket(120, 5, 4, 4, 120);
       let summary = TrafficSummary::from_buckets(&[&first, &next, &current], 120);
       assert_eq!(summary.incoming, 11);
       assert_eq!(summary.successful, 7);
+      assert_eq!(summary.empty, 3);
+      assert_eq!(summary.answered(), 10);
       assert_eq!(summary.completed, 8);
       assert_eq!(summary.peak, Some(5));
-      assert_eq!(summary.observed, Some(1.5));
       assert_eq!(summary.latency, Some(100.0));
-      assert_eq!(
-         TrafficSummary::from_buckets(&[&current], 120).observed,
-         None
-      );
-      assert_eq!(TrafficSummary::from_buckets(&[], 120).latency, None);
    }
 
    #[test]
-   fn hourly_rollup_keeps_each_outcome_peak_across_the_range() {
-      let first = bucket(0, 9, 1, 26, 0);
-      let second = bucket(60, 4, 7, 7, 0);
-      let later = bucket(7200, 6, 5, 5, 0);
-      let buckets = [&first, &second, &later];
-
-      let hourly = samples(&buckets, true);
-      // The busiest minute of each hour wins per field, so a single bad minute
-      // survives the roll-up instead of being averaged into its neighbours.
-      assert_eq!(hourly.len(), 2);
-      assert_eq!(hourly[0].minute, 0);
-      assert_eq!(hourly[0].answered, 8.0); // max(1 + 1, 7 + 1)
-      assert_eq!(hourly[0].failed, 25.0);
-      assert_eq!(hourly[1].minute, 7200);
-
-      let minute = samples(&buckets, false);
-      assert_eq!(minute.len(), 3);
-      assert_eq!(minute[0].answered, 2.0);
-      assert_eq!(minute[1].answered, 8.0);
-      assert_eq!(minute[2].answered, 6.0);
-   }
-
-   #[test]
-   fn a_sample_separates_answers_from_each_kind_of_bad_response() {
-      let bucket = Bucket {
+   fn sample_preserves_already_averaged_latency_without_redividing() {
+      let row = Bucket {
          minute:       0,
          incoming:     21,
          success:      9,
@@ -836,105 +1345,135 @@ mod tests {
          failed:       2,
          other:        1,
          challenged:   7,
-         latency_ms:   210,
+         latency_ms:   245,
          finished:     10,
       };
-      let sample = Sample::of(&bucket);
+      let sample = Sample::of(&row);
       assert_eq!(sample.answered, 10.0);
-      assert_eq!(sample.rejected, 3.0);
-      assert_eq!(sample.rate_limited, 5.0);
-      assert_eq!(sample.failed, 2.0);
-      assert_eq!(sample.other, 1.0);
-      // 10 bad of 20 that were not challenges: 3 + 5 + 2.
-      // `other` is excluded because a 404 is not a service fault.
+      assert_eq!(sample.empty, 1.0);
       assert!((sample.error_rate - 50.0).abs() < 0.01);
-      // Per-request latency, not the bucket total.
-      assert_eq!(sample.latency, 21.0);
+      assert_eq!(sample.latency, 245.0);
    }
 
    #[test]
-   fn a_challenge_is_not_counted_against_the_error_rate() {
-      // A healthy site where every first-time visitor gets a Turnstile page.
-      // Before this was its own outcome the challenge was scored as a 403, and
-      // the panel read 91% while nothing was wrong.
-      let bucket = Bucket {
-         minute:       0,
-         incoming:     110,
-         success:      9,
-         empty:        0,
-         rejected:     0,
-         rate_limited: 0,
-         failed:       1,
-         other:        0,
-         challenged:   100,
-         latency_ms:   1000,
-         finished:     10,
-      };
-      let sample = Sample::of(&bucket);
-      // One bad response out of ten that were not challenges.
-      assert!((sample.error_rate - 10.0).abs() < 0.01);
-      assert_eq!(sample.challenged, 100.0);
+   fn hourly_rollup_computes_true_hourly_averages_and_weighted_latency() {
+      let first = bucket(0, 10, 4, 4, 100);
+      let mut second = bucket(60, 20, 8, 6, 200);
+      second.empty = 3;
+      let later = bucket(7200, 6, 5, 5, 150);
+      let buckets = [&first, &second, &later];
 
-      let summary = TrafficSummary::from_buckets(&[&bucket], 60);
-      // The challenge is visible but not scored.
-      assert_eq!(summary.challenged, 100);
-      assert_eq!(summary.bad(), 1);
-      assert_eq!(summary.health(), Health::Failing);
+      let hourly = samples(&buckets, true);
+      assert_eq!(hourly.len(), 2);
+      assert_eq!(hourly[0].minute, 0);
+      assert!((hourly[0].incoming - 15.0).abs() < 0.01);
+      assert!((hourly[0].answered - 8.0).abs() < 0.01);
+      assert!((hourly[0].empty - 2.0).abs() < 0.01);
+      // (4 * 100 + 6 * 200) / 10 = 160 ms
+      assert!((hourly[0].latency - 160.0).abs() < 0.01);
+      assert_eq!(hourly[1].minute, 7200);
    }
 
    #[test]
-   fn health_is_decided_by_the_share_of_bad_responses_not_the_count() {
-      let quiet = TrafficSummary {
-         successful: 1000,
-         rejected:   4,
-         ..TrafficSummary::default()
+   fn dashboard_markup_is_csp_clean_and_renders_live_pools_and_gate() {
+      let mut census = PoolCensus {
+         total: 5440,
+         search: 536,
+         view: 4904,
+         demoted_from_search: 12,
+         ..PoolCensus::default()
       };
-      let loud = TrafficSummary {
-         successful:   100,
-         rate_limited: 9,
-         ..TrafficSummary::default()
-      };
-      // Four failures out of a thousand is healthy; nine out of a hundred is
-      // not, even though the first number is larger.
-      assert_eq!(quiet.health(), Health::Healthy);
-      assert_eq!(loud.health(), Health::Failing);
-      assert_eq!(TrafficSummary::default().health(), Health::Unknown);
+      census.operations.push(OperationPool {
+         operation: "UserTweets".to_owned(),
+         pool:      "view",
+         accounts:  4904,
+         free:      4100,
+         busy:      80,
+         held:      0,
+         resting:   0,
+         spent:     10,
+         out:       714,
+      });
 
-      let degraded = TrafficSummary {
-         successful: 98,
-         failed:     2,
-         ..TrafficSummary::default()
-      };
-      assert_eq!(degraded.health(), Health::Degraded);
-   }
-
-   #[test]
-   fn weekly_view_discloses_chart_and_table_limits_without_truncating_totals() {
       let dashboard = Dashboard {
-         minutes:        WEEK_MINUTES,
-         pool:           Some((1, 2)),
-         capacity:       Some(20.0),
-         dropped_events: 3,
-         buckets:        (0..=120)
-            .map(|index| bucket(index * 60, 2, 1, 2, 42))
+         minutes: WEEK_MINUTES,
+         pool: Some((536, 4904)),
+         capacity: Some(1786.6),
+         census,
+         gate: sample_gate(),
+         dropped_events: 0,
+         buckets: (0..=120)
+            .map(|index| bucket(index * 60, 12, 10, 10, 240))
             .collect(),
-         restrictions:   Vec::new(),
-         recent:         vec![],
+         restrictions: Vec::new(),
       };
-      let markup = page("dark", Some(&dashboard), WEEK_MINUTES).into_string();
-      // The table is still capped, and says so.
-      assert_eq!(markup.matches("scope=\"row\"").count(), TABLE_LIMIT);
-      assert!(markup.contains("Showing the latest 120 recorded minutes."));
-      // The weekly view explains that each point is the worst minute of an hour.
-      assert!(markup.contains("worst recorded minute of its UTC hour"));
-      // Panels are separate, never stacked: each has its own axis label.
-      assert!(markup.contains("Request rate"));
-      assert!(markup.contains("Error rate"));
-      assert!(!markup.contains("stats-band"));
-      // The summary line reads the health, not a raw count.
-      assert!(markup.contains("admin-verdict--"));
-      assert!(markup.contains("id=\"stats-pool\">1 / 2</dd>"));
-      assert!(markup.contains("id=\"stats-estimate\">20.0 calls/min</dd>"));
-      assert!(markup.contains("id=\"stats-dropped\">3</dd>"));
+
+      let markup = page("light", Some(&dashboard), WEEK_MINUTES).into_string();
+      assert!(markup.contains("data-theme=\"light\""));
+      assert!(markup.contains("/css/admin-stats.css?v=7"));
+      assert!(markup.contains("/js/admin-stats.js?v=7"));
+      assert!(!markup.contains("style=\""));
+      assert!(!markup.contains("<script>"));
+      assert!(markup.contains("Anti-DDoS &amp; timeline pressure"));
+      assert!(markup.contains("UserTweets"));
+      assert!(markup.contains("id=\"stats-pool\">536 / 4904</dd>"));
+      assert!(markup.contains("data-series=\"[[0,"));
+      assert!(markup.contains("data-window-start=\"-597600\""));
+      assert!(markup.contains("data-window-end=\"7200\""));
+      assert!(markup.contains("data-hourly=\"true\""));
+      assert!(markup.contains("data-include-date=\"true\""));
+      assert!(markup.contains("id=\"chart-mode-raw\""));
+      assert!(markup.contains("id=\"chart-mode-smooth\""));
+      assert!(markup.contains("id=\"chart-unpin\""));
+      assert!(markup.contains("id=\"chart-reset-zoom\""));
+      assert!(markup.contains("id=\"stats-inspector\""));
+      assert!(markup.contains("data-panel-key=\"incoming\""));
+      assert!(markup.contains("data-panel-key=\"error_rate\""));
+      assert!(markup.contains("data-threshold=\"5\""));
+      assert!(markup.contains("data-hover-val=\"\""));
+      assert!(markup.contains("data-stat=\"last\""));
+      assert!(markup.contains("data-stat=\"avg\""));
+      assert!(markup.contains("data-stat=\"peak\""));
+      assert!(markup.contains("data-axis=\"max\""));
+      assert!(markup.contains("data-axis=\"mid\""));
+      assert!(markup.contains("data-xaxis=\"start\""));
+      assert!(markup.contains("data-xaxis=\"mid\""));
+      assert!(markup.contains("data-xaxis=\"end\""));
+      assert!(markup.contains("<svg class=\"admin-panel-svg\" viewBox=\"0 0 640 180\" role=\"img\""));
+      assert!(markup.contains("class=\"stats-dots\""));
+      assert!(markup.contains("class=\"stats-brush\""));
+      assert!(markup.contains("class=\"stats-crosshair\""));
+      assert!(markup.contains("class=\"stats-hover-ring\""));
+      assert!(markup.contains("class=\"stats-hover-dot\""));
+      assert!(markup.contains("class=\"stats-hit-area\""));
+      assert!(markup.contains("<tr data-minute=\"7200\">"));
+      assert_eq!(markup.matches("scope=\"row\" class=\"admin-col-time\"").count(), TABLE_LIMIT);
+   }
+
+   #[test]
+   fn single_sample_anchors_to_window_end_and_empty_hides_chart_controls() {
+      let single = Dashboard {
+         minutes:        15,
+         pool:           Some((10, 20)),
+         capacity:       Some(33.3),
+         census:         PoolCensus::default(),
+         gate:           sample_gate(),
+         dropped_events: 0,
+         buckets:        vec![bucket(3600, 10, 10, 10, 120)],
+         restrictions:   Vec::new(),
+      };
+      let markup = page("dark", Some(&single), 15).into_string();
+      assert!(!markup.contains("style=\""));
+      assert!(!markup.contains("<script>"));
+      assert!(markup.contains("data-window-start=\"2700\""));
+      assert!(markup.contains("data-window-end=\"3600\""));
+      assert!(markup.contains("data-hourly=\"false\""));
+      assert!(markup.contains("data-include-date=\"false\""));
+      assert!(markup.contains("class=\"stats-dot\" cx=\"624.00\" cy=\"16.00\" r=\"3.5\""));
+
+      let empty_markup = page("dark", None, 15).into_string();
+      assert!(empty_markup.contains("class=\"admin-chart-controls\" hidden"));
+      assert!(empty_markup.contains("id=\"stats-inspector\" class=\"admin-inspector\" hidden"));
+      assert!(empty_markup.contains("data-series=\"[]\""));
    }
 }

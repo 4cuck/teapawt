@@ -68,9 +68,9 @@ pub struct Config {
    /// Paid pass that skips the checkbox. Paid through the donation providers.
    #[serde(default)]
    pub pass: PassConfig,
-   /// Turnstile in front of scrapers that eat the account pool.
-   #[serde(default)]
-   pub scrape: ScrapeConfig,
+   /// Turnstile in front of floods that drain the account pool.
+   #[serde(default, rename = "antiDdos", alias = "scrape")]
+   pub anti_ddos: AntiDdosConfig,
    /// Where people reach the operator. Shown on `/contact`.
    #[serde(default)]
    pub contact: ContactConfig,
@@ -242,48 +242,88 @@ const fn default_pass_cents() -> i64 {
    1500
 }
 
-/// Who gets the scrape Turnstile. Read from headers Cloudflare sets, and only
+/// The Anti-DDoS gate: a Turnstile in front of visitors whose traffic is
+/// draining the account pool. Read from headers Cloudflare sets, and only
 /// when the request came through a trusted proxy.
 #[derive(Clone, Debug, Deserialize)]
-pub struct ScrapeConfig {
+pub struct AntiDdosConfig {
    #[serde(default = "default_true")]
-   pub enabled:            bool,
+   pub enabled:             bool,
    /// Networks challenged on every page, from the `asn-num` header.
    #[serde(default = "default_blocked_asns", rename = "blockedAsns")]
-   pub blocked_asns:       Vec<u32>,
+   pub blocked_asns:        Vec<u32>,
    /// Countries challenged while their page rate is above
    /// `surgePerMinute`, from `cf-ipcountry`.
    #[serde(default = "default_watched_countries", rename = "watchedCountries")]
-   pub watched_countries:  Vec<String>,
+   pub watched_countries:   Vec<String>,
    #[serde(default = "default_surge_per_minute", rename = "surgePerMinute")]
-   pub surge_per_minute:   u32,
+   pub surge_per_minute:    u32,
    /// How long one solved check lets a visitor's address through.
    #[serde(default = "default_gate_pass_minutes", rename = "passMinutes")]
-   pub pass_minutes:       i64,
-   /// Every visitor is checked, wherever they come from. Meant to be
-   /// switched off by hand once the month's donation goal is met.
+   pub pass_minutes:        i64,
+   /// Challenge every visitor while the pool is being drained. Raised and
+   /// lifted by `pressure`, not by hand.
+   #[serde(default = "default_true")]
+   pub automatic:           bool,
+   /// Fallback share, in percent, that counts as a flood.
+   #[serde(default = "default_flood_percent", rename = "floodPercent")]
+   pub flood_percent:       u32,
+   /// Sustained fallback share, in percent, that counts as a flood once held
+   /// for `sustainedMinutes` (`0` disables it).
+   #[serde(default = "default_sustained_percent", rename = "sustainedPercent")]
+   pub sustained_percent:   u32,
+   /// Consecutive minutes at or above `sustainedPercent` before raising the
+   /// gate.
+   #[serde(default = "default_sustained_minutes", rename = "sustainedMinutes")]
+   pub sustained_minutes:   u32,
+   /// How long the verdict outlives the last minute above `floodPercent`.
+   #[serde(default = "default_flood_hold_minutes", rename = "floodHoldMinutes")]
+   pub flood_hold_minutes:  i64,
+   /// Every visitor is checked, wherever they come from, until the operator
+   /// turns it off.
    #[serde(default)]
-   pub everyone:           bool,
+   pub everyone:            bool,
 }
 
-impl ScrapeConfig {
+impl AntiDdosConfig {
    #[must_use]
    pub const fn gates_everyone(&self) -> bool {
       self.enabled && self.everyone
    }
 }
 
-impl Default for ScrapeConfig {
+impl Default for AntiDdosConfig {
    fn default() -> Self {
       Self {
-         enabled:           true,
-         blocked_asns:      default_blocked_asns(),
-         watched_countries: default_watched_countries(),
-         surge_per_minute:  default_surge_per_minute(),
-         pass_minutes:      default_gate_pass_minutes(),
-         everyone:          false,
+         enabled:            true,
+         blocked_asns:       default_blocked_asns(),
+         watched_countries:  default_watched_countries(),
+         surge_per_minute:   default_surge_per_minute(),
+         pass_minutes:       default_gate_pass_minutes(),
+         automatic:          true,
+         flood_percent:      crate::pressure::DEFAULT_PERCENT,
+         sustained_percent:  crate::pressure::DEFAULT_SUSTAINED_PERCENT,
+         sustained_minutes:  crate::pressure::DEFAULT_SUSTAINED_MINUTES,
+         flood_hold_minutes: crate::pressure::DEFAULT_HOLD_MINUTES,
+         everyone:           false,
       }
    }
+}
+
+const fn default_flood_percent() -> u32 {
+   crate::pressure::DEFAULT_PERCENT
+}
+
+const fn default_sustained_percent() -> u32 {
+   crate::pressure::DEFAULT_SUSTAINED_PERCENT
+}
+
+const fn default_sustained_minutes() -> u32 {
+   crate::pressure::DEFAULT_SUSTAINED_MINUTES
+}
+
+const fn default_flood_hold_minutes() -> i64 {
+   crate::pressure::DEFAULT_HOLD_MINUTES
 }
 
 /// Tencent Cloud's international network, where the Singapore scraper runs.

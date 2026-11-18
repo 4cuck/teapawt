@@ -13,11 +13,15 @@ use super::{
    endpoints,
    schema::SearchTimelineData,
 };
-use crate::error::Result;
+use crate::error::{
+   Error,
+   Result,
+};
 
 const CHECK_GAP: Duration = Duration::from_secs(10);
 const CHECK_EVERY: Duration = Duration::from_mins(30);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(25);
+const RECOVER_GAP: Duration = Duration::from_secs(20);
 
 #[expect(
    clippy::multiple_inherent_impl,
@@ -29,6 +33,7 @@ impl ApiClient {
       tokio::spawn(async move {
          loop {
             client.check_search_accounts().await;
+            client.recover_demoted_search_accounts().await;
             sleep(CHECK_EVERY).await;
          }
       });
@@ -53,6 +58,36 @@ impl ApiClient {
          sleep(CHECK_GAP).await;
       }
       tracing::info!(allowed, unknown, "search check done");
+   }
+
+   async fn recover_demoted_search_accounts(&self) {
+      let ids = self.sessions.demoted_search_candidates(8).await;
+      if ids.is_empty() {
+         return;
+      }
+      let mut reinstated = 0_usize;
+      for id in ids {
+         match timeout(CHECK_TIMEOUT, self.probe_search_capable(id)).await {
+            Ok(Ok(true)) => {
+               self.sessions.reinstate(id).await;
+               self
+                  .sessions
+                  .mark_verified(id, endpoints::GRAPH_SEARCH_TIMELINE)
+                  .await;
+               reinstated += 1;
+            },
+            Ok(Err(Error::SessionRejected(_))) => {
+               self.sessions.mark_rejected(id).await;
+               self.sessions.clear_demoted_from_search(id).await;
+            },
+            Ok(Err(Error::IpThrottled | Error::RateLimited)) => break,
+            _ => {},
+         }
+         sleep(RECOVER_GAP).await;
+      }
+      if reinstated != 0 {
+         tracing::info!(reinstated, "recovered demoted search accounts");
+      }
    }
 
    async fn search_as(&self, session_id: i64) -> Result<bool> {

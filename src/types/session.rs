@@ -84,6 +84,11 @@ pub struct SessionLimits {
    /// It stays in the pool for profile reads and stops being tried for search.
    #[serde(default)]
    pub search_banned: bool,
+   /// This account was reserved for search and has been moved to the view
+   /// pool. Remembered so that a verdict later shown to be wrong can be
+   /// undone: without it nothing says which pool the account came from.
+   #[serde(default)]
+   pub demoted_from_search: bool,
    /// X refused the account itself with a 403 the settings write also gets
    /// ("not permitted to access this feature"). The account is out of search,
    /// and the view pool gets exactly one attempt to show it can still read
@@ -163,7 +168,11 @@ const SEARCH_404_COOLDOWN_SECS: i64 = 30 * 60;
 /// `SearchTimeline` from `ph2fARFabkwfxqmSKQ1OPw/SearchTimeline`, so a mark
 /// outlives a change of query id.
 pub(crate) fn operation_name(api: &str) -> &str {
-   api.rsplit('/').next().unwrap_or(api)
+   api.trim_end_matches('/')
+      .rsplit('/')
+      .next()
+      .filter(|name| !name.is_empty())
+      .unwrap_or("rest")
 }
 
 /// Calls an account makes about itself rather than on a visitor's behalf.
@@ -521,6 +530,11 @@ pub struct Session {
    /// means the shared view pool, which is every account already on disk.
    #[serde(default)]
    pub pool: String,
+   /// `"search"` when this account was reserved for search and a verdict
+   /// moved it to the view pool. Written with the move and removed when the
+   /// account goes back, so the move can be undone.
+   #[serde(default)]
+   pub demoted_from: String,
 }
 
 impl Session {
@@ -551,6 +565,8 @@ impl Session {
             search_404_at: None,
             search_only: self.pool.eq_ignore_ascii_case("search"),
             search_banned: false,
+            demoted_from_search: self.demoted_from.eq_ignore_ascii_case("search")
+               && !self.pool.eq_ignore_ascii_case("search"),
             suspended: false,
             retired: false,
             ct0_dead: false,
@@ -741,5 +757,13 @@ mod tests {
       assert!(limits.refuses("x/UserTweets"));
       assert!(limits.refuses("other/SearchTimeline"));
       assert_eq!(limits.try_spend("x/UserTweets"), super::Spend::Denied);
+   }
+
+   #[test]
+   fn operation_name_handles_trailing_slashes_and_empty_inputs() {
+      assert_eq!(operation_name("abc/UserTweets"), "UserTweets");
+      assert_eq!(operation_name("account/settings/"), "settings");
+      assert_eq!(operation_name(""), "rest");
+      assert_eq!(operation_name("/"), "rest");
    }
 }

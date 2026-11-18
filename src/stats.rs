@@ -362,13 +362,10 @@ impl StatsStore {
    }
 
    pub fn account_event(&self, event: AccountEvent) {
-      if matches!(
-         event.kind,
-         Restriction::SearchOnly | Restriction::Suspended | Restriction::SearchBanned
-      ) {
+      if let Some(kind) = restricted_bucket_kind(event.kind) {
          self.submit(Event::Restricted(
             event.session_id,
-            Restriction::SearchOnly,
+            kind,
             event.observed_unix,
          ));
       }
@@ -541,6 +538,14 @@ fn now_unix() -> i64 {
 
 const fn minute(unix: i64) -> i64 {
    unix - unix.rem_euclid(60)
+}
+
+const fn restricted_bucket_kind(kind: Restriction) -> Option<Restriction> {
+   match kind {
+      Restriction::SearchOnly | Restriction::SearchBanned => Some(Restriction::SearchOnly),
+      Restriction::Suspended => Some(Restriction::Suspended),
+      _ => None,
+   }
 }
 
 enum Event {
@@ -830,5 +835,23 @@ mod tests {
       let latency = LatencySummary::new(2, 31, 20);
       assert_eq!(latency.avg_ms, Some(15.5));
       assert_eq!(latency.max_ms, Some(20));
+   }
+
+   #[test]
+   fn maps_account_restrictions_to_separate_search_and_suspended_buckets() {
+      assert_eq!(
+         restricted_bucket_kind(Restriction::SearchOnly),
+         Some(Restriction::SearchOnly)
+      );
+      assert_eq!(
+         restricted_bucket_kind(Restriction::SearchBanned),
+         Some(Restriction::SearchOnly)
+      );
+      assert_eq!(
+         restricted_bucket_kind(Restriction::Suspended),
+         Some(Restriction::Suspended)
+      );
+      assert_eq!(restricted_bucket_kind(Restriction::Reinstated), None);
+      assert_eq!(restricted_bucket_kind(Restriction::RateLimited), None);
    }
 }

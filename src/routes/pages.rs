@@ -5,7 +5,6 @@ use axum::{
    extract::State,
    http::{
       HeaderMap,
-      HeaderValue,
       header,
    },
    response::{
@@ -22,6 +21,7 @@ use maud::{
    html,
 };
 
+use super::import::no_store;
 use crate::{
    AppState,
    types::Prefs,
@@ -55,10 +55,28 @@ fn about_description(host: &str) -> String {
    )
 }
 
-fn home_json_ld(origin: &str, host: &str) -> String {
-   let same_as: Vec<String> = crate::utils::host::APEX_HOSTS
+fn same_apex(host: &str, domain: &str) -> bool {
+   let without_port = host.split(':').next().unwrap_or(host);
+   let apex = match without_port.get(..4) {
+      Some(prefix) if prefix.eq_ignore_ascii_case("www.") => {
+         without_port.get(4..).unwrap_or(without_port)
+      },
+      _ => without_port,
+   };
+   apex.eq_ignore_ascii_case(domain)
+}
+
+fn mirror_hosts(host: &str) -> Vec<&'static str> {
+   crate::utils::host::APEX_HOSTS
       .iter()
-      .filter(|item| **item != host)
+      .copied()
+      .filter(|item| !same_apex(host, item))
+      .collect()
+}
+
+fn home_json_ld(origin: &str, host: &str) -> String {
+   let same_as: Vec<String> = mirror_hosts(host)
+      .into_iter()
       .map(|item| format!("https://{item}"))
       .collect();
    let value = serde_json::json!({
@@ -166,7 +184,7 @@ async fn contact(State(state): State<AppState>, jar: CookieJar) -> impl IntoResp
    let description =
       format!("Support and contact details for {host}, and how donors get a search pass.");
    let price = crate::donations::format_usd(state.passes.price_cents());
-   let content = crate::views::scrape::render_contact(&state.config.contact, &price);
+   let content = crate::views::contact::render_contact(&state.config.contact, &price);
    let markup = PageLayout::new(&state.config, &title, content)
       .description(&description)
       .prefs(&prefs)
@@ -219,44 +237,47 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
            }
        }
    };
+   let (origin, host) = request_host(&state.config);
    let progress =
       crate::donations::month_progress(&state.donations, state.config.donations.goal_cents).await;
    let below = html! {
-       (mirror_announcement())
+       (mirror_announcement(&host))
        (hub)
    };
    let drive = Some(donate_view::donate_drive_banner(&progress));
    let firefox_note = (firefox && !prefs.proxy_media && !warning_hidden)
       .then(|| crate::views::preferences::firefox_media_warning(false));
-   let scrape = &state.config.scrape;
-   // The check-for-everyone notice already covers search.
-   let search_note = (state.config.turnstile.configured() && !scrape.gates_everyone())
-      .then(search_turnstile_warning);
-   let scrape_note = scrape.enabled.then(|| {
-      let price = crate::donations::format_usd(state.passes.price_cents());
-      let goal = crate::donations::format_usd(progress.goal_cents);
-      if scrape.gates_everyone() {
-         crate::views::scrape::everyone_notice(&price, &goal, scrape.pass_minutes)
-      } else {
-         crate::views::scrape::scrape_notice(&price, &goal)
-      }
+   let gate = &state.config.anti_ddos;
+   let flood_share = gate
+      .automatic
+      .then(|| state.api.pressure().flood_share(crate::pressure::now()))
+      .flatten();
+   let gate_active_globally = gate.enabled
+      && state.config.turnstile.configured()
+      && (gate.gates_everyone() || flood_share.is_some());
+   // A global Anti-DDoS check already covers search.
+   let search_note = (state.config.turnstile.configured() && !gate_active_globally)
+      .then(|| search_turnstile_warning(progress.goal_cents));
+   let gate_note = gate_active_globally.then(|| {
+      let check_minutes = (!super::anti_ddos::cleared(&state, &jar) && gate.pass_minutes > 0)
+         .then_some(gate.pass_minutes);
+      crate::views::anti_ddos::gate_notice(check_minutes)
    });
    let notice = if drive.is_none()
       && firefox_note.is_none()
       && search_note.is_none()
-      && scrape_note.is_none()
+      && gate_note.is_none()
    {
       None
    } else {
       Some(html! {
-          @if let Some(scrape_note) = scrape_note { (scrape_note) }
+          @if let Some(gate_note) = gate_note { (gate_note) }
           @if let Some(search_note) = search_note { (search_note) }
           @if let Some(drive) = drive { (drive) }
           @if let Some(firefox_note) = firefox_note { (firefox_note) }
       })
    };
    let content = search_view::render_search_page(notice, Some(below));
-   let (origin, host) = request_host(&state.config);
    let title = format!("{host} — Nitter replacement");
    let description = home_description(&host);
    let json_ld = home_json_ld(&origin, &host);
@@ -274,22 +295,31 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
       .head_extra(&head)
       .render();
    let mut response = Html(markup.into_string()).into_response();
-   // The warning depends on the browser and a dismiss cookie, so a shared cache
-   // must not store one visitor's copy for everyone else.
-   response.headers_mut().insert(
-      header::CACHE_CONTROL,
-      HeaderValue::from_static("private, no-store"),
-   );
+   // Notices and preferences depend on cookies, User-Agent, and gate state, so a
+   // shared or CDN cache must not store one visitor's copy for everyone else.
+   no_store(response.headers_mut());
    response
 }
 
-fn search_turnstile_warning() -> maud::Markup {
+fn format_goal_usd(goal_cents: i64) -> Option<String> {
+   (goal_cents > 0).then(|| {
+      if goal_cents % 100 == 0 {
+         format!("${}", goal_cents / 100)
+      } else {
+         format!("${}.{:02}", goal_cents / 100, goal_cents % 100)
+      }
+   })
+}
+
+fn search_turnstile_warning(goal_cents: i64) -> maud::Markup {
    html! {
        aside class="home-announce" {
            p {
                "Search still asks for a Cloudflare Turnstile checkbox that lasts five minutes while the pool is this size. "
                "An automatic system that creates thousands of accounts a day replaces it for good once X's whole anti-bot system is worked out. "
-               "This month's goal is $450. "
+               @if let Some(goal) = format_goal_usd(goal_cents) {
+                   "This month's goal is " (goal) ". "
+               }
                a href="/donate" { "Donations" }
                " pay for the search accounts and their proxies, keep the site online, and turn the Turnstile off."
            }
@@ -297,22 +327,26 @@ fn search_turnstile_warning() -> maud::Markup {
    }
 }
 
-fn mirror_announcement() -> maud::Markup {
+fn mirror_announcement(host: &str) -> maud::Markup {
+   let mirrors = mirror_hosts(host);
    html! {
        aside class="home-announce" {
            strong { "Spare addresses" }
            p {
-               "This site is also "
-               a href="https://nitter.gq" { "nitter.gq" }
-               ", "
-               a href="https://xitter.gq" { "xitter.gq" }
-               ", "
-               a href="https://teapawt.net" { "teapawt.net" }
-               ", "
-               a href="https://teapawt.org" { "teapawt.org" }
-               ", and "
-               a href="https://teapaw.org" { "teapaw.org" }
-               ". If a spam filter blocks nitter.cf or xitter.cf, open one of those. "
+               @if !mirrors.is_empty() {
+                   "This site is also "
+                   @for (i, mirror) in mirrors.iter().enumerate() {
+                       @if i > 0 {
+                           @if i + 1 == mirrors.len() {
+                               @if mirrors.len() > 2 { ", and " } @else { " and " }
+                           } @else {
+                               ", "
+                           }
+                       }
+                       a href=(format!("https://{mirror}")) { (*mirror) }
+                   }
+                   ". If a spam filter blocks this address, open one of those. "
+               }
                a href="https://d420.net/" { "d420.net" }
                " lists which names are up."
            }
@@ -328,11 +362,7 @@ async fn about(State(state): State<AppState>, jar: CookieJar) -> impl IntoRespon
    let (_, host) = request_host(&state.config);
    let title = format!("About {host}");
    let description = about_description(&host);
-   let mirrors: Vec<&str> = crate::utils::host::APEX_HOSTS
-      .iter()
-      .copied()
-      .filter(|item| *item != host)
-      .collect();
+   let mirrors = mirror_hosts(&host);
    let head = html! {
        meta property="og:type" content="website";
    };
@@ -433,4 +463,38 @@ async fn about(State(state): State<AppState>, jar: CookieJar) -> impl IntoRespon
       .head_extra(&head)
       .render();
    Html(markup.into_string())
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn mirror_lists_exclude_current_apex_and_www_host() {
+      for (host, excluded) in [
+         ("www.teapawt.org", "teapawt.org"),
+         ("teapawt.org", "teapawt.org"),
+         ("nitter.cf", "nitter.cf"),
+         ("www.nitter.cf:443", "nitter.cf"),
+      ] {
+         assert!(!mirror_hosts(host).contains(&excluded), "{host}");
+         let json_ld = home_json_ld(&format!("https://{host}"), host);
+         assert!(
+            !json_ld.contains(&format!("\"https://{excluded}\"")),
+            "{host}"
+         );
+         let announce = mirror_announcement(host).into_string();
+         assert!(!announce.contains(excluded), "{host}");
+      }
+   }
+
+   #[test]
+   fn search_warning_formats_dynamic_goal_and_handles_zero() {
+      let whole = search_turnstile_warning(60_000).into_string();
+      assert!(whole.contains("This month's goal is $600."));
+      let fractional = search_turnstile_warning(45_005).into_string();
+      assert!(fractional.contains("This month's goal is $450.05."));
+      let unset = search_turnstile_warning(0).into_string();
+      assert!(!unset.contains("This month's goal is"));
+   }
 }

@@ -1,3 +1,4 @@
+mod account_repair;
 mod accounts;
 mod api;
 mod cache;
@@ -5,6 +6,7 @@ mod config;
 mod donations;
 mod error;
 mod passes;
+mod pressure;
 mod routes;
 mod stats;
 mod transcode;
@@ -131,6 +133,19 @@ async fn main() -> eyre::Result<()> {
    // Require the offline migration before starting background work; never
    // import account files from the web process.
    let accounts = AccountStore::connect().await?;
+   // Undo verdicts that were written down on evidence that proved nothing,
+   // before the pool reads them. A failure here does not keep the site down:
+   // the pool still loads with what is stored, and the next start tries again.
+   match account_repair::run().await {
+      Ok(summary) if summary.changed() => tracing::info!(
+         restored_to_search = summary.restored_to_search,
+         unretired = summary.unretired,
+         cleared_suspended = summary.cleared_suspended,
+         "account repair applied"
+      ),
+      Ok(_) => {},
+      Err(err) => tracing::warn!("account repair did not run: {err}"),
+   }
    let sessions = SessionPool::from_store(accounts.clone(), config.config.max_concurrent_reqs).await?;
 
    // Cloudflare caches the HTML (`s-maxage`). This process does not keep a
@@ -258,10 +273,11 @@ async fn main() -> eyre::Result<()> {
         .route_service("/android-chrome-512x512.png", ServeFile::new(format!("{static_dir}/android-chrome-512x512.png")))
         .route_service("/site.webmanifest", ServeFile::new(format!("{static_dir}/site.webmanifest")))
         .route_service("/opensearch.xml", ServeFile::new(format!("{static_dir}/opensearch.xml")))
-        .layer(middleware::from_fn(routes::prefs_middleware))
         .layer(middleware::from_fn(routes::snowflake_guard))
-        // Inside the client layer: the gate keys its pass on the caller.
-        .layer(middleware::from_fn_with_state(state.clone(), routes::scrape_gate))
+        // Inside prefs and client layers: the gate keys its pass on the caller
+        // and honors `?theme=` overrides on challenge pages.
+        .layer(middleware::from_fn_with_state(state.clone(), routes::gate))
+        .layer(middleware::from_fn(routes::prefs_middleware))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             routes::client_middleware,

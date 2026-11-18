@@ -67,6 +67,7 @@ trait Backend: Clone + Send + Sync + 'static {
    fn origin(&self) -> String;
    fn upload(&self, text: &str, search: bool)
    -> impl Future<Output = Option<ImportSummary>> + Send;
+   fn on_accounts_imported(&self) {}
 }
 
 impl Backend for AppState {
@@ -108,6 +109,10 @@ impl Backend for AppState {
 
    async fn upload(&self, text: &str, search: bool) -> Option<ImportSummary> {
       self.accounts.import_text(text, search).await.ok()
+   }
+
+   fn on_accounts_imported(&self) {
+      self.api.wake_account_reconcile();
    }
 }
 
@@ -204,9 +209,9 @@ fn public_response(
 
 async fn dashboard<B: Backend>(State(state): State<B>, jar: CookieJar) -> Response {
    let theme = state.theme(&jar);
-   let mut response = public_response(state.snapshot().await, |snapshot| {
-      view::dashboard(&theme, snapshot)
-   });
+   let (snapshot, is_admin) = tokio::join!(state.snapshot(), state.administrator(&jar));
+   let mut response =
+      public_response(snapshot, |snap| view::dashboard(&theme, snap, is_admin));
    no_store(response.headers_mut());
    response
 }
@@ -254,30 +259,75 @@ fn valid_csrf(secret: &str, session: &str, origin: &str, token: &str, now: i64) 
    .is_ok()
 }
 
-fn cross_origin(headers: &HeaderMap, origin: &str) -> bool {
-   headers
+pub(super) fn cross_origin(headers: &HeaderMap, origin: &str) -> bool {
+   if headers
       .get("sec-fetch-site")
       .is_some_and(|value| !matches!(value.as_bytes(), b"same-origin" | b"none"))
-      || headers
-         .get(header::ORIGIN)
-         .is_some_and(|value| value.as_bytes() != origin.as_bytes())
+   {
+      return true;
+   }
+   let Some(raw_origin) = headers.get(header::ORIGIN) else {
+      return false;
+   };
+   if raw_origin.as_bytes() == origin.as_bytes() {
+      return false;
+   }
+   let Some(authority) = raw_origin
+      .to_str()
+      .ok()
+      .and_then(|value| {
+         value
+            .strip_prefix("https://")
+            .or_else(|| value.strip_prefix("http://"))
+      })
+      .filter(|candidate| {
+         !candidate.is_empty()
+            && !candidate
+               .bytes()
+               .any(|byte| matches!(byte, b'/' | b'?' | b'#' | b'@' | b' ' | b'\t'))
+      })
+   else {
+      return true;
+   };
+   let host = headers
+      .get(header::HOST)
+      .and_then(|value| value.to_str().ok())
+      .map(str::trim)
+      .filter(|value| !value.is_empty());
+   !host.is_some_and(|value| authority.eq_ignore_ascii_case(value))
 }
 
 fn now() -> i64 {
    OffsetDateTime::now_utc().unix_timestamp()
 }
 
+fn pool_selection(pool: Option<&str>) -> &'static str {
+   if pool == Some("search") {
+      "search"
+   } else {
+      "view"
+   }
+}
+
 fn form<B: Backend>(
    state: &B,
    theme: &str,
    session: &str,
+   selected_pool: &str,
    status: StatusCode,
    notice: Option<AdminNotice>,
 ) -> Response {
    let token = issue_csrf(state.csrf_key(), session, &state.origin(), now());
    (
       status,
-      view::admin(theme, &token, MAX_TEXT_BYTES, MAX_LINES, notice.as_ref()),
+      view::admin(
+         theme,
+         &token,
+         selected_pool,
+         MAX_TEXT_BYTES,
+         MAX_LINES,
+         notice.as_ref(),
+      ),
    )
       .into_response()
 }
@@ -293,7 +343,14 @@ async fn admin<B: Backend>(State(state): State<B>, jar: CookieJar) -> Response {
    if !state.administrator(&jar).await {
       return (StatusCode::FORBIDDEN, view::forbidden(&theme)).into_response();
    }
-   form(&state, &theme, session.value(), StatusCode::OK, None)
+   form(
+      &state,
+      &theme,
+      session.value(),
+      "view",
+      StatusCode::OK,
+      None,
+   )
 }
 
 async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Request) -> Response {
@@ -316,17 +373,19 @@ async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Req
       return (StatusCode::FORBIDDEN, view::forbidden(&theme)).into_response();
    }
    let session = session.value();
-   let error = |status, text| {
+   let error_with_pool = |selected_pool, status, text| {
       form(
          &state,
          &theme,
          session,
+         selected_pool,
          status,
          Some(AdminNotice::Error(text)),
       )
    };
    if request.uri().query().is_some() {
-      return error(
+      return error_with_pool(
+         "view",
          StatusCode::BAD_REQUEST,
          "Use the form without URL parameters.",
       );
@@ -343,7 +402,8 @@ async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Req
          })
       });
    if !form_encoded {
-      return error(
+      return error_with_pool(
+         "view",
          StatusCode::UNSUPPORTED_MEDIA_TYPE,
          "Use the upload form to submit account data.",
       );
@@ -355,7 +415,8 @@ async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Req
       .and_then(|length| length.parse::<u64>().ok())
       .is_some_and(|length| length > MAX_FORM_BYTES as u64)
    {
-      return error(
+      return error_with_pool(
+         "view",
          StatusCode::PAYLOAD_TOO_LARGE,
          "The submitted form is too large.",
       );
@@ -368,19 +429,22 @@ async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Req
             if std::error::Error::source(&err)
                .is_some_and(|cause| cause.is::<http_body_util::LengthLimitError>()) =>
          {
-            return error(
+            return error_with_pool(
+               "view",
                StatusCode::PAYLOAD_TOO_LARGE,
                "The submitted form is too large.",
             );
          },
          Ok(Err(_)) => {
-            return error(
+            return error_with_pool(
+               "view",
                StatusCode::BAD_REQUEST,
                "Could not read the submitted form.",
             );
          },
          Err(_) => {
-            return error(
+            return error_with_pool(
+               "view",
                StatusCode::REQUEST_TIMEOUT,
                "Timed out reading the submitted form.",
             );
@@ -392,14 +456,26 @@ async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Req
          "csrf" => &mut csrf,
          "pool" => &mut pool,
          "accounts" => &mut accounts,
-         _ => return error(StatusCode::BAD_REQUEST, "Unexpected upload form fields."),
+         _ => {
+            return error_with_pool(
+               pool_selection(pool.as_deref()),
+               StatusCode::BAD_REQUEST,
+               "Unexpected upload form fields.",
+            );
+         },
       };
       if field.replace(value).is_some() {
-         return error(StatusCode::BAD_REQUEST, "Unexpected upload form fields.");
+         return error_with_pool(
+            pool_selection(pool.as_deref()),
+            StatusCode::BAD_REQUEST,
+            "Unexpected upload form fields.",
+         );
       }
    }
+   let selected_pool = pool_selection(pool.as_deref());
    if !csrf.is_some_and(|token| valid_csrf(state.csrf_key(), session, &origin, &token, now())) {
-      return error(
+      return error_with_pool(
+         selected_pool,
          StatusCode::FORBIDDEN,
          "The form expired or could not be verified. Reload the page and try again.",
       );
@@ -407,32 +483,39 @@ async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Req
    let search = match pool.as_deref() {
       Some("view") => false,
       Some("search") => true,
-      _ => return error(StatusCode::BAD_REQUEST, "Choose an import pool."),
+      _ => return error_with_pool(selected_pool, StatusCode::BAD_REQUEST, "Choose an import pool."),
    };
    let Some(accounts) = accounts.filter(|value| !value.trim().is_empty()) else {
-      return error(
+      return error_with_pool(
+         selected_pool,
          StatusCode::BAD_REQUEST,
          "Enter account data before importing.",
       );
    };
    if accounts.len() > MAX_TEXT_BYTES || accounts.lines().take(MAX_LINES + 1).count() > MAX_LINES {
-      return error(
+      return error_with_pool(
+         selected_pool,
          StatusCode::PAYLOAD_TOO_LARGE,
          "The account text exceeds the upload limit.",
       );
    }
    match state.upload(&accounts, search).await {
       Some(counts) => {
+         if counts.imported > 0 {
+            state.on_accounts_imported();
+         }
          form(
             &state,
             &theme,
             session,
+            selected_pool,
             StatusCode::OK,
             Some(AdminNotice::Saved(counts)),
          )
       },
       None => {
-         error(
+         error_with_pool(
+            selected_pool,
             StatusCode::SERVICE_UNAVAILABLE,
             "The import could not be saved. Check the dashboard before retrying.",
          )
@@ -606,6 +689,17 @@ mod tests {
          assert!(!html.contains(ADMIN));
          assert!(!html.contains("name=\"csrf\""));
       }
+      for visitor in [None, Some("ordinary-pass-holder")] {
+         let response = app
+            .clone()
+            .oneshot(get_request(view::PUBLIC_PATH, visitor))
+            .await
+            .unwrap();
+         assert_eq!(response.status(), StatusCode::OK);
+         let html = body(response).await;
+         assert!(!html.contains("href=\"/admin/import\""));
+         assert!(!html.contains("Import accounts"));
+      }
    }
 
    #[tokio::test]
@@ -667,6 +761,7 @@ mod tests {
       let html = body(response).await;
       assert!(html.contains("method=\"post\" action=\"/admin/import\""));
       assert!(html.contains("href=\"/admin/stats\""));
+      assert!(html.contains("<option value=\"view\" selected>View</option>"));
       assert!(!html.contains(ADMIN));
       let csrf = html
          .split_once("name=\"csrf\" value=\"")
@@ -706,8 +801,62 @@ mod tests {
       assert_private(&response, StatusCode::OK);
       let html = body(response).await;
       assert!(html.contains("Saved: 1 added"));
+      assert!(html.contains("<option value=\"search\" selected>Search</option>"));
       assert!(!html.contains("synthetic private import input"));
       assert_eq!(state.writes.load(Ordering::Relaxed), 1);
+   }
+
+   #[test]
+   fn cross_origin_accepts_same_host_origin_and_rejects_mismatches() {
+      let mut same_origin_headers = HeaderMap::new();
+      same_origin_headers.insert(header::ORIGIN, HeaderValue::from_static(ORIGIN));
+      assert!(!cross_origin(&same_origin_headers, ORIGIN));
+
+      let mut tunnel_headers = HeaderMap::new();
+      tunnel_headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8471"));
+      tunnel_headers.insert(
+         header::ORIGIN,
+         HeaderValue::from_static("http://127.0.0.1:8471"),
+      );
+      assert!(!cross_origin(&tunnel_headers, ORIGIN));
+
+      let mut mirror_headers = HeaderMap::new();
+      mirror_headers.insert(header::HOST, HeaderValue::from_static("nitter.cf"));
+      mirror_headers.insert(
+         header::ORIGIN,
+         HeaderValue::from_static("https://NITTER.CF"),
+      );
+      assert!(!cross_origin(&mirror_headers, ORIGIN));
+
+      let mut wrong_origin = HeaderMap::new();
+      wrong_origin.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8471"));
+      wrong_origin.insert(
+         header::ORIGIN,
+         HeaderValue::from_static("https://evil.example"),
+      );
+      assert!(cross_origin(&wrong_origin, ORIGIN));
+
+      let mut wrong_port = HeaderMap::new();
+      wrong_port.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8471"));
+      wrong_port.insert(
+         header::ORIGIN,
+         HeaderValue::from_static("http://127.0.0.1:9999"),
+      );
+      assert!(cross_origin(&wrong_port, ORIGIN));
+
+      let mut null_origin = HeaderMap::new();
+      null_origin.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8471"));
+      null_origin.insert(header::ORIGIN, HeaderValue::from_static("null"));
+      assert!(cross_origin(&null_origin, ORIGIN));
+
+      let mut cross_site_fetch = HeaderMap::new();
+      cross_site_fetch.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8471"));
+      cross_site_fetch.insert(
+         header::ORIGIN,
+         HeaderValue::from_static("http://127.0.0.1:8471"),
+      );
+      cross_site_fetch.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+      assert!(cross_origin(&cross_site_fetch, ORIGIN));
    }
 
    #[tokio::test]

@@ -105,6 +105,7 @@ use crate::{
       User,
    },
    utils::formatters,
+   pressure::Pressure,
 };
 
 /// True when the 429 carries X's account window rather than a bare edge page.
@@ -219,19 +220,27 @@ pub(super) fn search_answer_is_empty(bytes: &[u8]) -> bool {
    serde_json::to_string(&data).is_ok_and(|text| !text.contains("tweet_results"))
 }
 
-fn search_answer_is_suspended(bytes: &[u8], errors: &[ApiError]) -> bool {
-   let timeline_failed = errors
+/// X's own message when it failed a search on its side: `search_timeline`
+/// came back empty with an error on its `timeline` field, in practice
+/// "Internal server error".
+///
+/// This is a statement about the query or X's backend, never about the
+/// account. One query that trips it gets the same answer from every account
+/// it is sent to, 80 ms apart, and an account that got it answers its next
+/// search with posts. It was read as a suspension, which moved 364 working
+/// accounts out of search in two days, six per query, and retired 61 of them.
+fn search_timeline_failure<'a>(bytes: &[u8], errors: &'a [ApiError]) -> Option<&'a str> {
+   let failure = errors
       .iter()
-      .any(|err| err.path.as_slice() == ["search_by_raw_query", "search_timeline", "timeline"]);
-   if !timeline_failed {
-      return false;
-   }
-   serde_json::from_slice::<serde_json::Value>(bytes).is_ok_and(|body| {
-      body
-         .pointer("/data/search_by_raw_query/search_timeline")
-         .and_then(serde_json::Value::as_object)
-         .is_some_and(serde_json::Map::is_empty)
-   })
+      .find(|err| err.path.as_slice() == ["search_by_raw_query", "search_timeline", "timeline"])?;
+   serde_json::from_slice::<serde_json::Value>(bytes)
+      .is_ok_and(|body| {
+         body
+            .pointer("/data/search_by_raw_query/search_timeline")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(serde_json::Map::is_empty)
+      })
+      .then_some(failure.message.as_str())
 }
 
 /// The errors that fail a request. X returns the page plus an error for
@@ -517,6 +526,13 @@ fn is_settings_not_found(endpoint: &str, body: &str) -> bool {
    endpoint == endpoints::ACCOUNT_SETTINGS && twitter_error_code(body) == Some(34)
 }
 
+fn is_settings_probe_endpoint(endpoint: &str) -> bool {
+   endpoint == endpoints::ACCOUNT_SETTINGS
+      || endpoint == endpoints::VERIFY_CREDENTIALS
+      || endpoint == endpoints::SEARCH_SAFETY
+      || endpoint.starts_with("strato/")
+}
+
 #[cfg(test)]
 #[test]
 fn code_34_is_special_only_for_account_settings() {
@@ -531,6 +547,17 @@ fn code_34_is_special_only_for_account_settings() {
       endpoints::ACCOUNT_SETTINGS,
       r#"{"errors":[{"code":64}]}"#
    ));
+}
+
+#[cfg(test)]
+#[test]
+fn auxiliary_endpoints_use_settings_suspension_probe() {
+   assert!(is_settings_probe_endpoint(endpoints::ACCOUNT_SETTINGS));
+   assert!(is_settings_probe_endpoint(endpoints::VERIFY_CREDENTIALS));
+   assert!(is_settings_probe_endpoint(endpoints::SEARCH_SAFETY));
+   assert!(is_settings_probe_endpoint(endpoints::STRATO_TRANSLATE));
+   assert!(!is_settings_probe_endpoint(endpoints::GRAPH_SEARCH_TIMELINE));
+   assert!(!is_settings_probe_endpoint(endpoints::GRAPH_USER_TWEETS));
 }
 
 type InflightMap = StdMutex<HashMap<String, watch::Sender<Option<bytes::Bytes>>>>;
@@ -584,6 +611,9 @@ pub struct ApiClient {
    hedges:              Arc<Semaphore>,
    /// Which call served each first profile page, reported every minute.
    timeline_routes:     Arc<TimelineRoutes>,
+   /// How far the minute's fallback share is past the flood trigger. The
+   /// Anti-DDoS gate reads it on every request.
+   pressure:            Arc<Pressure>,
    /// Coalesces identical concurrent in-flight GraphQL calls; entries live
    /// only while the upstream request is in flight and are removed on drop.
    inflight:            Arc<InflightMap>,
@@ -592,6 +622,8 @@ pub struct ApiClient {
    /// Set when accounts arrive through `/import`, so their filters are turned
    /// off as soon as they are in the pool instead of on the next rescan.
    pub(crate) filter_wakeup: Arc<tokio::sync::Notify>,
+   /// Wakes the account reconciliation task immediately after `/import`.
+   reconcile_wakeup: Arc<tokio::sync::Notify>,
 }
 
 impl ApiClient {
@@ -647,13 +679,16 @@ impl ApiClient {
       let denylist_path = std::env::var("TEAPOT_SEARCH_DENYLIST")
          .unwrap_or_else(|_| "search-denylist.json".to_owned());
       // Accounts that arrive through `/import` are reconciled into the pool
-      // every ten seconds; this is what tells the filter sync they are there.
+      // immediately when woken or every ten seconds; `filter_wakeup` tells
+      // the filter sync they are there.
       let filter_wakeup = Arc::new(tokio::sync::Notify::new());
+      let reconcile_wakeup = Arc::new(tokio::sync::Notify::new());
       Self::spawn_account_reconcile(
          accounts,
          sessions.clone(),
          Arc::clone(&cookies),
          Arc::clone(&filter_wakeup),
+         Arc::clone(&reconcile_wakeup),
       );
 
       Ok(Self {
@@ -669,16 +704,29 @@ impl ApiClient {
          latency: Arc::new(Latency::default()),
          hedges: Arc::new(Semaphore::new(MAX_HEDGES)),
          timeline_routes: Arc::new(TimelineRoutes::default()),
+         pressure: Arc::new(Pressure::with_sustained(
+            config.anti_ddos.flood_percent,
+            config.anti_ddos.sustained_percent,
+            config.anti_ddos.sustained_minutes,
+            config.anti_ddos.flood_hold_minutes,
+         )),
          inflight: Arc::new(StdMutex::new(HashMap::new())),
          telemetry: None,
          cookies,
          filter_wakeup,
+         reconcile_wakeup,
       })
    }
 
    pub(crate) fn with_telemetry(mut self, telemetry: Option<crate::stats::StatsStore>) -> Self {
       self.telemetry = telemetry;
       self
+   }
+
+   /// The pool-pressure verdict the Anti-DDoS gate reads.
+   #[must_use]
+   pub fn pressure(&self) -> &Arc<Pressure> {
+      &self.pressure
    }
 
    pub(crate) async fn cookie_snapshot(&self, session_id: i64) -> Option<Vec<EditorCookie>> {
@@ -695,18 +743,28 @@ impl ApiClient {
       self.sessions.available_for("SearchTimeline").await as f64 * (50.0 / 15.0)
    }
 
+   /// Wake the account reconciliation task so newly imported accounts join the
+   /// live pool without waiting for the periodic tick.
+   pub fn wake_account_reconcile(&self) {
+      self.reconcile_wakeup.notify_one();
+   }
+
    fn spawn_account_reconcile(
       store: AccountStore,
       pool: SessionPool,
       cookies: Arc<Jar>,
       filter_wakeup: Arc<tokio::sync::Notify>,
+      reconcile_wakeup: Arc<tokio::sync::Notify>,
    ) {
       tokio::spawn(async move {
          let mut every = interval(ACCOUNT_RECONCILE_EVERY);
          every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
          every.tick().await;
          loop {
-            every.tick().await;
+            tokio::select! {
+               _ = every.tick() => {},
+               () = reconcile_wakeup.notified() => {},
+            }
             match Self::reconcile_accounts(&store, &pool, &cookies).await {
                Ok(0) => {},
                Ok(added) => {
@@ -780,7 +838,31 @@ impl ApiClient {
             for line in api.sessions.queue_report().await {
                tracing::info!("account queue {line}");
             }
-            if let Some(report) = api.timeline_routes.report(api.sessions.len()) {
+            let eligible_accounts = api.user_timeline_accounts().await;
+            if let Some(report) = api.timeline_routes.report(eligible_accounts) {
+               match api.pressure.observe(
+                  report.off_primary,
+                  report.total,
+                  crate::pressure::now(),
+               ) {
+                  Some(crate::pressure::Change::Raised { share, cause }) => {
+                     let trigger = match cause {
+                        crate::pressure::Cause::Spike => "single-minute spike",
+                        crate::pressure::Cause::Sustained => "sustained fallback streak",
+                     };
+                     tracing::warn!(
+                        share,
+                        cause = ?cause,
+                        hold_minutes = api.pressure.hold_minutes(),
+                        "Anti-DDoS gate on ({trigger}): {share}% of profile pages ran past the \
+                         account pool; every visitor is checked until the flood stops"
+                     );
+                  },
+                  Some(crate::pressure::Change::Lifted) => {
+                     tracing::info!("Anti-DDoS gate off: the pool keeps up with demand again");
+                  },
+                  None => {},
+               }
                if report.fallback_needed {
                   tracing::warn!("profile timelines {}", report.line);
                } else {
@@ -1430,12 +1512,11 @@ impl ApiClient {
          // made every later search go out without one, and those came back as
          // empty 404s from accounts that search fine in a browser.
          let search = endpoint.ends_with("SearchTimeline");
-         if result.is_ok() && !refused && !search {
+         if result.is_ok() && !refused && !search && self.tid.note_refused(method, &path).await {
             tracing::info!(
                endpoint,
                "X answers this call without a transaction id and refuses one"
             );
-            self.tid.note_refused(method, &path).await;
          }
          if let Err(ref err) = result
             && !matches!(err, Error::TransientUpstream)
@@ -1572,24 +1653,20 @@ impl ApiClient {
          },
       };
 
-      if use_post && search_answer_is_suspended(&bytes, &resp.errors) {
+      // X failed the search itself. The account keeps its pool and its
+      // standing; the caller asks one other account, and the query is logged
+      // so the ones X cannot run can be told from a bad minute.
+      if use_post && let Some(message) = search_timeline_failure(&bytes, &resp.errors) {
          tracing::info!(
             session_id = session.id,
-            "search refused for this account (suspended)"
+            session_user = %session.username,
+            proxy_port = self.pinned_port(session.id).unwrap_or(0),
+            query = search_query_of(variables),
+            error = message,
+            "X failed this search on its side; the account is not blamed"
          );
-         // X says the account is suspended. It leaves search for the view pool,
-         // where its cookie may still read profiles. That is the only attempt it
-         // gets: a second suspension verdict retires it for good.
-         self
-            .sessions
-            .note_suspended(
-               session.id,
-               SuspensionProbe::Data,
-               Some(crate::stats::Restriction::Suspended),
-               "Search refused for this account: suspended",
-            )
-            .await;
-         return Err(Error::SearchRefused);
+         log_events::note(Event::SearchFailed);
+         return Err(Error::TransientUpstream);
       }
 
       let serious = request_errors(&resp.errors, resp.data.is_some());
@@ -1828,12 +1905,14 @@ impl ApiClient {
          // settings probe to re-learn a verdict already known.
          let code = twitter_error_code(&body);
          if status.as_u16() == 403 && code == Some(64) {
-            // The settings endpoint is gated separately from search and profile
-            // reads: X returns code 64 there for accounts that answer search
-            // calls with 200 and posts. Treating that as a confirmed suspension
-            // would bench accounts that are working fine. Route it through the
-            // Settings probe so it only paces the next write, not the account.
-            let is_settings = endpoint == endpoints::ACCOUNT_SETTINGS;
+            // Self-service and auxiliary endpoints (settings, credentials,
+            // searchSafety, and strato calls such as translation) are gated
+            // separately from search and profile reads: X returns code 64
+            // there for accounts that answer SearchTimeline and UserTweets
+            // with 200 and posts. Route them through the Settings probe so
+            // they only pace filter sync, never benching or demoting the
+            // account.
+            let is_settings = is_settings_probe_endpoint(endpoint);
             if !is_settings {
                self.sessions.record_event(
                   crate::stats::AccountEvent::new(
@@ -2292,23 +2371,26 @@ mod tests {
    }
 
    #[test]
-   fn search_timeline_refusal_requires_both_missing_timeline_and_matching_error() {
-      let suspended = br#"{"data":{"search_by_raw_query":{"search_timeline":{}}},"errors":[{"locations":[{"column":7,"line":4}],"message":"Internal server error","path":["search_by_raw_query","search_timeline","timeline"]}]}"#;
+   fn a_search_x_failed_needs_both_the_missing_timeline_and_its_error() {
+      let failed = br#"{"data":{"search_by_raw_query":{"search_timeline":{}}},"errors":[{"locations":[{"column":7,"line":4}],"message":"Internal server error","path":["search_by_raw_query","search_timeline","timeline"]}]}"#;
       let empty = br#"{"data":{"search_by_raw_query":{"search_timeline":{"timeline":{"instructions":[{"type":"TimelineAddEntries","entries":[{"content":{"__typename":"TimelineTimelineCursor","cursorType":"Bottom","value":"0"}}]},{"type":"TimelineTerminateTimeline","direction":"Bottom"}]}}}}}"#;
       let partial = br#"{"data":{"search_by_raw_query":{"search_timeline":{"timeline":{"instructions":[{"entries":[{"content":{"tweet_results":{"result":{"rest_id":"42"}}}}]}]}}}},"errors":[{"message":"Internal server error","path":["another_field","timeline"]}]}"#;
       let classify = |body: &[u8]| {
          let envelope: GqlResponse<SearchTimelineData> = serde_json::from_slice(body).unwrap();
          (
-            search_answer_is_suspended(body, &envelope.errors),
+            search_timeline_failure(body, &envelope.errors).map(str::to_owned),
             search_answer_is_empty(body),
          )
       };
-      assert_eq!(classify(suspended), (true, true));
-      assert_eq!(classify(empty), (false, true));
-      assert_eq!(classify(partial), (false, false));
+      assert_eq!(
+         classify(failed),
+         (Some("Internal server error".to_owned()), true)
+      );
+      assert_eq!(classify(empty), (None, true));
+      assert_eq!(classify(partial), (None, false));
       assert_eq!(
          classify(br#"{"data":{"search_by_raw_query":{"search_timeline":{}}}}"#),
-         (false, true)
+         (None, true)
       );
 
       let unrelated = [ApiError {
@@ -2319,11 +2401,11 @@ mod tests {
             serde_json::json!("timeline"),
          ],
       }];
-      assert!(!search_answer_is_suspended(suspended, &unrelated));
-      let envelope: GqlResponse<SearchTimelineData> = serde_json::from_slice(suspended).unwrap();
-      assert!(!search_answer_is_suspended(empty, &envelope.errors));
-      assert!(!search_answer_is_suspended(partial, &envelope.errors));
-      assert!(!search_answer_is_suspended(b"", &envelope.errors));
+      assert_eq!(search_timeline_failure(failed, &unrelated), None);
+      let envelope: GqlResponse<SearchTimelineData> = serde_json::from_slice(failed).unwrap();
+      assert_eq!(search_timeline_failure(empty, &envelope.errors), None);
+      assert_eq!(search_timeline_failure(partial, &envelope.errors), None);
+      assert_eq!(search_timeline_failure(b"", &envelope.errors), None);
    }
 
    #[test]

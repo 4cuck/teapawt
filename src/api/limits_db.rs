@@ -25,6 +25,10 @@ const UPSERT: &str = "\
 INSERT INTO session_limits (id, body) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET body = \
                       EXCLUDED.body";
 
+const BATCH_UPSERT: &str = "\
+INSERT INTO session_limits (id, body) SELECT * FROM UNNEST($1::bigint[], $2::jsonb[]) ON \
+                            CONFLICT (id) DO UPDATE SET body = EXCLUDED.body";
+
 /// Handle for saving one account without rewriting the rest.
 #[derive(Clone)]
 pub struct LimitsDb {
@@ -55,6 +59,12 @@ impl Connected {
          )
          .await
          .map_err(|err| Error::InvalidConfig(format!("postgres schema: {err}")))?;
+      let _ = client
+         .batch_execute(
+            "ALTER TABLE session_limits SET (fillfactor = 70, \
+             autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_limit = 1000)",
+         )
+         .await;
       Ok(Self { client })
    }
 
@@ -80,6 +90,7 @@ impl Connected {
 
    /// First boot: the JSON file is the copy we already have. One transaction
    /// moves it into the table, and later changes update a single row.
+   #[allow(dead_code, reason = "retained for standalone JSON-to-Postgres migration")]
    pub async fn import(&mut self, limits: &HashMap<i64, SessionLimits>) -> Result<()> {
       let transaction = self
          .client
@@ -110,7 +121,7 @@ impl Connected {
       let (tx, mut rx) = mpsc::unbounded_channel::<i64>();
       tokio::spawn(async move {
          let client = self.client;
-         let statement = match client.prepare(UPSERT).await {
+         let statement = match client.prepare(BATCH_UPSERT).await {
             Ok(statement) => statement,
             Err(err) => {
                tracing::warn!("postgres limits writer stopped: {err}");
@@ -132,15 +143,24 @@ impl Connected {
                   .filter_map(|id| Some((*id, limits.get(id)?.clone())))
                   .collect::<Vec<_>>()
             };
+            let mut batch_ids: Vec<i64> = Vec::with_capacity(rows.len());
+            let mut batch_bodies: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
             for (id, saved) in rows {
                match serde_json::to_value(&saved) {
                   Ok(body) => {
-                     if let Err(err) = client.execute(&statement, &[&id, &body]).await {
-                        tracing::warn!(id, "postgres session update failed: {err}");
-                     }
+                     batch_ids.push(id);
+                     batch_bodies.push(body);
                   },
                   Err(err) => tracing::warn!(id, "session state was not encoded: {err}"),
                }
+            }
+            if !batch_ids.is_empty()
+               && let Err(err) = client.execute(&statement, &[&batch_ids, &batch_bodies]).await
+            {
+               tracing::warn!(
+                  rows = batch_ids.len(),
+                  "postgres session update failed: {err}"
+               );
             }
          }
       });

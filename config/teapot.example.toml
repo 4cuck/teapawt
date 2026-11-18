@@ -141,12 +141,26 @@ mailer = ""
 mailerExport = "sendMail"
 mailAccounts = ""
 
-# Turnstile in front of scrapers. Read from Cloudflare's asn-num and
-# cf-ipcountry headers, only on requests from trustedProxies. Networks in
-# blockedAsns are checked on every page; a watched country only while it loads
-# more than surgePerMinute pages a minute. Needs [turnstile] keys.
-[scrape]
+# The Anti-DDoS gate. Read from Cloudflare's asn-num and cf-ipcountry headers,
+# only on requests from trustedProxies. Networks in blockedAsns are checked on
+# every page; a watched country only while it loads more than surgePerMinute
+# pages a minute. Needs [turnstile] keys.
+#
+# automatic is the one that matters: the API client reports each minute how
+# many profile pages had to leave UserTweets because every account with quota
+# was busy or spent. At or above floodPercent in a single minute — or at or
+# above sustainedPercent for sustainedMinutes in a row (`0` disables the
+# sustained trigger) — the gate switches itself on for everyone and stays up
+# floodHoldMinutes past the last flooded minute. It switches itself off again
+# when the share falls back.
+[antiDdos]
 enabled = true
+automatic = true
+floodPercent = 50
+sustainedPercent = 3
+sustainedMinutes = 5
+floodHoldMinutes = 15
+everyone = false
 blockedAsns = [ ]
 watchedCountries = [ ]
 surgePerMinute = 300

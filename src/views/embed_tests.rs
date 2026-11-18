@@ -53,7 +53,7 @@ fn test_config() -> Config {
       donations: crate::config::DonationsConfig::default(),
       turnstile: crate::config::TurnstileConfig::default(),
       pass: crate::config::PassConfig::default(),
-      scrape: crate::config::ScrapeConfig::default(),
+      anti_ddos: crate::config::AntiDdosConfig::default(),
       contact: crate::config::ContactConfig::default(),
       url_prefix: "https://teapot.test".to_owned(),
    }

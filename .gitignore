@@ -63,11 +63,8 @@ web-bot-auth.pkcs8
 !nix/
 !nix/package.nix
 
-# X account registration tool. Code and the example config are tracked; the
-# real config (proxy login, Hotmail007 key) and captures are not.
-!tools/
-!tools/**
-tools/register/node_modules/
-tools/register/config.json
-tools/register/captures/
-tools/register/mail-accounts.txt
+# Local tooling, captures, network logs, and mobile app bundles stay untracked
+/tools/
+/chrome-net-export-log_*.json
+/*.har
+/*.ipa

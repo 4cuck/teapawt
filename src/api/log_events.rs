@@ -32,10 +32,12 @@ pub enum Event {
    SearchEmpty,
    /// A search account answered nothing while another account got results.
    SearchRested,
+   /// X failed a search on its own side and said so in the answer.
+   SearchFailed,
 }
 
 impl Event {
-   const ALL: [Self; 10] = [
+   const ALL: [Self; 11] = [
       Self::HeaderStall,
       Self::LateHeaders,
       Self::StalledTwice,
@@ -46,6 +48,7 @@ impl Event {
       Self::SessionRetry,
       Self::SearchEmpty,
       Self::SearchRested,
+      Self::SearchFailed,
    ];
 
    const fn label(self) -> &'static str {
@@ -60,6 +63,7 @@ impl Event {
          Self::SessionRetry => "session retries",
          Self::SearchEmpty => "empty searches",
          Self::SearchRested => "searches rested",
+         Self::SearchFailed => "searches X failed",
       }
    }
 }

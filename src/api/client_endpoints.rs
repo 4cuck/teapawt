@@ -106,6 +106,14 @@ fn tag_cursor(mut timeline: Timeline, tag: &str) -> Timeline {
    timeline
 }
 
+const fn secondary_route(primary_answered_empty: bool, fallback: Route) -> Route {
+   if primary_answered_empty {
+      Route::EmptyVerified
+   } else {
+      fallback
+   }
+}
+
 /// The answers a profile's first page has had so far, across routes.
 ///
 /// X answers some accounts with an empty timeline, or only the pin, while it
@@ -358,6 +366,11 @@ fn poll_join<T>(
    let waker = Waker::noop();
    let mut cx = Context::from_waker(waker);
    Pin::new(handle).poll(&mut cx)
+}
+
+#[must_use]
+const fn user_has_no_timeline_posts(user: &User) -> bool {
+   user.tweets == 0 && user.media == 0 && user.pinned_tweet == 0 && !user.has_highlights
 }
 
 fn profile_from_parts(user: User, tweets: Timeline, rail: Rail) -> Profile {
@@ -795,15 +808,28 @@ impl ApiClient {
          Err(err) => return Err(err),
       };
 
+      // When `UserTweets` already answered empty on a free session, the
+      // secondary call is only verifying that empty timeline rather than
+      // compensating for a busy or spent `UserTweets` pool.
+      let primary_answered_empty = page.empty.is_some();
+
       // Without `UserTweets`, so without reposts: original posts, which have
       // about five times its quota per account, else the replies timeline
       // with replies removed. Either one's cursor stays on its own timeline.
       let originals = self.originals_page(user_id, None).await;
-      if let Some(settled) = self.settle(&mut page, Route::Originals, originals) {
+      if let Some(settled) = self.settle(
+         &mut page,
+         secondary_route(primary_answered_empty, Route::Originals),
+         originals,
+      ) {
          return settled;
       }
       let replies = self.posts_from_replies(user_id, None).await;
-      if let Some(settled) = self.settle(&mut page, Route::Replies, replies) {
+      if let Some(settled) = self.settle(
+         &mut page,
+         secondary_route(primary_answered_empty, Route::Replies),
+         replies,
+      ) {
          return settled;
       }
 
@@ -1055,6 +1081,18 @@ impl ApiClient {
 
       if let Some(id) = known_id {
          if cursor.is_none() {
+            if let Some(known_user) = known.filter(|user| {
+               !user.fullname.is_empty()
+                  && !user.protected
+                  && !user.suspended
+                  && user_has_no_timeline_posts(user)
+            }) {
+               return Ok(OpenProfile::ready(profile_from_parts(
+                  known_user.clone(),
+                  Timeline::default(),
+                  Rail::Given(Vec::new()),
+               )));
+            }
             let media = MediaFetch::start(self, id, rail);
             let (user_res, tweets_res) =
                tokio::join!(self.get_user(screen_name), self.get_user_tweets(id, None),);
@@ -1112,6 +1150,13 @@ impl ApiClient {
             user,
             ..Profile::default()
          }));
+      }
+      if cursor.is_none() && user_has_no_timeline_posts(&user) {
+         return Ok(OpenProfile::ready(profile_from_parts(
+            user,
+            Timeline::default(),
+            Rail::Given(Vec::new()),
+         )));
       }
 
       let (tweets, rail, media) = if cursor.is_none() {
@@ -2006,10 +2051,14 @@ mod first_page_tests {
       Error,
       FirstPage,
       PostsCursor,
+      Route,
       Timeline,
       Tweet,
+      User,
       recheck_empty,
+      secondary_route,
       tag_cursor,
+      user_has_no_timeline_posts,
    };
 
    #[test]
@@ -2158,5 +2207,41 @@ mod first_page_tests {
    async fn an_empty_tab_whose_recheck_fails_asks_for_a_refresh() {
       let shown = recheck_empty(Ok(page(&[])), || async { Err(Error::RateLimited) }).await;
       assert!(matches!(shown, Err(Error::TransientUpstream)));
+   }
+
+   #[test]
+   fn empty_primary_answer_routes_verification_without_fallback_credit() {
+      assert_eq!(secondary_route(true, Route::Originals), Route::EmptyVerified);
+      assert_eq!(secondary_route(true, Route::Replies), Route::EmptyVerified);
+      assert_eq!(secondary_route(false, Route::Originals), Route::Originals);
+      assert_eq!(secondary_route(false, Route::Replies), Route::Replies);
+   }
+
+   #[test]
+   fn zero_count_user_without_pin_or_highlights_has_no_timeline_posts() {
+      let empty_user = User {
+         followers: 120,
+         following: 45,
+         likes: 300,
+         ..User::default()
+      };
+      assert!(user_has_no_timeline_posts(&empty_user));
+
+      assert!(!user_has_no_timeline_posts(&User {
+         tweets: 1,
+         ..User::default()
+      }));
+      assert!(!user_has_no_timeline_posts(&User {
+         media: 1,
+         ..User::default()
+      }));
+      assert!(!user_has_no_timeline_posts(&User {
+         pinned_tweet: 12_345,
+         ..User::default()
+      }));
+      assert!(!user_has_no_timeline_posts(&User {
+         has_highlights: true,
+         ..User::default()
+      }));
    }
 }

@@ -252,6 +252,11 @@ impl IntoResponse for Error {
 
       if matches!(self, Error::TransientUpstream | Error::SearchRefused) {
          tracing::trace!(error = ?self, "upstream empty");
+      } else if matches!(self, Error::ClientBudgetExhausted) {
+         // A visitor over their own budget being told to slow down is the
+         // budget working, not a failed request. At error level it was 33,779
+         // of a day's 33,870 error lines and hid the other 91.
+         tracing::debug!("client over its budget");
       } else if status.is_server_error() {
          tracing::error!(error = ?self, "request failed");
       }
