@@ -200,12 +200,53 @@ fn graphql_post_body(
       .map_err(|err| Error::Internal(format!("graphql body: {err}")))
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ResponseLimits {
+   /// `x-rate-limit-remaining <= 0` with a future `x-rate-limit-reset`, so the
+   /// session's real window is already recorded as exhausted.
+   limit_recorded:   bool,
+   /// `x-rate-limit-remaining <= 0` was present on the response headers, even
+   /// if `x-rate-limit-reset` was missing or slightly skewed.
+   header_exhausted: bool,
+}
+
 fn is_denylisted(message: &str) -> bool {
    message.contains("QueryDenylistedFailure") || message.contains("Query is denylisted")
 }
 
-/// A decoded search page with no post results is inconclusive about account
-/// health.
+fn is_rate_limit_error(err: &ApiError) -> bool {
+   matches!(TwitterError::from_code(err.code), Some(TwitterError::RateLimited))
+      || err.message.to_ascii_lowercase().contains("rate limit")
+}
+
+fn is_session_error(err: &ApiError) -> bool {
+   matches!(
+      TwitterError::from_code(err.code),
+      Some(TwitterError::Locked | TwitterError::InvalidToken | TwitterError::BadToken)
+   )
+}
+
+fn value_has_search_results(value: &serde_json::Value) -> bool {
+   match value {
+      serde_json::Value::Object(map) => {
+         if map.contains_key("tweet_results")
+            || map.contains_key("user_results")
+            || map.get("list").is_some_and(serde_json::Value::is_object)
+         {
+            return true;
+         }
+         map.values().any(value_has_search_results)
+      },
+      serde_json::Value::Array(items) => items.iter().any(value_has_search_results),
+      serde_json::Value::Null
+      | serde_json::Value::Bool(_)
+      | serde_json::Value::Number(_)
+      | serde_json::Value::String(_) => false,
+   }
+}
+
+/// A decoded search page with no tweet, user, or list results is inconclusive
+/// about account health.
 pub(super) fn search_answer_is_empty(bytes: &[u8]) -> bool {
    #[derive(Deserialize)]
    struct SearchBody {
@@ -217,7 +258,7 @@ pub(super) fn search_answer_is_empty(bytes: &[u8]) -> bool {
    let Some(data) = body.data else {
       return true;
    };
-   serde_json::to_string(&data).is_ok_and(|text| !text.contains("tweet_results"))
+   !value_has_search_results(&data)
 }
 
 /// X's own message when it failed a search on its side: `search_timeline`
@@ -229,10 +270,21 @@ pub(super) fn search_answer_is_empty(bytes: &[u8]) -> bool {
 /// it is sent to, 80 ms apart, and an account that got it answers its next
 /// search with posts. It was read as a suspension, which moved 364 working
 /// accounts out of search in two days, six per query, and retired 61 of them.
+///
+/// Rate-limit, denylist, credential-lock, and suspension errors are excluded so
+/// they go through the normal error path and switch accounts rather than
+/// turning into an empty page.
 fn search_timeline_failure<'a>(bytes: &[u8], errors: &'a [ApiError]) -> Option<&'a str> {
-   let failure = errors
-      .iter()
-      .find(|err| err.path.as_slice() == ["search_by_raw_query", "search_timeline", "timeline"])?;
+   let failure = errors.iter().find(|err| {
+      err.path.as_slice() == ["search_by_raw_query", "search_timeline", "timeline"]
+         && !is_denylisted(&err.message)
+         && !is_rate_limit_error(err)
+         && !is_session_error(err)
+         && !matches!(
+            TwitterError::from_code(err.code),
+            Some(TwitterError::UserSuspended)
+         )
+   })?;
    serde_json::from_slice::<serde_json::Value>(bytes)
       .is_ok_and(|body| {
          body
@@ -246,14 +298,17 @@ fn search_timeline_failure<'a>(bytes: &[u8], errors: &'a [ApiError]) -> Option<&
 /// The errors that fail a request. X returns the page plus an error for
 /// each field it could not fill, such as a list banner it cannot decode or
 /// one post's long-form text. Such an error names the field in `path`, so
-/// with `data` present the rest of the page stands. A denylisted search
-/// keeps its meaning wherever X reports it.
+/// with `data` present the rest of the page stands. Denylisted queries,
+/// rate-limit errors, and session credential rejections always keep their
+/// meaning wherever X reports them.
 fn request_errors(errors: &[ApiError], has_data: bool) -> Vec<ApiError> {
    errors
       .iter()
       .filter(|err| {
          let one_field = !err.path.is_empty() || err.message.contains("DecodeException");
-         !(has_data && one_field && !is_denylisted(&err.message))
+         let critical =
+            is_denylisted(&err.message) || is_rate_limit_error(err) || is_session_error(err);
+         !(has_data && one_field && !critical)
       })
       .map(|err| {
          ApiError {
@@ -1021,6 +1076,10 @@ impl ApiClient {
          return Err(Error::SearchDenylisted);
       }
 
+      if is_rate_limit_error(error) {
+         return Err(Error::RateLimited);
+      }
+
       if error.code == 214 && error.message.contains("Unknown request cursor") {
          return Err(Error::InvalidUrl(
             "This page has expired. Go back and try again.".into(),
@@ -1164,7 +1223,7 @@ impl ApiClient {
             Err(Error::RateLimited) => {
                self
                   .sessions
-                  .has_unlimited(endpoint, retry_kind, session_id)
+                  .has_unlimited_excluding(endpoint, retry_kind, &tried_ids)
                   .await
             },
             _ => false,
@@ -1214,6 +1273,14 @@ impl ApiClient {
             Err(_) if matches!(last, Err(Error::SearchRefused)) => {
                self.refund(endpoint).await;
                return Err(Error::SearchRefused);
+            },
+            // Never degrade an upstream rate limit into `TransientUpstream`,
+            // which `fetch_search` would turn into a false empty page.
+            Err(Error::NoSessions | Error::TransientUpstream | Error::RateLimited)
+               if matches!(last, Err(Error::RateLimited)) =>
+            {
+               self.refund(endpoint).await;
+               return Err(Error::RateLimited);
             },
             Err(err) => {
                self.refund(endpoint).await;
@@ -1627,7 +1694,7 @@ impl ApiClient {
             },
          }
       };
-      let (bytes, limit_recorded) = self
+      let (bytes, response_limits) = self
          .account_response_inner(session, endpoint, Some((path, variables)), response)
          .await?;
 
@@ -1648,7 +1715,39 @@ impl ApiClient {
       let resp = match serde_json::from_slice::<GqlResponse<T>>(&bytes) {
          Ok(resp) => resp,
          Err(err) => {
-            Self::check_api_errors(&bytes)?;
+            if let Err(api_err) = Self::check_api_errors(&bytes) {
+               if matches!(api_err, Error::SessionRejected(_)) {
+                  self.sessions.mark_rejected(session.id).await;
+               } else if matches!(api_err, Error::RateLimited) {
+                  if response_limits.limit_recorded {
+                     self.sessions.record_event(
+                        crate::stats::AccountEvent::new(
+                           session.id,
+                           crate::stats::Restriction::RateLimited,
+                           endpoint,
+                           "Upstream GraphQL response reported rate limit exceeded",
+                        )
+                        .upstream(200, Some(88)),
+                     );
+                  } else {
+                     self
+                        .sessions
+                        .mark_endpoint_limited(session.id, endpoint)
+                        .await;
+                  }
+                  if endpoint.ends_with("/SearchTimeline") {
+                     self
+                        .sessions
+                        .record_search_outcome(
+                           session.id,
+                           endpoint,
+                           crate::stats::SearchAccountOutcome::RateLimited,
+                        )
+                        .await;
+                  }
+               }
+               return Err(api_err);
+            }
             return Err(Error::Internal(format!("Response parse error: {err}")));
          },
       };
@@ -1682,27 +1781,102 @@ impl ApiClient {
          self.sessions.mark_rejected(session.id).await;
          return Err(Error::SessionRejected(msg.clone()));
       }
-      if !limit_recorded && matches!(api_check, Err(Error::RateLimited)) {
-         self
-            .sessions
-            .mark_endpoint_limited(session.id, endpoint)
-            .await;
+      if matches!(api_check, Err(Error::RateLimited)) {
+         if response_limits.limit_recorded {
+            self.sessions.record_event(
+               crate::stats::AccountEvent::new(
+                  session.id,
+                  crate::stats::Restriction::RateLimited,
+                  endpoint,
+                  "Upstream GraphQL response reported rate limit exceeded",
+               )
+               .upstream(200, Some(88)),
+            );
+         } else {
+            self
+               .sessions
+               .mark_endpoint_limited(session.id, endpoint)
+               .await;
+         }
+         if endpoint.ends_with("/SearchTimeline") {
+            self
+               .sessions
+               .record_search_outcome(
+                  session.id,
+                  endpoint,
+                  crate::stats::SearchAccountOutcome::RateLimited,
+               )
+               .await;
+         }
       }
       api_check?;
 
       let data = resp
          .data
          .ok_or_else(|| Error::Internal("Response parse error: missing data".into()))?;
-      // A valid empty page is a result, not a transport error or suspension signal.
-      if endpoint.ends_with("/SearchTimeline") && search_answer_is_empty(&bytes) {
-         tracing::info!(
-            session_id = session.id,
-            session_user = %session.username,
-            proxy_port = self.pinned_port(session.id).unwrap_or(0),
-            query = search_query_of(variables),
-            "search came back with no posts"
-         );
-         log_events::note(Event::SearchEmpty);
+      if endpoint.ends_with("/SearchTimeline") {
+         let empty_search = search_answer_is_empty(&bytes);
+         if empty_search && response_limits.header_exhausted {
+            // The account reached its rate limit (`x-rate-limit-remaining: 0`)
+            // and X answered with an empty timeline. Switch to another account
+            // instead of returning a false empty page.
+            if !response_limits.limit_recorded {
+               self.sessions.rest_endpoint(session.id, endpoint).await;
+            }
+            self.sessions.record_event(
+               crate::stats::AccountEvent::new(
+                  session.id,
+                  crate::stats::Restriction::RateLimited,
+                  endpoint,
+                  "Search returned empty at x-rate-limit-remaining=0; switching to another account",
+               )
+               .upstream(200, None),
+            );
+            self
+               .sessions
+               .record_search_outcome(
+                  session.id,
+                  endpoint,
+                  crate::stats::SearchAccountOutcome::RateLimited,
+               )
+               .await;
+            log_events::note(Event::Account429);
+            tracing::debug!(
+               session_id = session.id,
+               session_user = %session.username,
+               endpoint,
+               "search returned empty at rate limit; switching to another account"
+            );
+            return Err(Error::RateLimited);
+         }
+         // A valid empty page is a result, not a transport error or suspension signal.
+         if empty_search {
+            tracing::info!(
+               session_id = session.id,
+               session_user = %session.username,
+               proxy_port = self.pinned_port(session.id).unwrap_or(0),
+               query = search_query_of(variables),
+               "search came back with no posts"
+            );
+            log_events::note(Event::SearchEmpty);
+            self
+               .sessions
+               .record_search_outcome(
+                  session.id,
+                  endpoint,
+                  crate::stats::SearchAccountOutcome::Empty,
+               )
+               .await;
+         } else {
+            self
+               .sessions
+               .record_search_outcome(
+                  session.id,
+                  endpoint,
+                  crate::stats::SearchAccountOutcome::NonEmpty,
+               )
+               .await;
+         }
       }
       Ok((data, bytes))
    }
@@ -1716,9 +1890,10 @@ impl ApiClient {
       endpoint: &str,
       response: super::http::Response,
    ) -> Result<(bytes::Bytes, bool)> {
-      self
+      let (bytes, limits) = self
          .account_response_inner(session, endpoint, None, response)
-         .await
+         .await?;
+      Ok((bytes, limits.limit_recorded))
    }
 
    async fn account_response_inner(
@@ -1727,8 +1902,8 @@ impl ApiClient {
       endpoint: &str,
       graphql_request: Option<(&str, &str)>,
       response: super::http::Response,
-   ) -> Result<(bytes::Bytes, bool)> {
-      let limit_recorded = if let Some(remaining) = response.headers().get("x-rate-limit-remaining")
+   ) -> Result<(bytes::Bytes, ResponseLimits)> {
+      let response_limits = if let Some(remaining) = response.headers().get("x-rate-limit-remaining")
          && let Ok(remaining_str) = remaining.to_str()
          && let Ok(remaining_val) = remaining_str.parse::<i32>()
       {
@@ -1750,9 +1925,13 @@ impl ApiClient {
             .sessions
             .update_session_limit(session.id, endpoint, limit, remaining_val, reset)
             .await;
-         remaining_val <= 0 && reset > time::OffsetDateTime::now_utc().unix_timestamp()
+         ResponseLimits {
+            limit_recorded:   remaining_val <= 0
+               && reset > time::OffsetDateTime::now_utc().unix_timestamp(),
+            header_exhausted: remaining_val <= 0,
+         }
       } else {
-         false
+         ResponseLimits::default()
       };
 
       if !response.status().is_success() {
@@ -1810,6 +1989,16 @@ impl ApiClient {
                if self.client.exit_still_served(&self.egress_for(session)) {
                   self.sessions.disarm_meter(session);
                   let rest_secs = self.sessions.rest_endpoint(session.id, endpoint).await;
+                  if endpoint.ends_with("/SearchTimeline") {
+                     self
+                        .sessions
+                        .record_search_outcome(
+                           session.id,
+                           endpoint,
+                           crate::stats::SearchAccountOutcome::RateLimited,
+                        )
+                        .await;
+                  }
                   log_events::note(Event::Bare429);
                   tracing::debug!(
                      session_id = session.id,
@@ -1839,10 +2028,30 @@ impl ApiClient {
                "API request failed: {status} - {shown}"
             );
             self.sessions.disarm_meter(session);
-            if !limit_recorded {
+            if response_limits.limit_recorded {
+               self.sessions.record_event(
+                  crate::stats::AccountEvent::new(
+                     session.id,
+                     crate::stats::Restriction::RateLimited,
+                     endpoint,
+                     "Upstream returned HTTP 429 with rate-limit window exhausted",
+                  )
+                  .upstream(status.as_u16(), twitter_error_code(&body)),
+               );
+            } else {
                self
                   .sessions
                   .mark_endpoint_limited(session.id, endpoint)
+                  .await;
+            }
+            if endpoint.ends_with("/SearchTimeline") {
+               self
+                  .sessions
+                  .record_search_outcome(
+                     session.id,
+                     endpoint,
+                     crate::stats::SearchAccountOutcome::RateLimited,
+                  )
                   .await;
             }
             return Err(Error::RateLimited);
@@ -2022,7 +2231,7 @@ impl ApiClient {
       }
 
       self.sessions.disarm_meter(session);
-      Ok((response.bytes().await?, limit_recorded))
+      Ok((response.bytes().await?, response_limits))
    }
 
    async fn graphql_headers(
@@ -2417,7 +2626,69 @@ mod tests {
       assert!(!search_answer_is_empty(
          br#"{"data":{"search_by_raw_query":{"tweet_results":{}}}}"#
       ));
+      assert!(!search_answer_is_empty(
+         br#"{"data":{"search_by_raw_query":{"search_timeline":{"timeline":{"instructions":[{"entries":[{"content":{"itemContent":{"user_results":{"result":{"rest_id":"42"}}}}}]}}]}}}}}"#
+      ));
+      assert!(!search_answer_is_empty(
+         br#"{"data":{"search_by_raw_query":{"search_timeline":{"timeline":{"instructions":[{"entries":[{"content":{"items":[{"item":{"itemContent":{"list":{"id_str":"7","name":"News"}}}}]}}]}}]}}}}}"#
+      ));
       assert!(!search_answer_is_empty(b"not json"));
+   }
+
+   #[test]
+   fn search_rate_limit_and_lock_errors_are_never_swallowed_as_empty_or_backend_failure() {
+      let rate_limited_body = br#"{"data":{"search_by_raw_query":{"search_timeline":{}}},"errors":[{"code":88,"message":"Rate limit exceeded","path":["search_by_raw_query","search_timeline","timeline"]}]}"#;
+      let env: GqlResponse<SearchTimelineData> =
+         serde_json::from_slice(rate_limited_body).unwrap();
+      assert_eq!(search_timeline_failure(rate_limited_body, &env.errors), None);
+      let serious = request_errors(&env.errors, env.data.is_some());
+      assert_eq!(serious.len(), 1);
+      assert!(matches!(
+         ApiClient::map_api_errors(&serious),
+         Err(Error::RateLimited)
+      ));
+
+      let rate_msg_only: Vec<ApiError> = serde_json::from_str(
+         r#"[{"code": 0, "message": "Rate limit exceeded for SearchTimeline", "path": ["search_by_raw_query", "search_timeline", "timeline"]}]"#,
+      )
+      .unwrap();
+      assert_eq!(
+         search_timeline_failure(rate_limited_body, &rate_msg_only),
+         None
+      );
+      let serious_msg = request_errors(&rate_msg_only, true);
+      assert_eq!(serious_msg.len(), 1);
+      assert!(matches!(
+         ApiClient::map_api_errors(&serious_msg),
+         Err(Error::RateLimited)
+      ));
+
+      let locked: Vec<ApiError> = serde_json::from_str(
+         r#"[{"code": 326, "message": "account is temporarily locked", "path": ["search_by_raw_query", "search_timeline", "timeline"]}]"#,
+      )
+      .unwrap();
+      assert_eq!(search_timeline_failure(rate_limited_body, &locked), None);
+      let serious_locked = request_errors(&locked, true);
+      assert_eq!(serious_locked.len(), 1);
+      assert!(matches!(
+         ApiClient::map_api_errors(&serious_locked),
+         Err(Error::SessionRejected(_))
+      ));
+
+      let denylisted: Vec<ApiError> = serde_json::from_str(
+         r#"[{"code": 0, "message": "QueryDenylistedFailure", "path": ["search_by_raw_query", "search_timeline", "timeline"]}]"#,
+      )
+      .unwrap();
+      assert_eq!(
+         search_timeline_failure(rate_limited_body, &denylisted),
+         None
+      );
+      let serious_deny = request_errors(&denylisted, true);
+      assert_eq!(serious_deny.len(), 1);
+      assert!(matches!(
+         ApiClient::map_api_errors(&serious_deny),
+         Err(Error::SearchDenylisted)
+      ));
    }
 
    #[test]

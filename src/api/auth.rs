@@ -11,6 +11,7 @@ use std::{
       Arc,
       atomic::{
          AtomicBool,
+         AtomicU32,
          AtomicU64,
          AtomicUsize,
          Ordering,
@@ -69,38 +70,52 @@ use crate::{
    },
 };
 
+/// Consecutive empty `SearchTimeline` answers from a supposedly valid
+/// (verified) search account before an operational alert is logged.
+pub const SEARCH_EMPTY_STREAK_ALERT: u32 = 20;
+
+const fn is_search_empty_streak_milestone(streak: u32) -> bool {
+   matches!(streak, SEARCH_EMPTY_STREAK_ALERT | 50 | 100 | 150 | 187)
+      || (streak > 187 && streak.is_multiple_of(100))
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AccountState {
-   pub id:                   i64,
-   pub username:             String,
-   pub kind:                 SessionKind,
-   pub pool:                 &'static str,
+   pub id:                        i64,
+   pub username:                  String,
+   pub kind:                      SessionKind,
+   pub pool:                      &'static str,
    /// Reserved for search once, in the view pool now. A health check that
    /// finds the account alive puts it back.
-   pub demoted_from_search:  bool,
-   pub available:            bool,
-   pub credentials_rejected: bool,
-   pub search_banned:        bool,
-   pub profile_banned:       bool,
-   pub ct0_dead:             bool,
+   pub demoted_from_search:       bool,
+   pub available:                 bool,
+   pub credentials_rejected:      bool,
+   pub search_banned:             bool,
+   pub profile_banned:            bool,
+   pub ct0_dead:                  bool,
    /// X refused this account itself, so it cannot search. Kept for profile
    /// reads until one of those is refused too.
-   pub suspended:            bool,
+   pub suspended:                 bool,
    /// Both pools refused it: nothing is asked of this account again.
-   pub retired:              bool,
+   pub retired:                   bool,
    /// The settings that hide NSFW media are off for this account.
-   pub filters_cleared:      bool,
+   pub filters_cleared:           bool,
    /// Unix seconds before which a refused settings write is not retried.
-   pub filters_retry_at:     i64,
-   pub filters_failed:       bool,
-   pub globally_limited:     bool,
-   pub limited_at:           Option<i64>,
-   pub profile_strikes:      u32,
-   pub active_calls:         usize,
-   pub last_active:          Option<i64>,
-   pub rate_limits:          BTreeMap<String, RateLimit>,
-   pub refused_operations:   BTreeMap<String, i64>,
-   pub verified_operations:  BTreeMap<String, i64>,
+   pub filters_retry_at:          i64,
+   pub filters_failed:            bool,
+   pub globally_limited:          bool,
+   pub limited_at:                Option<i64>,
+   pub profile_strikes:           u32,
+   pub active_calls:              usize,
+   pub last_active:               Option<i64>,
+   pub search_empty_streak:       u32,
+   pub search_empty_total:        u64,
+   pub search_non_empty_total:    u64,
+   pub search_rate_limited_total: u64,
+   pub last_search_empty:         Option<i64>,
+   pub rate_limits:               BTreeMap<String, RateLimit>,
+   pub refused_operations:        BTreeMap<String, i64>,
+   pub verified_operations:       BTreeMap<String, i64>,
 }
 
 /// How many loaded accounts carry each mark, for the dashboard. One account
@@ -373,9 +388,19 @@ struct SessionSlot {
    wanted:          AtomicUsize,
    /// Unix timestamp (seconds) when this session last completed an upstream
    /// call.
-   last_active:     AtomicU64,
+   last_active:               AtomicU64,
    /// The exit this account is pinned to answers well behind the rest.
-   slow_exit:       AtomicBool,
+   slow_exit:                 AtomicBool,
+   /// Consecutive empty `SearchTimeline` answers without a non-empty page.
+   search_empty_streak:       AtomicU32,
+   /// Process-lifetime empty `SearchTimeline` answers.
+   search_empty_total:        AtomicU64,
+   /// Process-lifetime non-empty `SearchTimeline` answers.
+   search_non_empty_total:    AtomicU64,
+   /// Process-lifetime `SearchTimeline` rate-limit hits / switches.
+   search_rate_limited_total: AtomicU64,
+   /// Unix timestamp (seconds) of the latest empty `SearchTimeline` answer.
+   last_search_empty:         AtomicU64,
 }
 
 impl SessionSlot {
@@ -566,14 +591,19 @@ impl SessionPool {
          }
          limits.insert(creds.id, lims);
          new_slots.push(Arc::new(SessionSlot {
-            credentials:     Arc::new(creds),
-            fresh_ct0:       std::sync::RwLock::new(None),
-            permits:         Arc::new(Semaphore::new(self.max_concurrency)),
-            max_concurrency: self.max_concurrency,
-            freed:           Arc::new(Notify::new()),
-            wanted:          AtomicUsize::new(0),
-            last_active:     AtomicU64::new(0),
-            slow_exit:       AtomicBool::new(false),
+            credentials:               Arc::new(creds),
+            fresh_ct0:                 std::sync::RwLock::new(None),
+            permits:                   Arc::new(Semaphore::new(self.max_concurrency)),
+            max_concurrency:           self.max_concurrency,
+            freed:                     Arc::new(Notify::new()),
+            wanted:                    AtomicUsize::new(0),
+            last_active:               AtomicU64::new(0),
+            slow_exit:                 AtomicBool::new(false),
+            search_empty_streak:       AtomicU32::new(0),
+            search_empty_total:        AtomicU64::new(0),
+            search_non_empty_total:    AtomicU64::new(0),
+            search_rate_limited_total: AtomicU64::new(0),
+            last_search_empty:         AtomicU64::new(0),
          }));
       }
       let count = new_slots.len();
@@ -667,9 +697,21 @@ impl SessionPool {
       required_kind: Option<SessionKind>,
       excluded_id: i64,
    ) -> bool {
+      self
+         .has_unlimited_excluding(api, required_kind, &[excluded_id])
+         .await
+   }
+
+   /// Whether some untried session still has budget for `api`.
+   pub(crate) async fn has_unlimited_excluding(
+      &self,
+      api: &str,
+      required_kind: Option<SessionKind>,
+      excluded_ids: &[i64],
+   ) -> bool {
       let limits = self.limits.read().await;
       self.slots().iter().any(|slot| {
-         slot.credentials.id != excluded_id
+         !excluded_ids.contains(&slot.credentials.id)
             && required_kind.is_none_or(|kind| slot.credentials.kind == kind)
             && self.serves_visitor(&limits, slot.credentials.id, api)
       })
@@ -1910,45 +1952,155 @@ impl SessionPool {
       now: i64,
    ) -> AccountState {
       let last_active = slot.last_active.load(Ordering::Relaxed);
+      let last_search_empty = slot.last_search_empty.load(Ordering::Relaxed);
       AccountState {
-         id:                   slot.credentials.id,
-         username:             slot.credentials.username.clone(),
-         kind:                 slot.credentials.kind,
-         pool:                 if lim.is_some_and(|lim| lim.search_only) {
+         id:                        slot.credentials.id,
+         username:                  slot.credentials.username.clone(),
+         kind:                      slot.credentials.kind,
+         pool:                      if lim.is_some_and(|lim| lim.search_only) {
             "search"
          } else {
             "view"
          },
-         demoted_from_search:  lim.is_some_and(|lim| lim.demoted_from_search),
-         available:            !lim.is_some_and(|lim| lim.rejected || lim.ct0_dead),
-         credentials_rejected: lim.is_some_and(|lim| lim.rejected),
-         search_banned:        lim.is_some_and(|lim| lim.search_banned),
-         profile_banned:       lim.is_some_and(|lim| lim.profile_banned),
-         ct0_dead:             lim.is_some_and(|lim| lim.ct0_dead),
-         suspended:            lim.is_some_and(|lim| lim.suspended),
-         retired:              lim.is_some_and(|lim| lim.retired),
-         filters_cleared:      lim.is_some_and(|lim| lim.filters_cleared),
-         filters_retry_at:     lim.map_or(0, |lim| lim.filters_retry_at),
-         filters_failed:       lim.is_some_and(|lim| lim.filters_failed),
-         globally_limited:     lim.is_some_and(|lim| lim.is_globally_limited_at(now)),
-         limited_at:           lim.filter(|lim| lim.limited).map(|lim| lim.limited_at),
-         profile_strikes:      lim.map_or(0, |lim| lim.profile_strikes),
-         active_calls:         slot
+         demoted_from_search:       lim.is_some_and(|lim| lim.demoted_from_search),
+         available:                 !lim.is_some_and(|lim| lim.rejected || lim.ct0_dead),
+         credentials_rejected:      lim.is_some_and(|lim| lim.rejected),
+         search_banned:             lim.is_some_and(|lim| lim.search_banned),
+         profile_banned:            lim.is_some_and(|lim| lim.profile_banned),
+         ct0_dead:                  lim.is_some_and(|lim| lim.ct0_dead),
+         suspended:                 lim.is_some_and(|lim| lim.suspended),
+         retired:                   lim.is_some_and(|lim| lim.retired),
+         filters_cleared:           lim.is_some_and(|lim| lim.filters_cleared),
+         filters_retry_at:          lim.map_or(0, |lim| lim.filters_retry_at),
+         filters_failed:            lim.is_some_and(|lim| lim.filters_failed),
+         globally_limited:          lim.is_some_and(|lim| lim.is_globally_limited_at(now)),
+         limited_at:                lim.filter(|lim| lim.limited).map(|lim| lim.limited_at),
+         profile_strikes:           lim.map_or(0, |lim| lim.profile_strikes),
+         active_calls:              slot
             .max_concurrency
             .saturating_sub(slot.permits.available_permits()),
-         last_active:          (last_active > 0).then(|| last_active as i64),
-         rate_limits:          lim
+         last_active:               (last_active > 0).then_some(last_active as i64),
+         search_empty_streak:       slot.search_empty_streak.load(Ordering::Relaxed),
+         search_empty_total:        slot.search_empty_total.load(Ordering::Relaxed),
+         search_non_empty_total:    slot.search_non_empty_total.load(Ordering::Relaxed),
+         search_rate_limited_total: slot.search_rate_limited_total.load(Ordering::Relaxed),
+         last_search_empty:         (last_search_empty > 0).then_some(last_search_empty as i64),
+         rate_limits:               lim
             .map_or_else(BTreeMap::new, |lim| lim.apis.clone().into_iter().collect()),
-         refused_operations:   lim.map_or_else(BTreeMap::new, |lim| {
+         refused_operations:        lim.map_or_else(BTreeMap::new, |lim| {
             lim.refused_ops
                .iter()
                .filter(|(_, seen)| **seen > now - 86400)
                .map(|(api, seen)| (api.clone(), *seen))
                .collect()
          }),
-         verified_operations:  lim.map_or_else(BTreeMap::new, |lim| {
+         verified_operations:       lim.map_or_else(BTreeMap::new, |lim| {
             lim.verified_ops.clone().into_iter().collect()
          }),
+      }
+   }
+
+   /// Session IDs whose live consecutive empty-search streak is at least
+   /// `min_streak`.
+   pub fn search_empty_streak_ids(&self, min_streak: u32) -> Vec<i64> {
+      self
+         .slots()
+         .iter()
+         .filter(|slot| slot.search_empty_streak.load(Ordering::Relaxed) >= min_streak)
+         .map(|slot| slot.credentials.id)
+         .collect()
+   }
+
+   /// Record one upstream `SearchTimeline` outcome for an account, updating
+   /// both the live streak/totals and PostgreSQL telemetry.
+   ///
+   /// When a supposedly valid (verified, unbanned) search account hits repeated
+   /// consecutive empty responses, log an operational event so it stands out on
+   /// the admin statistics and restrictions pages.
+   pub(crate) async fn record_search_outcome(
+      &self,
+      session_id: i64,
+      endpoint: &str,
+      outcome: crate::stats::SearchAccountOutcome,
+   ) {
+      if let Some(stats) = &self.telemetry {
+         stats.search_account_outcome(session_id, outcome);
+      }
+      let slots = self.slots();
+      let Some(slot) = slots.iter().find(|slot| slot.credentials.id == session_id) else {
+         return;
+      };
+      match outcome {
+         crate::stats::SearchAccountOutcome::NonEmpty => {
+            slot.search_empty_streak.store(0, Ordering::Relaxed);
+            slot.search_non_empty_total.fetch_add(1, Ordering::Relaxed);
+         },
+         crate::stats::SearchAccountOutcome::RateLimited => {
+            slot
+               .search_rate_limited_total
+               .fetch_add(1, Ordering::Relaxed);
+         },
+         crate::stats::SearchAccountOutcome::Empty => {
+            let now = time::OffsetDateTime::now_utc().unix_timestamp();
+            slot
+               .last_search_empty
+               .store(u64::try_from(now).unwrap_or(0), Ordering::Relaxed);
+            let total_empty = slot.search_empty_total.fetch_add(1, Ordering::Relaxed) + 1;
+            let total_non_empty = slot.search_non_empty_total.load(Ordering::Relaxed);
+            let streak = slot.search_empty_streak.fetch_add(1, Ordering::Relaxed) + 1;
+            if is_search_empty_streak_milestone(streak) {
+               let maybe_evidence = {
+                  let limits = self.limits.read().await;
+                  limits.get(&session_id).and_then(|lim| {
+                     let supposed_valid = lim.search_only
+                        && lim.verified_op("SearchTimeline")
+                        && !lim.rejected
+                        && !lim.ct0_dead
+                        && !lim.suspended
+                        && !lim.retired
+                        && !lim.search_banned;
+                     if !supposed_valid {
+                        return None;
+                     }
+                     let quota = lim.apis.get(endpoint).map_or_else(
+                        || "quota unknown".to_owned(),
+                        |rate| format!("quota {}/{}", rate.remaining, rate.limit),
+                     );
+                     let filters = if lim.filters_cleared {
+                        "filters cleared"
+                     } else if lim.filters_failed {
+                        "filters refused"
+                     } else {
+                        "filters pending"
+                     };
+                     Some(format!(
+                        "Supposed valid search account returned {streak} consecutive empty \
+                         responses (since start: {total_empty} empty / {total_non_empty} with \
+                         results; {filters}; {quota})"
+                     ))
+                  })
+               };
+               if let Some(evidence) = maybe_evidence {
+                  tracing::warn!(
+                     session_id,
+                     session_user = %slot.credentials.username,
+                     streak,
+                     total_empty,
+                     total_non_empty,
+                     "supposed valid search account is consistently returning empty responses"
+                  );
+                  self.record_event(
+                     crate::stats::AccountEvent::new(
+                        session_id,
+                        crate::stats::Restriction::SearchEmptyStreak,
+                        endpoint,
+                        &evidence,
+                     )
+                     .upstream(200, None),
+                  );
+               }
+            }
+         },
       }
    }
 
@@ -3694,6 +3846,69 @@ mod tests {
       assert!(!pool.set_account_pool(3, true).await.unwrap());
       assert!(pool.set_account_pool(3, false).await.unwrap());
       assert_eq!(pool.account_state(3).await.unwrap().pool, "view");
+
+      fs::remove_file(path).await.unwrap();
+   }
+
+   #[tokio::test]
+   async fn search_outcome_tracker_counts_streaks_resets_and_excludes_tried_ids() {
+      let path = env::temp_dir().join(format!(
+         "teapot-session-pool-empty-tracker-{}.jsonl",
+         process::id()
+      ));
+      fs::write(
+         &path,
+         concat!(
+            r#"{"id":1,"username":"broken","kind":"cookie","auth_token":"a","ct0":"c","pool":"search"}"#,
+            "\n",
+            r#"{"id":2,"username":"healthy","kind":"cookie","auth_token":"b","ct0":"d","pool":"search"}"#,
+            "\n"
+         ),
+      )
+      .await
+      .unwrap();
+      let pool = SessionPool::load(path.to_str().unwrap(), 4).await.unwrap();
+      let api = "id/SearchTimeline";
+      pool.mark_verified(1, api).await;
+      pool.mark_verified(2, api).await;
+
+      assert!(pool.has_unlimited_excluding(api, None, &[1]).await);
+      assert!(!pool.has_unlimited_excluding(api, None, &[1, 2]).await);
+
+      for _ in 0..super::SEARCH_EMPTY_STREAK_ALERT {
+         pool
+            .record_search_outcome(1, api, crate::stats::SearchAccountOutcome::Empty)
+            .await;
+      }
+      pool
+         .record_search_outcome(1, api, crate::stats::SearchAccountOutcome::RateLimited)
+         .await;
+
+      let s1 = pool.account_state(1).await.unwrap();
+      assert_eq!(s1.search_empty_streak, super::SEARCH_EMPTY_STREAK_ALERT);
+      assert_eq!(
+         s1.search_empty_total,
+         u64::from(super::SEARCH_EMPTY_STREAK_ALERT)
+      );
+      assert_eq!(s1.search_non_empty_total, 0);
+      assert_eq!(s1.search_rate_limited_total, 1);
+      assert!(s1.last_search_empty.is_some());
+      assert_eq!(
+         pool.search_empty_streak_ids(super::SEARCH_EMPTY_STREAK_ALERT),
+         vec![1]
+      );
+
+      pool
+         .record_search_outcome(1, api, crate::stats::SearchAccountOutcome::NonEmpty)
+         .await;
+      let s1_after = pool.account_state(1).await.unwrap();
+      assert_eq!(s1_after.search_empty_streak, 0);
+      assert_eq!(s1_after.search_non_empty_total, 1);
+      assert!(
+         pool
+            .search_empty_streak_ids(super::SEARCH_EMPTY_STREAK_ALERT)
+            .is_empty()
+      );
 
       fs::remove_file(path).await.unwrap();
    }

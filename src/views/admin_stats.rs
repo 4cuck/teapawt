@@ -27,14 +27,35 @@ use crate::{
 
 #[derive(Serialize)]
 pub(crate) struct Dashboard {
-   pub minutes:        i32,
-   pub pool:           Option<(i64, i64)>,
-   pub capacity:       Option<f64>,
-   pub census:         PoolCensus,
-   pub gate:           GateStatus,
-   pub dropped_events: u64,
-   pub buckets:        Vec<Bucket>,
-   pub restrictions:   Vec<RestrictionCount>,
+   pub minutes:         i32,
+   pub pool:            Option<(i64, i64)>,
+   pub capacity:        Option<f64>,
+   pub census:          PoolCensus,
+   pub gate:            GateStatus,
+   pub dropped_events:  u64,
+   pub buckets:         Vec<Bucket>,
+   pub restrictions:    Vec<RestrictionCount>,
+   pub search_accounts: Vec<SearchAccountRow>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct SearchAccountRow {
+   pub session_id:           i64,
+   pub username:             String,
+   pub pool:                 String,
+   pub verified_search:      bool,
+   pub filters_cleared:      bool,
+   pub filters_failed:       bool,
+   pub suspended:            bool,
+   pub credentials_rejected: bool,
+   pub empty:                i64,
+   pub non_empty:            i64,
+   pub rate_limited:         i64,
+   pub empty_streak:         u32,
+   pub remaining:            Option<i32>,
+   pub limit:                Option<i32>,
+   pub last_empty_unix:      Option<i64>,
+   pub last_non_empty_unix:  Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -700,6 +721,10 @@ fn overview_content(data: Option<&Dashboard>, minutes: i32) -> Markup {
             }
          }
 
+         @if let Some(dashboard) = data {
+            (search_empty_accounts_section(&dashboard.search_accounts))
+         }
+
          section class="admin-section" aria-labelledby="stats-restrictions-title" {
             div class="admin-section-heading" {
                div {
@@ -1016,6 +1041,151 @@ fn metric(id: &str, title: &str, value: Option<String>, note: &str, modifier: &s
          dt { (title) }
          dd id=(id) { (value.as_deref().unwrap_or("Unavailable")) }
          dd class="admin-stats-note" { (note) }
+      }
+   }
+}
+
+fn search_empty_accounts_section(rows: &[SearchAccountRow]) -> Markup {
+   let suspect_count = rows
+      .iter()
+      .filter(|row| {
+         let total = row.empty + row.non_empty;
+         row.verified_search
+            && ((row.empty >= 5 && total > 0 && row.empty * 2 >= total)
+               || row.empty_streak >= crate::api::auth::SEARCH_EMPTY_STREAK_ALERT)
+      })
+      .count();
+
+   html! {
+      section id="stats-search-empty-accounts" class="admin-section" aria-labelledby="stats-search-empty-title" {
+         div class="admin-section-heading" {
+            div {
+               h2 id="stats-search-empty-title" { "Search pool empty-response tracker" }
+               p {
+                  "Per-account SearchTimeline empty vs non-empty responses recorded in PostgreSQL for this window. "
+                  "Supposedly valid (verified) accounts with high empty ratios or active streaks are sorted first."
+               }
+            }
+            div class="admin-badge-row" {
+               @if suspect_count > 0 {
+                  span class="admin-badge admin-badge--bad" {
+                     (suspect_count) " verified account" @if suspect_count != 1 { "s" } " ≥50% empty"
+                  }
+               }
+               a class="admin-btn" href="/admin/stats/restrictions?kind=12" { "Empty-streak alerts →" }
+            }
+         }
+
+         @if rows.is_empty() {
+            p class="admin-empty" {
+               "No empty or rate-limited SearchTimeline account responses were recorded in this window."
+            }
+         } @else {
+            div class="admin-table-wrap admin-stats-table-scroll" role="region" aria-label="Search account empty responses" tabindex="0" {
+               table class="admin-table" {
+                  thead {
+                     tr {
+                        th scope="col" { "Account" }
+                        th scope="col" { "Pool & status" }
+                        th scope="col" { "Empty" }
+                        th scope="col" { "With results" }
+                        th scope="col" { "Empty %" }
+                        th scope="col" { "Live streak" }
+                        th scope="col" { "RL switches" }
+                        th scope="col" { "Quota" }
+                        th scope="col" { "Last empty (UTC)" }
+                     }
+                  }
+                  tbody {
+                     @for row in rows {
+                        @let total = row.empty + row.non_empty;
+                        @let empty_pct = if total > 0 { 100.0 * row.empty as f64 / total as f64 } else { 0.0 };
+                        @let pct_class = if row.empty >= 5 && empty_pct >= 80.0 {
+                           "admin-badge admin-badge--bad"
+                        } else if row.empty >= 5 && empty_pct >= 40.0 {
+                           "admin-badge admin-badge--warn"
+                        } else {
+                           "admin-badge admin-badge--neutral"
+                        };
+                        @let streak_class = if row.empty_streak >= crate::api::auth::SEARCH_EMPTY_STREAK_ALERT {
+                           "admin-badge admin-badge--bad"
+                        } else if row.empty_streak >= 5 {
+                           "admin-badge admin-badge--warn"
+                        } else {
+                           "admin-badge admin-badge--neutral"
+                        };
+                        tr {
+                           th scope="row" class="admin-nowrap" {
+                              a href=(format!("/admin/stats/sessions/{}", row.session_id)) {
+                                 @if row.username.is_empty() {
+                                    strong { "Account #" (row.session_id) }
+                                 } @else {
+                                    strong { "@" (row.username) }
+                                    " "
+                                    small class="admin-muted" { "#" (row.session_id) }
+                                 }
+                              }
+                           }
+                           td {
+                              div class="admin-badge-row" {
+                                 span class=(if row.pool == "search" { "admin-badge admin-badge--search" } else { "admin-badge admin-badge--view" }) {
+                                    (row.pool)
+                                 }
+                                 @if row.verified_search {
+                                    span class="admin-badge admin-badge--ok" { "verified" }
+                                 } @else {
+                                    span class="admin-badge admin-badge--neutral" { "unverified" }
+                                 }
+                                 @if row.filters_failed {
+                                    span class="admin-badge admin-badge--warn" { "filters refused" }
+                                 } @else if !row.filters_cleared {
+                                    span class="admin-badge admin-badge--neutral" { "filters pending" }
+                                 }
+                                 @if row.credentials_rejected {
+                                    span class="admin-badge admin-badge--bad" { "creds rejected" }
+                                 }
+                                 @if row.suspended {
+                                    span class="admin-badge admin-badge--bad" { "suspended" }
+                                 }
+                              }
+                           }
+                           td { (row.empty) }
+                           td { (row.non_empty) }
+                           td class="admin-nowrap" {
+                              @if total > 0 {
+                                 span class=(pct_class) { (format!("{empty_pct:.1}%")) }
+                              } @else {
+                                 "—"
+                              }
+                           }
+                           td class="admin-nowrap" {
+                              @if row.empty_streak > 0 {
+                                 span class=(streak_class) { (row.empty_streak) }
+                              } @else {
+                                 "0"
+                              }
+                           }
+                           td { (row.rate_limited) }
+                           td class="admin-nowrap" {
+                              @if let (Some(rem), Some(lim)) = (row.remaining, row.limit) {
+                                 (rem) "/" (lim)
+                              } @else {
+                                 "—"
+                              }
+                           }
+                           td class="admin-col-time" {
+                              @if let Some(ts) = row.last_empty_unix {
+                                 (minute_label(ts))
+                              } @else {
+                                 "—"
+                              }
+                           }
+                        }
+                     }
+                  }
+               }
+            }
+         }
       }
    }
 }
@@ -1406,6 +1576,24 @@ mod tests {
             .map(|index| bucket(index * 60, 12, 10, 10, 240))
             .collect(),
          restrictions: Vec::new(),
+         search_accounts: vec![SearchAccountRow {
+            session_id:           1235,
+            username:             "amy82si6".to_owned(),
+            pool:                 "search".to_owned(),
+            verified_search:      true,
+            filters_cleared:      true,
+            filters_failed:       false,
+            suspended:            false,
+            credentials_rejected: false,
+            empty:                187,
+            non_empty:            0,
+            rate_limited:         1,
+            empty_streak:         187,
+            remaining:            Some(0),
+            limit:                Some(187),
+            last_empty_unix:      Some(7200),
+            last_non_empty_unix:  None,
+         }],
       };
 
       let markup = page("light", Some(&dashboard), WEEK_MINUTES).into_string();
@@ -1416,6 +1604,10 @@ mod tests {
       assert!(!markup.contains("<script>"));
       assert!(markup.contains("Anti-DDoS &amp; timeline pressure"));
       assert!(markup.contains("UserTweets"));
+      assert!(markup.contains("id=\"stats-search-empty-accounts\""));
+      assert!(markup.contains("@amy82si6"));
+      assert!(markup.contains("100.0%"));
+      assert!(markup.contains("1 verified account ≥50% empty"));
       assert!(markup.contains("id=\"stats-pool\">536 / 4904</dd>"));
       assert!(markup.contains("data-series=\"[[0,"));
       assert!(markup.contains("data-window-start=\"-597600\""));
@@ -1461,6 +1653,7 @@ mod tests {
          dropped_events: 0,
          buckets:        vec![bucket(3600, 10, 10, 10, 120)],
          restrictions:   Vec::new(),
+         search_accounts: Vec::new(),
       };
       let markup = page("dark", Some(&single), 15).into_string();
       assert!(!markup.contains("style=\""));

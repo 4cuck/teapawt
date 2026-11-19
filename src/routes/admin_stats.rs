@@ -47,19 +47,25 @@ use super::{
 use crate::{
    AppState,
    accounts::AccountIdentity,
+   api::auth::SEARCH_EMPTY_STREAK_ALERT,
    error::Error,
    stats::{
       AccountEvent,
       Outcome,
       Restriction,
+      SearchAccountSummary,
    },
-   types::Prefs,
+   types::{
+      Prefs,
+      operation_name,
+   },
    utils::host::current_origin,
    views::admin_stats::{
       self as view,
       Bucket,
       Dashboard,
       RestrictionCount,
+      SearchAccountRow,
    },
 };
 
@@ -205,9 +211,11 @@ pub(crate) struct InvestigationData {
 
 #[derive(Serialize)]
 pub(crate) struct AccountData {
-   pub(crate) account:  Option<crate::api::auth::AccountState>,
-   pub(crate) identity: Option<AccountIdentity>,
-   pub(crate) events:   Vec<AccountEvent>,
+   pub(crate) account:    Option<crate::api::auth::AccountState>,
+   pub(crate) identity:   Option<AccountIdentity>,
+   pub(crate) events:     Vec<AccountEvent>,
+   pub(crate) search_24h: Option<SearchAccountSummary>,
+   pub(crate) search_7d:  Option<SearchAccountSummary>,
 }
 
 /// What a manual health probe found, and whether it changed the stored verdict.
@@ -319,18 +327,27 @@ async fn snapshot(state: &AppState, minutes: i32) -> Option<Dashboard> {
    let store = state.stats.as_ref()?;
    tokio::time::timeout(Duration::from_secs(5), async {
       let now = now_unix();
-      let (data, pool, capacity, census, gate) = tokio::join!(
+      let (data, pool, capacity, census, gate, search_summaries) = tokio::join!(
          store.snapshot(minutes),
          state.accounts.stats(),
          state.api.search_budget_estimate(),
          state.api.sessions.census(),
          async { gate_status(state, now) },
+         store.search_account_summaries(minutes, 100),
       );
+      let streaking_ids = state.api.sessions.search_empty_streak_ids(5);
       let data = data.ok()?;
       let pool = pool
          .ok()
          .map(|stats| (stats.search, stats.view))
          .or_else(|| Some((census.search as i64, census.view as i64)));
+      let search_accounts = build_search_account_rows(
+         state,
+         search_summaries.unwrap_or_default(),
+         streaking_ids,
+         now,
+      )
+      .await;
       Some(Dashboard {
          minutes,
          pool,
@@ -368,11 +385,129 @@ async fn snapshot(state: &AppState, minutes: i32) -> Option<Dashboard> {
                }
             })
             .collect(),
+         search_accounts,
       })
    })
    .await
    .ok()
    .flatten()
+}
+
+async fn build_search_account_rows(
+   state: &AppState,
+   summaries: Vec<SearchAccountSummary>,
+   streaking_ids: Vec<i64>,
+   now: i64,
+) -> Vec<SearchAccountRow> {
+   let mut by_id: std::collections::HashMap<i64, SearchAccountSummary> = summaries
+      .into_iter()
+      .map(|row| (row.session_id, row))
+      .collect();
+   for id in streaking_ids {
+      by_id.entry(id).or_insert_with(|| {
+         SearchAccountSummary {
+            session_id: id,
+            ..SearchAccountSummary::default()
+         }
+      });
+   }
+   if by_id.is_empty() {
+      return Vec::new();
+   }
+   let mut ids: Vec<i64> = by_id.keys().copied().collect();
+   ids.sort_unstable();
+   let (identities_res, states) = tokio::join!(
+      state.accounts.identities(&ids),
+      state.api.sessions.account_states(&ids),
+   );
+   let identities = identities_res.unwrap_or_default();
+
+   let mut rows: Vec<SearchAccountRow> = by_id
+      .into_values()
+      .map(|summary| {
+         let id = summary.session_id;
+         let current = states.get(&id);
+         let identity = identities.get(&id);
+         let username = current
+            .map(|acct| acct.username.as_str())
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+               identity
+                  .map(|ident| ident.username.as_str())
+                  .filter(|name| !name.is_empty())
+            })
+            .unwrap_or("")
+            .to_owned();
+         let pool = current
+            .map(|acct| {
+               if acct.pool.is_empty() {
+                  "view"
+               } else {
+                  acct.pool
+               }
+            })
+            .or_else(|| {
+               identity
+                  .map(|ident| ident.pool.as_str())
+                  .filter(|val| !val.is_empty())
+            })
+            .unwrap_or("view")
+            .to_owned();
+         let search_limit = current.and_then(|acct| {
+            acct
+               .rate_limits
+               .iter()
+               .filter(|(api, rate)| operation_name(api) == "SearchTimeline" && rate.reset > now)
+               .max_by_key(|(_, rate)| rate.reset)
+               .map(|(_, rate)| rate)
+         });
+         let empty = summary
+            .empty
+            .max(current.map_or(0, |acct| i64::from(acct.search_empty_streak)));
+         let last_empty_unix = summary.last_empty_unix.or_else(|| {
+            let acct = current?;
+            acct.last_search_empty
+         });
+         SearchAccountRow {
+            session_id: id,
+            username,
+            pool,
+            verified_search: current
+               .is_some_and(|acct| acct.verified_operations.contains_key("SearchTimeline")),
+            filters_cleared: current.is_some_and(|acct| acct.filters_cleared),
+            filters_failed: current.is_some_and(|acct| acct.filters_failed),
+            suspended: current.is_some_and(|acct| acct.suspended || acct.retired),
+            credentials_rejected: current
+               .is_some_and(|acct| acct.credentials_rejected || acct.ct0_dead),
+            empty,
+            non_empty: summary.non_empty,
+            rate_limited: summary.rate_limited,
+            empty_streak: current.map_or(0, |acct| acct.search_empty_streak),
+            remaining: search_limit.map(|rate| rate.remaining),
+            limit: search_limit.map(|rate| rate.limit),
+            last_empty_unix,
+            last_non_empty_unix: summary.last_non_empty_unix,
+         }
+      })
+      .collect();
+
+   rows.sort_unstable_by(|left, right| {
+      let suspect = |row: &SearchAccountRow| {
+         let total = row.empty + row.non_empty;
+         row.verified_search
+            && ((row.empty >= 5 && total > 0 && row.empty * 2 >= total)
+               || row.empty_streak >= SEARCH_EMPTY_STREAK_ALERT)
+      };
+      suspect(right)
+         .cmp(&suspect(left))
+         .then_with(|| right.verified_search.cmp(&left.verified_search))
+         .then_with(|| right.empty_streak.cmp(&left.empty_streak))
+         .then_with(|| right.empty.cmp(&left.empty))
+         .then_with(|| right.rate_limited.cmp(&left.rate_limited))
+         .then_with(|| left.session_id.cmp(&right.session_id))
+   });
+   rows.truncate(60);
+   rows
 }
 
 async fn page(State(state): State<AppState>, jar: CookieJar, request: Request) -> Response {
@@ -452,6 +587,7 @@ fn active_restriction(
       // A reinstatement is history by definition: the verdict it cleared is
       // gone, so it can never be "still active".
       Restriction::Reinstated => false,
+      Restriction::SearchEmptyStreak => account.search_empty_streak >= SEARCH_EMPTY_STREAK_ALERT,
    }
 }
 
@@ -609,16 +745,18 @@ async fn account_data(state: &AppState, id: i64) -> Option<AccountData> {
    if identity.is_none() && account.is_none() {
       return None;
    }
-   let events = state
-      .stats
-      .as_ref()?
-      .account_timeline(id)
-      .await
-      .unwrap_or_default();
+   let store = state.stats.as_ref()?;
+   let (events, search_24h, search_7d) = tokio::join!(
+      store.account_timeline(id),
+      store.account_search_summary(id, 24 * 60),
+      store.account_search_summary(id, 7 * 24 * 60),
+   );
    Some(AccountData {
       account,
       identity,
-      events,
+      events: events.unwrap_or_default(),
+      search_24h: search_24h.ok().flatten(),
+      search_7d: search_7d.ok().flatten(),
    })
 }
 
@@ -1018,11 +1156,16 @@ mod tests {
          globally_limited:     false,
          limited_at:           None,
          profile_strikes:      0,
-         active_calls:         0,
-         last_active:          None,
-         rate_limits:          BTreeMap::new(),
-         refused_operations:   BTreeMap::new(),
-         verified_operations:  BTreeMap::new(),
+         active_calls:              0,
+         last_active:               None,
+         search_empty_streak:       0,
+         search_empty_total:        0,
+         search_non_empty_total:    0,
+         search_rate_limited_total: 0,
+         last_search_empty:         None,
+         rate_limits:               BTreeMap::new(),
+         refused_operations:        BTreeMap::new(),
+         verified_operations:       BTreeMap::new(),
       };
       // `filters_failed` alone is not an active suspension.
       assert!(!active_restriction(&event, &account, 1_000));
@@ -1031,6 +1174,16 @@ mod tests {
       account.suspended = false;
       account.retired = true;
       assert!(active_restriction(&event, &account, 1_000));
+
+      let empty_event = AccountEvent::new(
+         7,
+         Restriction::SearchEmptyStreak,
+         "ph2fARFabkwfxqmSKQ1OPw/SearchTimeline",
+         "20 consecutive empty responses",
+      );
+      assert!(!active_restriction(&empty_event, &account, 1_000));
+      account.search_empty_streak = SEARCH_EMPTY_STREAK_ALERT;
+      assert!(active_restriction(&empty_event, &account, 1_000));
    }
 
    #[tokio::test]

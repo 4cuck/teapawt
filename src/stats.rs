@@ -78,6 +78,18 @@ CREATE INDEX IF NOT EXISTS stats_account_events_session_idx
    ON stats_account_events (session_id, observed_unix DESC, id DESC);
 CREATE INDEX IF NOT EXISTS stats_account_events_recent_idx
    ON stats_account_events (observed_unix DESC, id DESC);
+CREATE TABLE IF NOT EXISTS stats_search_account_minutes (
+   minute_unix bigint NOT NULL,
+   session_id bigint NOT NULL,
+   non_empty bigint NOT NULL,
+   empty bigint NOT NULL,
+   rate_limited bigint NOT NULL,
+   last_empty_unix bigint,
+   last_non_empty_unix bigint,
+   PRIMARY KEY (minute_unix, session_id)
+);
+CREATE INDEX IF NOT EXISTS stats_search_account_minutes_session_idx
+   ON stats_search_account_minutes (session_id, minute_unix DESC);
 ";
 
 // Both aggregates are applied atomically in a single round trip. The in-memory
@@ -148,6 +160,8 @@ pub enum Restriction {
    SearchRested        = 10,
    /// A manual probe found the account alive, so a stored verdict was cleared.
    Reinstated          = 11,
+   /// A supposedly valid (verified) search account repeatedly answered with no results.
+   SearchEmptyStreak   = 12,
 }
 
 impl Restriction {
@@ -164,6 +178,7 @@ impl Restriction {
          9 => Self::SettingsRejected,
          10 => Self::SearchRested,
          11 => Self::Reinstated,
+         12 => Self::SearchEmptyStreak,
          _ => return None,
       })
    }
@@ -180,8 +195,28 @@ impl Restriction {
          Self::SettingsRejected => "Settings write refused",
          Self::SearchRested => "Search temporarily rested",
          Self::Reinstated => "Reinstated by probe",
+         Self::SearchEmptyStreak => "Consistent empty search",
       }
    }
+}
+
+/// Outcome of a single upstream `SearchTimeline` request for one account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchAccountOutcome {
+   NonEmpty,
+   Empty,
+   RateLimited,
+}
+
+/// Aggregated upstream `SearchTimeline` outcomes for one account over a time window.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct SearchAccountSummary {
+   pub session_id:          i64,
+   pub non_empty:           i64,
+   pub empty:               i64,
+   pub rate_limited:        i64,
+   pub last_empty_unix:     Option<i64>,
+   pub last_non_empty_unix: Option<i64>,
 }
 
 /// Operational evidence only: credentials and request payloads never belong
@@ -372,6 +407,90 @@ impl StatsStore {
       self.submit(Event::Account(event));
    }
 
+   pub fn search_account_outcome(&self, session_id: i64, outcome: SearchAccountOutcome) {
+      let now = now_unix();
+      self.submit(Event::SearchAccount(minute(now), session_id, outcome, now));
+   }
+
+   pub async fn search_account_summaries(
+      &self,
+      minutes: i32,
+      limit: i64,
+   ) -> Result<Vec<SearchAccountSummary>, Error> {
+      let minutes = minutes.clamp(1, RETENTION_MINUTES);
+      let limit = limit.clamp(1, 500);
+      let end_unix = minute(now_unix()) + 60;
+      let start_unix = end_unix - i64::from(minutes) * 60;
+      self
+         .client
+         .query(
+            "SELECT
+                session_id,
+                COALESCE(SUM(non_empty), 0)::bigint AS non_empty,
+                COALESCE(SUM(empty), 0)::bigint AS empty,
+                COALESCE(SUM(rate_limited), 0)::bigint AS rate_limited,
+                MAX(last_empty_unix) AS last_empty_unix,
+                MAX(last_non_empty_unix) AS last_non_empty_unix
+             FROM stats_search_account_minutes
+             WHERE minute_unix >= $1 AND minute_unix < $2
+             GROUP BY session_id
+             HAVING COALESCE(SUM(empty), 0) > 0 OR COALESCE(SUM(rate_limited), 0) > 0
+             ORDER BY COALESCE(SUM(empty), 0) DESC, COALESCE(SUM(rate_limited), 0) DESC, session_id \
+             ASC
+             LIMIT $3",
+            &[&start_unix, &end_unix, &limit],
+         )
+         .await?
+         .into_iter()
+         .map(|row| {
+            Ok(SearchAccountSummary {
+               session_id:          row.try_get(0)?,
+               non_empty:           row.try_get(1)?,
+               empty:               row.try_get(2)?,
+               rate_limited:        row.try_get(3)?,
+               last_empty_unix:     row.try_get(4)?,
+               last_non_empty_unix: row.try_get(5)?,
+            })
+         })
+         .collect()
+   }
+
+   pub async fn account_search_summary(
+      &self,
+      session_id: i64,
+      minutes: i32,
+   ) -> Result<Option<SearchAccountSummary>, Error> {
+      let minutes = minutes.clamp(1, RETENTION_MINUTES);
+      let end_unix = minute(now_unix()) + 60;
+      let start_unix = end_unix - i64::from(minutes) * 60;
+      let row = self
+         .client
+         .query_opt(
+            "SELECT
+                COALESCE(SUM(non_empty), 0)::bigint AS non_empty,
+                COALESCE(SUM(empty), 0)::bigint AS empty,
+                COALESCE(SUM(rate_limited), 0)::bigint AS rate_limited,
+                MAX(last_empty_unix) AS last_empty_unix,
+                MAX(last_non_empty_unix) AS last_non_empty_unix
+             FROM stats_search_account_minutes
+             WHERE session_id = $1 AND minute_unix >= $2 AND minute_unix < $3
+             HAVING COUNT(*) > 0",
+            &[&session_id, &start_unix, &end_unix],
+         )
+         .await?;
+      row.map(|row| {
+         Ok(SearchAccountSummary {
+            session_id,
+            non_empty: row.try_get(0)?,
+            empty: row.try_get(1)?,
+            rate_limited: row.try_get(2)?,
+            last_empty_unix: row.try_get(3)?,
+            last_non_empty_unix: row.try_get(4)?,
+         })
+      })
+      .transpose()
+   }
+
    pub async fn recent_account_events(
       &self,
       kind: Option<Restriction>,
@@ -553,6 +672,7 @@ enum Event {
    Finished(i64, Outcome, i64),
    Restricted(i64, Restriction, i64),
    Account(AccountEvent),
+   SearchAccount(i64, i64, SearchAccountOutcome, i64),
 }
 
 #[derive(Default, Serialize)]
@@ -565,11 +685,21 @@ struct MinuteUpdate {
 }
 
 #[derive(Default)]
+struct SearchAccountMinuteUpdate {
+   non_empty:           i64,
+   empty:               i64,
+   rate_limited:        i64,
+   last_empty_unix:     Option<i64>,
+   last_non_empty_unix: Option<i64>,
+}
+
+#[derive(Default)]
 struct Batch {
-   minutes:        BTreeMap<i64, MinuteUpdate>,
-   restrictions:   HashMap<(i64, i16), i64>,
-   account_events: Vec<AccountEvent>,
-   events:         usize,
+   minutes:         BTreeMap<i64, MinuteUpdate>,
+   restrictions:    HashMap<(i64, i16), i64>,
+   account_events:  Vec<AccountEvent>,
+   search_accounts: BTreeMap<(i64, i64), SearchAccountMinuteUpdate>,
+   events:          usize,
 }
 
 impl Batch {
@@ -600,6 +730,30 @@ impl Batch {
             *latest = (*latest).max(when);
          },
          Event::Account(event) => self.account_events.push(event),
+         Event::SearchAccount(minute_unix, session_id, outcome, when) => {
+            let entry = self
+               .search_accounts
+               .entry((minute_unix, session_id))
+               .or_default();
+            match outcome {
+               SearchAccountOutcome::NonEmpty => {
+                  entry.non_empty += 1;
+                  entry.last_non_empty_unix = Some(
+                     entry
+                        .last_non_empty_unix
+                        .map_or(when, |prev| prev.max(when)),
+                  );
+               },
+               SearchAccountOutcome::Empty => {
+                  entry.empty += 1;
+                  entry.last_empty_unix =
+                     Some(entry.last_empty_unix.map_or(when, |prev| prev.max(when)));
+               },
+               SearchAccountOutcome::RateLimited => {
+                  entry.rate_limited += 1;
+               },
+            }
+         },
       }
    }
 
@@ -617,6 +771,62 @@ impl Batch {
       client
          .execute(WRITE_BATCH, &[&minutes, &ids, &kinds, &times])
          .await?;
+      if !self.search_accounts.is_empty() {
+         let cap = self.search_accounts.len();
+         let mut sa_minutes = Vec::with_capacity(cap);
+         let mut sa_ids = Vec::with_capacity(cap);
+         let mut sa_non_empty = Vec::with_capacity(cap);
+         let mut sa_empty = Vec::with_capacity(cap);
+         let mut sa_rate_limited = Vec::with_capacity(cap);
+         let mut sa_last_empty: Vec<Option<i64>> = Vec::with_capacity(cap);
+         let mut sa_last_non_empty: Vec<Option<i64>> = Vec::with_capacity(cap);
+         for (&(minute_unix, session_id), update) in &self.search_accounts {
+            sa_minutes.push(minute_unix);
+            sa_ids.push(session_id);
+            sa_non_empty.push(update.non_empty);
+            sa_empty.push(update.empty);
+            sa_rate_limited.push(update.rate_limited);
+            sa_last_empty.push(update.last_empty_unix);
+            sa_last_non_empty.push(update.last_non_empty_unix);
+         }
+         client
+            .execute(
+               "INSERT INTO stats_search_account_minutes
+                (minute_unix, session_id, non_empty, empty, rate_limited, last_empty_unix, \
+                last_non_empty_unix)
+                SELECT * FROM unnest(
+                   $1::bigint[], $2::bigint[], $3::bigint[], $4::bigint[], $5::bigint[], \
+                $6::bigint[], $7::bigint[]
+                ) AS s (
+                   minute_unix, session_id, non_empty, empty, rate_limited, last_empty_unix, \
+                last_non_empty_unix
+                )
+                ORDER BY minute_unix, session_id
+                ON CONFLICT (minute_unix, session_id) DO UPDATE SET
+                   non_empty = stats_search_account_minutes.non_empty + EXCLUDED.non_empty,
+                   empty = stats_search_account_minutes.empty + EXCLUDED.empty,
+                   rate_limited = stats_search_account_minutes.rate_limited + \
+                EXCLUDED.rate_limited,
+                   last_empty_unix = GREATEST(
+                      stats_search_account_minutes.last_empty_unix,
+                      EXCLUDED.last_empty_unix
+                   ),
+                   last_non_empty_unix = GREATEST(
+                      stats_search_account_minutes.last_non_empty_unix,
+                      EXCLUDED.last_non_empty_unix
+                   )",
+               &[
+                  &sa_minutes,
+                  &sa_ids,
+                  &sa_non_empty,
+                  &sa_empty,
+                  &sa_rate_limited,
+                  &sa_last_empty,
+                  &sa_last_non_empty,
+               ],
+            )
+            .await?;
+      }
       if !self.account_events.is_empty() {
          let events = self
             .account_events
@@ -681,6 +891,7 @@ async fn run_writer(
       if !batch.minutes.is_empty()
          || !batch.restrictions.is_empty()
          || !batch.account_events.is_empty()
+         || !batch.search_accounts.is_empty()
       {
          match batch.write(&client).await {
             Ok(()) => last_heartbeat = Some(current_minute),
@@ -715,6 +926,8 @@ async fn prune(client: &Client, now: i64) -> Result<(), Error> {
    client
       .execute(
          "WITH pruned_minutes AS (DELETE FROM stats_minute_buckets WHERE minute_unix < $1),
+          pruned_search_accounts AS (DELETE FROM stats_search_account_minutes WHERE minute_unix < \
+          $1),
           pruned_restrictions AS (DELETE FROM stats_restrictions WHERE last_seen_unix < $2)
           DELETE FROM stats_account_events WHERE observed_unix < $2",
          &[&bucket_cutoff, &restriction_cutoff],
@@ -802,14 +1015,49 @@ mod tests {
       batch.record(Event::Started(key));
       batch.record(Event::Finished(key, Outcome::Empty, 35));
       batch.record(Event::Restricted(17, Restriction::Suspended, timestamp));
+      batch.record(Event::SearchAccount(
+         key,
+         1235,
+         SearchAccountOutcome::Empty,
+         timestamp,
+      ));
+      batch.record(Event::SearchAccount(
+         key,
+         1235,
+         SearchAccountOutcome::RateLimited,
+         timestamp,
+      ));
       batch.write(&client).await.unwrap();
       batch.write(&client).await.unwrap();
+      let mut batch2 = Batch::default();
+      batch2.record(Event::SearchAccount(
+         key,
+         1235,
+         SearchAccountOutcome::NonEmpty,
+         timestamp + 5,
+      ));
+      batch2.write(&client).await.unwrap();
       let snapshot = store.snapshot(15).await.unwrap();
       assert_eq!(snapshot.totals.received, 2);
       assert_eq!(snapshot.totals.empty, 2);
       assert_eq!(snapshot.latency.avg_ms, Some(35.0));
       assert_eq!(snapshot.restrictions.len(), 1);
       assert_eq!(snapshot.restrictions[0].suspended, 1);
+
+      let summaries = store.search_account_summaries(15, 10).await.unwrap();
+      assert_eq!(summaries.len(), 1);
+      assert_eq!(summaries[0].session_id, 1235);
+      assert_eq!(summaries[0].empty, 2);
+      assert_eq!(summaries[0].non_empty, 1);
+      assert_eq!(summaries[0].rate_limited, 2);
+      assert_eq!(summaries[0].last_empty_unix, Some(timestamp));
+      assert_eq!(summaries[0].last_non_empty_unix, Some(timestamp + 5));
+
+      let single = store.account_search_summary(1235, 15).await.unwrap().unwrap();
+      assert_eq!(single, summaries[0]);
+      assert_eq!(store.account_search_summary(9999, 15).await.unwrap(), None);
+
+      prune(&client, timestamp).await.unwrap();
    }
 
    #[test]
@@ -853,5 +1101,56 @@ mod tests {
       );
       assert_eq!(restricted_bucket_kind(Restriction::Reinstated), None);
       assert_eq!(restricted_bucket_kind(Restriction::RateLimited), None);
+      assert_eq!(restricted_bucket_kind(Restriction::SearchEmptyStreak), None);
+      assert_eq!(Restriction::from_i16(12), Some(Restriction::SearchEmptyStreak));
+   }
+
+   #[test]
+   fn aggregates_search_account_outcomes_per_minute_and_session() {
+      let mut batch = Batch::default();
+      batch.record(Event::SearchAccount(
+         60,
+         1235,
+         SearchAccountOutcome::Empty,
+         70,
+      ));
+      batch.record(Event::SearchAccount(
+         60,
+         1235,
+         SearchAccountOutcome::Empty,
+         85,
+      ));
+      batch.record(Event::SearchAccount(
+         60,
+         1235,
+         SearchAccountOutcome::RateLimited,
+         90,
+      ));
+      batch.record(Event::SearchAccount(
+         60,
+         5183,
+         SearchAccountOutcome::NonEmpty,
+         75,
+      ));
+      batch.record(Event::SearchAccount(
+         60,
+         5183,
+         SearchAccountOutcome::Empty,
+         80,
+      ));
+
+      let broken = &batch.search_accounts[&(60, 1235)];
+      assert_eq!(broken.non_empty, 0);
+      assert_eq!(broken.empty, 2);
+      assert_eq!(broken.rate_limited, 1);
+      assert_eq!(broken.last_empty_unix, Some(85));
+      assert_eq!(broken.last_non_empty_unix, None);
+
+      let healthy = &batch.search_accounts[&(60, 5183)];
+      assert_eq!(healthy.non_empty, 1);
+      assert_eq!(healthy.empty, 1);
+      assert_eq!(healthy.rate_limited, 0);
+      assert_eq!(healthy.last_empty_unix, Some(80));
+      assert_eq!(healthy.last_non_empty_unix, Some(75));
    }
 }

@@ -108,6 +108,26 @@ pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Marku
                   div { dt { "Active calls" } dd { (acct.active_calls) } }
                   div { dt { "Profile strikes" } dd { (acct.profile_strikes) } }
                   div {
+                     dt { "Search empty streak" }
+                     dd {
+                        @if acct.search_empty_streak >= crate::api::auth::SEARCH_EMPTY_STREAK_ALERT {
+                           span class="admin-badge admin-badge--bad" { (acct.search_empty_streak) " consecutive" }
+                        } @else if acct.search_empty_streak >= 5 {
+                           span class="admin-badge admin-badge--warn" { (acct.search_empty_streak) " consecutive" }
+                        } @else {
+                           (acct.search_empty_streak)
+                        }
+                     }
+                  }
+                  div {
+                     dt { "Search since start" }
+                     dd {
+                        (acct.search_empty_total) " empty · "
+                        (acct.search_non_empty_total) " with results · "
+                        (acct.search_rate_limited_total) " RL switches"
+                     }
+                  }
+                  div {
                      dt { "Last upstream activity" }
                      dd {
                         @if let Some(time) = acct.last_active { (minute_label(time)) }
@@ -184,6 +204,60 @@ pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Marku
          } @else {
             p class="admin-notice admin-notice--warn" {
                "This account is not currently loaded in the runtime session pool. Stored restriction history is shown below."
+            }
+         }
+
+         @if let Some(item) = data {
+            section class="admin-stats-panel" {
+               h2 { "Search response telemetry (PostgreSQL)" }
+               p class="admin-hint" {
+                  "Aggregated SearchTimeline empty vs non-empty responses and rate-limit switches stored in PostgreSQL."
+               }
+               @if item.search_24h.is_none() && item.search_7d.is_none() {
+                  p class="admin-empty" { "No SearchTimeline telemetry recorded for this account in the last 7 days." }
+               } @else {
+                  div class="admin-table-wrap" {
+                     table class="admin-table" {
+                        thead {
+                           tr {
+                              th scope="col" { "Window" }
+                              th scope="col" { "Empty" }
+                              th scope="col" { "With results" }
+                              th scope="col" { "Empty %" }
+                              th scope="col" { "RL switches" }
+                              th scope="col" { "Last empty (UTC)" }
+                              th scope="col" { "Last with results (UTC)" }
+                           }
+                        }
+                        tbody {
+                           @for (label, summary) in [("Last 24 hours", item.search_24h.as_ref()), ("Last 7 days", item.search_7d.as_ref())] {
+                              @if let Some(stats) = summary {
+                                 @let total = stats.empty + stats.non_empty;
+                                 @let pct = if total > 0 { 100.0 * stats.empty as f64 / total as f64 } else { 0.0 };
+                                 tr {
+                                    th scope="row" { (label) }
+                                    td { (stats.empty) }
+                                    td { (stats.non_empty) }
+                                    td {
+                                       @if total > 0 { (format!("{pct:.1}%")) }
+                                       @else { "—" }
+                                    }
+                                    td { (stats.rate_limited) }
+                                    td class="admin-col-time" {
+                                       @if let Some(ts) = stats.last_empty_unix { (minute_label(ts)) }
+                                       @else { "—" }
+                                    }
+                                    td class="admin-col-time" {
+                                       @if let Some(ts) = stats.last_non_empty_unix { (minute_label(ts)) }
+                                       @else { "—" }
+                                    }
+                                 }
+                              }
+                           }
+                        }
+                     }
+                  }
+               }
             }
          }
 

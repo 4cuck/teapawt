@@ -17,7 +17,7 @@ use crate::{
    stats::Restriction,
 };
 
-const FILTERABLE_KINDS: [Restriction; 11] = [
+const FILTERABLE_KINDS: [Restriction; 12] = [
    Restriction::SearchOnly,
    Restriction::Suspended,
    Restriction::CredentialsRejected,
@@ -29,6 +29,7 @@ const FILTERABLE_KINDS: [Restriction; 11] = [
    Restriction::SettingsRejected,
    Restriction::SearchRested,
    Restriction::Reinstated,
+   Restriction::SearchEmptyStreak,
 ];
 
 fn kind_badge_class(kind: Restriction) -> &'static str {
@@ -36,7 +37,8 @@ fn kind_badge_class(kind: Restriction) -> &'static str {
       Restriction::Reinstated => "admin-badge admin-badge--ok",
       Restriction::Suspended
       | Restriction::CredentialsRejected
-      | Restriction::CsrfRejected => "admin-badge admin-badge--bad",
+      | Restriction::CsrfRejected
+      | Restriction::SearchEmptyStreak => "admin-badge admin-badge--bad",
       Restriction::SearchOnly
       | Restriction::SearchBanned
       | Restriction::ProfileBanned
