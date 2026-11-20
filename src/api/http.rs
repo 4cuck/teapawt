@@ -32,7 +32,9 @@ use std::{
    sync::{
       Arc,
       Mutex,
+      RwLock,
       atomic::{
+         AtomicBool,
          AtomicU64,
          AtomicUsize,
          Ordering,
@@ -84,6 +86,9 @@ use crate::error::{
 };
 
 const DEFAULT_BODY_LIMIT: usize = 32 * 1024 * 1024; // 32 MiB
+/// Initial buffer capacity when a response carries no `content-length` header.
+/// GraphQL answers are chunked/compressed and typically land in 50–500 KiB.
+const DEFAULT_BODY_CAPACITY: usize = 64 * 1024;
 /// Whole API call, connect to last byte.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// A media stream may run long; this is the cap on the whole transfer.
@@ -99,6 +104,12 @@ const POOL_IDLE: Duration = Duration::from_secs(900);
 /// A few idle sockets per account. Hundreds of them, times every account on
 /// one exit, fills the proxy and every later call waits on headers.
 const POOL_PER_HOST: usize = 8;
+/// Short-lived HTTP/1.1 idle pool for CDN media fetches so `/pic/` and `/video/`
+/// reuse warm TLS+SOCKS handshakes without stalling on long-idle sockets.
+const MEDIA_POOL_IDLE: Duration = Duration::from_secs(15);
+const MEDIA_POOL_PER_HOST: usize = 16;
+/// Shards for per-session browser clients, eliminating global lock contention.
+const SESSION_CLIENT_SHARDS: usize = 64;
 /// CDN media normally answers in tens of milliseconds. A pooled connection the
 /// path has already forgotten sits in TCP retransmits for several seconds and
 /// then delivers, which is the video that "loads" after a long pause. Give up
@@ -314,45 +325,91 @@ impl ExitSamples {
    }
 }
 
+/// Per-exit state inside [`PrimaryPool`]. Hot-path reads and writes (`banned`,
+/// `blocked_until`, `served`) are lock-free atomics; slow-exit sampling locks
+/// only this exit's mutex instead of a pool-wide map.
+struct ExitSlot {
+   tag:           u64,
+   banned:        AtomicBool,
+   blocked_until: AtomicU64,
+   served:        AtomicU64,
+   samples:       Mutex<ExitSamples>,
+   /// Parkings in a row for slowness, and when the last one ends.
+   relapses:      Mutex<(u32, u64)>,
+   /// Parkings in a row for X's edge throttling this exit's IP, kept apart
+   /// from slowness so one does not lengthen the other.
+   edge_relapses: Mutex<(u32, u64)>,
+}
+
+impl ExitSlot {
+   fn new(tag: u64) -> Self {
+      Self {
+         tag,
+         banned: AtomicBool::new(false),
+         blocked_until: AtomicU64::new(0),
+         served: AtomicU64::new(0),
+         samples: Mutex::new(ExitSamples::default()),
+         relapses: Mutex::new((0, 0)),
+         edge_relapses: Mutex::new((0, 0)),
+      }
+   }
+}
+
 /// The stable SOCKS exits used by cookie sessions. A session normally stays
 /// pinned, but temporarily moves to another healthy exit when X rate-limits
 /// its public IP or answers it far slower than the other exits.
 struct PrimaryPool {
-   proxies:       Vec<ProxyConfig>,
-   tags:          HashSet<u64>,
-   blocked_until: Mutex<HashMap<u64, u64>>,
-   samples:       Mutex<HashMap<u64, ExitSamples>>,
-   /// Parkings in a row per exit, and when the last one ends: for slowness,
-   /// and for X's edge throttling its IP. Kept apart so a slow spell does not
-   /// lengthen the next throttle parking or the other way round.
-   relapses:      Mutex<HashMap<u64, (u32, u64)>>,
-   edge_relapses: Mutex<HashMap<u64, (u32, u64)>>,
-   /// When X last answered a call through each exit with a success.
-   served:        Mutex<HashMap<u64, u64>>,
-   /// Exits named in the ban file: a Cloudflare block until it lapses, any
-   /// other line until it is deleted. Kept across restarts.
-   banned:        Mutex<HashSet<u64>>,
-   banned_file:   Option<PathBuf>,
+   proxies:          Vec<ProxyConfig>,
+   index_by_tag:     HashMap<u64, usize>,
+   slots:            Vec<ExitSlot>,
+   /// Serializes rare parking decisions (`park_slow` / `block`) so `out_cap`
+   /// is enforced atomically across concurrent bursts.
+   park_lock:        Mutex<()>,
+   /// Serializes reads/writes of `banned_file` with updates to slot `banned`
+   /// flags.
+   banned_file_lock: Mutex<()>,
+   banned_file:      Option<PathBuf>,
 }
 
 impl PrimaryPool {
-   fn new(proxies: Vec<ProxyConfig>, tags: HashSet<u64>) -> Self {
+   fn new(mut proxies: Vec<ProxyConfig>) -> Self {
+      let mut index_by_tag = HashMap::with_capacity(proxies.len());
+      let mut slots = Vec::with_capacity(proxies.len());
+      proxies.retain(|proxy| {
+         let tag = proxy_tag(Some(proxy));
+         if index_by_tag.contains_key(&tag) {
+            return false;
+         }
+         let index = slots.len();
+         index_by_tag.insert(tag, index);
+         slots.push(ExitSlot::new(tag));
+         true
+      });
       Self {
          proxies,
-         tags,
-         blocked_until: Mutex::new(HashMap::new()),
-         samples: Mutex::new(HashMap::new()),
-         relapses: Mutex::new(HashMap::new()),
-         edge_relapses: Mutex::new(HashMap::new()),
-         served: Mutex::new(HashMap::new()),
-         banned: Mutex::new(HashSet::new()),
+         index_by_tag,
+         slots,
+         park_lock: Mutex::new(()),
+         banned_file_lock: Mutex::new(()),
          banned_file: None,
       }
    }
 
+   fn slot_by_tag(&self, tag: u64) -> Option<&ExitSlot> {
+      self.index_by_tag.get(&tag).map(|&index| &self.slots[index])
+   }
+
+   fn slot_for(&self, proxy: &ProxyConfig) -> Option<&ExitSlot> {
+      self.slot_by_tag(proxy_tag(Some(proxy)))
+   }
+
    fn watch_banned_file(&mut self, path: PathBuf) {
       let loaded = load_banned(&path, &self.proxies, unix_millis());
-      self.banned = Mutex::new(loaded);
+      for slot in &self.slots {
+         slot
+            .banned
+            .store(loaded.contains(&slot.tag), Ordering::Release);
+      }
       self.banned_file = Some(path);
    }
 
@@ -360,54 +417,44 @@ impl PrimaryPool {
    /// lines of Cloudflare bans that have lapsed. Deleting a line puts that
    /// port back without a restart.
    fn reload_banned_file(&self) {
-      let Some(path) = &self.banned_file else {
+      let Some(ref path) = self.banned_file else {
          return;
       };
       // Held across the file so a ban written meanwhile is neither lost from
-      // the file nor dropped from the set.
-      let Ok(mut banned) = self.banned.lock() else {
+      // the file nor dropped from the slots.
+      let Ok(guard) = self.banned_file_lock.lock() else {
          return;
       };
       let now = unix_millis();
       drop_lapsed_bans(path, now);
       let loaded = load_banned(path, &self.proxies, now);
-      if *banned == loaded {
+      let mut changed = false;
+      for slot in &self.slots {
+         let next = loaded.contains(&slot.tag);
+         if slot.banned.swap(next, Ordering::AcqRel) != next {
+            changed = true;
+         }
+      }
+      if !changed {
+         drop(guard);
          return;
       }
-      *banned = loaded;
+      let ports = self.banned_ports();
+      drop(guard);
       tracing::warn!(
-         ports = ?self.banned_ports_locked(&banned),
+         ports = ?ports,
          file = %path.display(),
          "proxy ban file changed"
       );
    }
 
-   fn banned_ports_locked(&self, banned: &HashSet<u64>) -> Vec<u16> {
-      let mut ports = self
-         .proxies
-         .iter()
-         .filter(|proxy| banned.contains(&proxy_tag(Some(proxy))))
-         .map(|proxy| proxy.port)
-         .collect::<Vec<_>>();
-      ports.sort_unstable();
-      ports
-   }
-
-   fn banned_tags(&self) -> HashSet<u64> {
-      self
-         .banned
-         .lock()
-         .map(|banned| banned.clone())
-         .unwrap_or_default()
-   }
-
    fn banned_ports(&self) -> Vec<u16> {
-      let banned = self.banned_tags();
       let mut ports = self
          .proxies
          .iter()
-         .filter(|proxy| banned.contains(&proxy_tag(Some(proxy))))
-         .map(|proxy| proxy.port)
+         .zip(&self.slots)
+         .filter(|(_, slot)| slot.banned.load(Ordering::Acquire))
+         .map(|(proxy, _)| proxy.port)
          .collect::<Vec<_>>();
       ports.sort_unstable();
       ports
@@ -416,17 +463,18 @@ impl PrimaryPool {
    /// Cloudflare blocked this exit's IP. It stays out, across restarts, for
    /// [`CLOUDFLARE_BAN_FOR`]. A header stall must not call this.
    fn ban(&self, proxy: &ProxyConfig) -> bool {
-      let tag = proxy_tag(Some(proxy));
-      if !self.tags.contains(&tag) {
-         return false;
-      }
-      let Ok(mut banned) = self.banned.lock() else {
+      let Some(slot) = self.slot_for(proxy) else {
          return false;
       };
-      if !banned.insert(tag) {
+      let Ok(guard) = self.banned_file_lock.lock() else {
+         return false;
+      };
+      if slot.banned.swap(true, Ordering::AcqRel) {
+         drop(guard);
          return false;
       }
-      let Some(path) = &self.banned_file else {
+      let Some(ref path) = self.banned_file else {
+         drop(guard);
          return true;
       };
       let fresh = !path.exists();
@@ -453,6 +501,7 @@ impl PrimaryPool {
       {
          tracing::warn!(port = proxy.port, %err, "could not record the banned proxy exit");
       }
+      drop(guard);
       true
    }
 
@@ -476,71 +525,97 @@ impl PrimaryPool {
    /// headers, no connection). Returns the parking time when this call made
    /// the exit one to avoid.
    fn record(&self, proxy: &ProxyConfig, slow: bool) -> Option<Duration> {
-      let tag = proxy_tag(Some(proxy));
-      if !self.tags.contains(&tag) {
-         return None;
-      }
+      let slot = self.slot_for(proxy)?;
       let now = unix_millis();
-      let mut samples = self.samples.lock().ok()?;
-      let mine = samples.entry(tag).or_default();
-      mine.roll(now);
-      if slow {
-         mine.slow[0] = mine.slow[0].saturating_add(1);
-      } else {
-         mine.fast[0] = mine.fast[0].saturating_add(1);
-         return None;
-      }
-      let (fast, slow_count) = mine.totals();
-      let share = f64::from(slow_count) / f64::from(fast.saturating_add(slow_count));
-      if slow_count < SLOW_EXIT_MIN || share < SLOW_EXIT_SHARE {
-         return None;
-      }
-      let mut shares = samples
-         .values_mut()
-         .filter_map(|other| {
+      let share = {
+         let mut mine = slot.samples.lock().ok()?;
+         mine.roll(now);
+         if slow {
+            mine.slow[0] = mine.slow[0].saturating_add(1);
+         } else {
+            mine.fast[0] = mine.fast[0].saturating_add(1);
+            return None;
+         }
+         let (fast, slow_count) = mine.totals();
+         let share = f64::from(slow_count) / f64::from(fast.saturating_add(slow_count));
+         if slow_count < SLOW_EXIT_MIN || share < SLOW_EXIT_SHARE {
+            return None;
+         }
+         share
+      };
+      // Only reached when this exit crosses the slowness threshold. Lock each
+      // exit's samples one at a time so no two slot locks are ever held at once.
+      let mut shares = Vec::with_capacity(self.slots.len());
+      for other_slot in &self.slots {
+         if let Ok(mut other) = other_slot.samples.lock() {
             other.roll(now);
             let (quick, late) = other.totals();
+            drop(other);
             let total = quick.saturating_add(late);
-            (total >= SLOW_EXIT_MIN).then(|| f64::from(late) / f64::from(total))
-         })
-         .collect::<Vec<_>>();
+            if total >= SLOW_EXIT_MIN {
+               shares.push(f64::from(late) / f64::from(total));
+            }
+         }
+      }
       shares.sort_by(f64::total_cmp);
       let median = shares.get(shares.len() / 2).copied().unwrap_or(0.0);
       if share < SLOW_EXIT_VS_FLEET * median {
          return None;
       }
-      samples.insert(tag, ExitSamples::default());
-      drop(samples);
-      self.park_slow(tag, now)
+      if let Ok(mut mine) = slot.samples.lock() {
+         *mine = ExitSamples::default();
+      }
+      self.park_slow(slot.tag, now)
+   }
+
+   fn park_slot(
+      &self,
+      slot: &ExitSlot,
+      history: &Mutex<(u32, u64)>,
+      parking: &Parking,
+      now: u64,
+   ) -> Option<Duration> {
+      let guard = self.park_lock.lock().ok()?;
+      // Parked or banned already, or so many are out that search would share
+      // too few IPs. Held across the decision so one burst parks once.
+      if slot.banned.load(Ordering::Acquire) || slot.blocked_until.load(Ordering::Acquire) > now {
+         drop(guard);
+         return None;
+      }
+      let out = self
+         .slots
+         .iter()
+         .filter(|other| {
+            other.banned.load(Ordering::Acquire)
+               || other.blocked_until.load(Ordering::Acquire) > now
+         })
+         .count();
+      if out >= self.out_cap() {
+         drop(guard);
+         return None;
+      }
+      let (park, until) = Self::next_parking(history, parking, now)?;
+      slot.blocked_until.store(until, Ordering::Release);
+      drop(guard);
+      Some(park)
    }
 
    fn park_slow(&self, tag: u64, now: u64) -> Option<Duration> {
-      let banned = self.banned_tags().len();
-      let mut blocked = self.blocked_until.lock().ok()?;
-      blocked.retain(|_, until| *until > now);
-      // Parked already, or so many are out that search would share too few IPs.
-      // Held across the decision so one slow burst parks once.
-      if blocked.contains_key(&tag) || blocked.len() + banned >= self.out_cap() {
-         return None;
-      }
-      let (park, until) = Self::next_parking(&self.relapses, &SLOW_PARKING, tag, now)?;
-      blocked.insert(tag, until);
-      Some(park)
+      let slot = self.slot_by_tag(tag)?;
+      self.park_slot(slot, &slot.relapses, &SLOW_PARKING, now)
    }
 
    /// How long to park this exit under `parking`, given its `history` of
    /// parkings of the same kind, and the moment that ends.
    fn next_parking(
-      history: &Mutex<HashMap<u64, (u32, u64)>>,
+      history: &Mutex<(u32, u64)>,
       parking: &Parking,
-      tag: u64,
       now: u64,
    ) -> Option<(Duration, u64)> {
       let mut relapses = history.lock().ok()?;
-      let last = relapses.get(&tag).copied().unwrap_or((0, 0));
-      let (count, park) = parking.next(last, now);
+      let (count, park) = parking.next(*relapses, now);
       let until = now.saturating_add(u64::try_from(park.as_millis()).unwrap_or(u64::MAX));
-      relapses.insert(tag, (count, until));
+      *relapses = (count, until);
       drop(relapses);
       Some((park, until))
    }
@@ -548,42 +623,32 @@ impl PrimaryPool {
    /// Parked exits by port, with the seconds each has left.
    fn parked(&self) -> Vec<(u16, u64)> {
       let now = unix_millis();
-      let Ok(blocked) = self.blocked_until.lock() else {
-         return Vec::new();
-      };
       let mut parked = self
          .proxies
          .iter()
-         .filter_map(|proxy| {
-            let until = *blocked.get(&proxy_tag(Some(proxy)))?;
+         .zip(&self.slots)
+         .filter_map(|(proxy, slot)| {
+            let until = slot.blocked_until.load(Ordering::Acquire);
             (until > now).then(|| (proxy.port, (until - now) / 1000))
          })
          .collect::<Vec<_>>();
-      drop(blocked);
       parked.sort_unstable();
       parked
    }
 
    fn contains(&self, proxy: &ProxyConfig) -> bool {
-      self.tags.contains(&proxy_tag(Some(proxy)))
+      self.index_by_tag.contains_key(&proxy_tag(Some(proxy)))
    }
 
    fn is_blocked(&self, proxy: &ProxyConfig) -> bool {
-      let tag = proxy_tag(Some(proxy));
-      if self
-         .banned
-         .lock()
-         .ok()
-         .is_some_and(|banned| banned.contains(&tag))
-      {
+      let Some(slot) = self.slot_for(proxy) else {
+         return false;
+      };
+      if slot.banned.load(Ordering::Acquire) {
          return true;
       }
-      self
-         .blocked_until
-         .lock()
-         .ok()
-         .and_then(|blocked| blocked.get(&tag).copied())
-         .is_some_and(|until| until > unix_millis())
+      let until = slot.blocked_until.load(Ordering::Acquire);
+      until > 0 && until > unix_millis()
    }
 
    /// Parks the exit after X's edge throttled its IP. Returns how long only
@@ -591,44 +656,31 @@ impl PrimaryPool {
    /// responses produces one warning rather than hundreds and counts as one
    /// relapse. Refuses a new parking once too few exits would remain.
    fn block(&self, proxy: &ProxyConfig) -> Option<Duration> {
-      let tag = proxy_tag(Some(proxy));
-      if !self.tags.contains(&tag) {
-         return None;
-      }
-      let now = unix_millis();
-      let banned = self.banned_tags().len();
-      let mut blocked = self.blocked_until.lock().ok()?;
-      blocked.retain(|_, ends| *ends > now);
-      if blocked.contains_key(&tag) || blocked.len() + banned >= self.out_cap() {
-         return None;
-      }
-      let (park, until) = Self::next_parking(&self.edge_relapses, &EDGE_PARKING, tag, now)?;
-      blocked.insert(tag, until);
-      Some(park)
+      let slot = self.slot_for(proxy)?;
+      self.park_slot(slot, &slot.edge_relapses, &EDGE_PARKING, unix_millis())
    }
 
    /// X answered a call through this exit with a success.
    fn note_served(&self, proxy: &ProxyConfig) {
-      let tag = proxy_tag(Some(proxy));
-      if !self.tags.contains(&tag) {
+      let Some(slot) = self.slot_for(proxy) else {
          return;
-      }
-      if let Ok(mut served) = self.served.lock() {
-         served.insert(tag, unix_millis());
-      }
+      };
+      slot.served.store(unix_millis(), Ordering::Relaxed);
    }
 
    /// Whether X served a call through this exit within [`EXIT_PROOF`]. Its IP
    /// is then not what X is refusing.
    fn recently_served(&self, proxy: &ProxyConfig) -> bool {
+      let Some(slot) = self.slot_for(proxy) else {
+         return false;
+      };
+      let served_at = slot.served.load(Ordering::Relaxed);
+      if served_at == 0 {
+         return false;
+      }
       let proof = u64::try_from(EXIT_PROOF.as_millis()).unwrap_or(u64::MAX);
       let since = unix_millis().saturating_sub(proof);
-      self
-         .served
-         .lock()
-         .ok()
-         .and_then(|served| served.get(&proxy_tag(Some(proxy))).copied())
-         .is_some_and(|at| at >= since)
+      served_at >= since
    }
 
    /// Pick a deterministic healthy failover for this account. Stability keeps
@@ -636,16 +688,16 @@ impl PrimaryPool {
    fn alternate(&self, session: i64, current: &ProxyConfig) -> Option<ProxyConfig> {
       let now = unix_millis();
       let current_tag = proxy_tag(Some(current));
-      let banned = self.banned_tags();
-      let mut blocked = self.blocked_until.lock().ok()?;
-      blocked.retain(|_, until| *until > now);
       let healthy = self
          .proxies
          .iter()
-         .filter(|proxy| {
-            let tag = proxy_tag(Some(proxy));
-            tag != current_tag && !blocked.contains_key(&tag) && !banned.contains(&tag)
+         .zip(&self.slots)
+         .filter(|(_, slot)| {
+            slot.tag != current_tag
+               && !slot.banned.load(Ordering::Acquire)
+               && slot.blocked_until.load(Ordering::Acquire) <= now
          })
+         .map(|(proxy, _)| proxy)
          .collect::<Vec<_>>();
       if healthy.is_empty() {
          return None;
@@ -653,9 +705,65 @@ impl PrimaryPool {
       let mut hasher = std::collections::hash_map::DefaultHasher::new();
       session.hash(&mut hasher);
       current_tag.hash(&mut hasher);
-      let index = (hasher.finish() as usize) % healthy.len();
+      let index = usize::try_from(hasher.finish() % (healthy.len() as u64)).unwrap_or(0);
       Some(healthy[index].clone())
    }
+
+   /// First non-blocked exit in config order, falling back to the first exit
+   /// if all are blocked.
+   fn first_healthy(&self) -> Option<&ProxyConfig> {
+      let now = unix_millis();
+      self
+         .proxies
+         .iter()
+         .zip(&self.slots)
+         .find(|(_, slot)| {
+            !slot.banned.load(Ordering::Acquire)
+               && slot.blocked_until.load(Ordering::Acquire) <= now
+         })
+         .map(|(proxy, _)| proxy)
+         .or_else(|| self.proxies.first())
+   }
+
+   /// Next non-blocked exit starting from `start`, falling back to the first
+   /// exit if all are blocked.
+   fn round_robin_healthy(&self, start: usize) -> Option<&ProxyConfig> {
+      let count = self.proxies.len();
+      if count == 0 {
+         return None;
+      }
+      let now = unix_millis();
+      for offset in 0..count {
+         let index = (start + offset) % count;
+         let slot = &self.slots[index];
+         if !slot.banned.load(Ordering::Acquire)
+            && slot.blocked_until.load(Ordering::Acquire) <= now
+         {
+            return Some(&self.proxies[index]);
+         }
+      }
+      self.proxies.first()
+   }
+}
+
+type SessionClientShard = RwLock<HashMap<(i64, u64), primp::Client>>;
+
+fn session_client_shard(key: (i64, u64)) -> usize {
+   let mixed = key
+      .0
+      .cast_unsigned()
+      .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+      ^ key.1.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+   let finalized = (mixed ^ (mixed >> 30)).wrapping_mul(0x94D0_49BB_1331_11EB);
+   usize::try_from((finalized >> 58) % (SESSION_CLIENT_SHARDS as u64)).unwrap_or(0)
+}
+
+#[derive(Clone, Copy)]
+struct RequestSpec<'a> {
+   method:        &'a Method,
+   uri:           &'a str,
+   extra_headers: &'a HeaderMap,
+   body:          &'a Bytes,
 }
 
 /// Browser-impersonating client with one connection pool per account.
@@ -680,8 +788,12 @@ pub struct HttpClient {
    direct_blocked_until: Arc<AtomicU64>,
    extra_headers:        HeaderMap,
    /// Keyed by session and exit so a direct client is never reused for the
-   /// fallback proxy.
-   sessions:             Arc<Mutex<HashMap<(i64, u64), primp::Client>>>,
+   /// fallback proxy. Sharded 64-way under `RwLock` so hot-path hits take only
+   /// a shared read lock on one shard.
+   sessions:             Arc<[SessionClientShard]>,
+   /// Round-robin cursor spreading `Purpose::Media` fetches across all healthy
+   /// primary proxy exits instead of funneling everything through exit 0.
+   media_rr:             Arc<AtomicUsize>,
    /// The cookies each account has been handed, sent back with its calls and
    /// replaced by every `set-cookie` an answer carries.
    cookies:              Option<Arc<Jar>>,
@@ -724,7 +836,11 @@ impl HttpClient {
          primary_pool: None,
          direct_blocked_until: Arc::new(AtomicU64::new(0)),
          extra_headers,
-         sessions: Arc::new(Mutex::new(HashMap::new())),
+         sessions: (0..SESSION_CLIENT_SHARDS)
+            .map(|_| RwLock::new(HashMap::new()))
+            .collect::<Vec<_>>()
+            .into(),
+         media_rr: Arc::new(AtomicUsize::new(0)),
          cookies: None,
       }
    }
@@ -774,17 +890,15 @@ impl HttpClient {
    /// Register all stable session exits so one Cloudflare 1015 can park only
    /// the affected port while requests continue through the healthy ports.
    #[must_use]
-   pub fn with_primary_proxies(mut self, mut proxies: Vec<ProxyConfig>) -> Self {
-      let mut tags = HashSet::new();
-      proxies.retain(|proxy| tags.insert(proxy_tag(Some(proxy))));
-      if !proxies.is_empty() {
+   pub fn with_primary_proxies(mut self, proxies: Vec<ProxyConfig>) -> Self {
+      let mut pool = PrimaryPool::new(proxies);
+      if !pool.proxies.is_empty() {
          tracing::info!(
-            exits = proxies.len(),
+            exits = pool.proxies.len(),
             first_cooldown_secs = EDGE_PARKING.first.as_secs(),
             max_cooldown_secs = EDGE_PARKING.max.as_secs(),
             "proxy exit circuit breaker ready"
          );
-         let mut pool = PrimaryPool::new(proxies, tags);
          if let Some(path) = banned_proxies_file() {
             pool.watch_banned_file(path.clone());
             let banned = pool.banned_ports();
@@ -935,6 +1049,10 @@ impl HttpClient {
       (owner, tag)
    }
 
+   fn session_shard(&self, key: (i64, u64)) -> &SessionClientShard {
+      &self.sessions[session_client_shard(key)]
+   }
+
    /// Drop the pooled connection for this account so the next call dials a
    /// new one. A wedged HTTP/2 session otherwise accepts the next stream and
    /// stalls it until the proxy resets it.
@@ -943,7 +1061,7 @@ impl HttpClient {
          return;
       };
       let key = self.client_key(egress);
-      if let Ok(mut clients) = self.sessions.lock() {
+      if let Ok(mut clients) = self.session_shard(key).write() {
          clients.remove(&key);
       }
    }
@@ -953,9 +1071,9 @@ impl HttpClient {
          return self.unowned_client();
       };
       let key = self.client_key(egress);
-      if let Some(client) = self
-         .sessions
-         .lock()
+      let shard = self.session_shard(key);
+      if let Some(client) = shard
+         .read()
          .ok()
          .and_then(|clients| clients.get(&key).cloned())
       {
@@ -976,26 +1094,43 @@ impl HttpClient {
          idle,
       )?;
       tracing::debug!(session_id = egress.session, %identity, "browser client built");
-      if let Ok(mut clients) = self.sessions.lock() {
+      if let Ok(mut clients) = shard.write() {
          clients.entry(key).or_insert_with(|| client.clone());
       }
       Ok(client)
    }
 
+   fn select_unowned_proxy(&self, pool: &PrimaryPool) -> Option<ProxyConfig> {
+      if self.purpose == Purpose::Media {
+         let start = self.media_rr.fetch_add(1, Ordering::Relaxed);
+         pool.round_robin_healthy(start).cloned()
+      } else {
+         pool.first_healthy().cloned()
+      }
+   }
+
    /// A client for a call that belongs to no account: a page bootstrap, a
-   /// script chunk, a probe. It still leaves through a proxy, the first
-   /// configured exit, so no fetch is ever made from this host's own address.
-   /// Without a configured pool there is nothing to route through and the
-   /// client built at startup is used.
+   /// script chunk, a probe, or a CDN media fetch. It still leaves through a
+   /// proxy so no fetch is ever made from this host's own address. Media
+   /// fetches round-robin across healthy exits; other unowned calls stay
+   /// deterministic on the first non-blocked exit.
    fn unowned_client(&self) -> Result<primp::Client> {
       let Some(pool) = self.primary_pool.as_ref() else {
          return Ok(self.default.clone());
       };
-      let proxy = pool.proxies.first().cloned();
-      let key = (0, proxy_tag(proxy.as_ref()));
-      if let Some(client) = self
-         .sessions
-         .lock()
+      let proxy = self.select_unowned_proxy(pool);
+      let tag = proxy_tag(proxy.as_ref());
+      let owner = if self.purpose == Purpose::Media {
+         proxy
+            .as_ref()
+            .map_or(0, |selected| -1_000_000 - i64::from(selected.port))
+      } else {
+         0
+      };
+      let key = (owner, tag);
+      let shard = self.session_shard(key);
+      if let Some(client) = shard
+         .read()
          .ok()
          .and_then(|clients| clients.get(&key).cloned())
       {
@@ -1009,7 +1144,7 @@ impl HttpClient {
          &self.extra_headers,
          POOL_PER_HOST,
       )?;
-      if let Ok(mut clients) = self.sessions.lock() {
+      if let Ok(mut clients) = shard.write() {
          clients.entry(key).or_insert_with(|| client.clone());
       }
       Ok(client)
@@ -1086,14 +1221,14 @@ impl HttpClient {
    /// Send a GET request.
    pub async fn get(&self, uri: &str) -> Result<Response> {
       self
-         .send_on(Method::GET, uri, &HeaderMap::new(), Bytes::new(), None)
+         .send_on(Method::GET, uri, &HeaderMap::new(), Bytes::new(), None, None)
          .await
    }
 
    /// Send a GET request with additional headers.
    pub async fn get_with_headers(&self, uri: &str, extra_headers: &HeaderMap) -> Result<Response> {
       self
-         .send_on(Method::GET, uri, extra_headers, Bytes::new(), None)
+         .send_on(Method::GET, uri, extra_headers, Bytes::new(), None, None)
          .await
    }
 
@@ -1105,7 +1240,28 @@ impl HttpClient {
       via: Option<&Egress>,
    ) -> Result<Response> {
       self
-         .send_on(Method::GET, uri, extra_headers, Bytes::new(), via)
+         .send_on(Method::GET, uri, extra_headers, Bytes::new(), via, None)
+         .await
+   }
+
+   /// GET as an account, through its pinned proxy, with an operation-aware
+   /// header stall deadline (`None` falls back to [`API_HEADER_DEADLINE`]).
+   pub async fn get_on_with_deadline(
+      &self,
+      uri: &str,
+      extra_headers: &HeaderMap,
+      via: Option<&Egress>,
+      header_deadline: Option<Duration>,
+   ) -> Result<Response> {
+      self
+         .send_on(
+            Method::GET,
+            uri,
+            extra_headers,
+            Bytes::new(),
+            via,
+            header_deadline,
+         )
          .await
    }
 
@@ -1117,7 +1273,7 @@ impl HttpClient {
       body: Bytes,
    ) -> Result<Response> {
       self
-         .send_on(Method::POST, uri, extra_headers, body, None)
+         .send_on(Method::POST, uri, extra_headers, body, None, None)
          .await
    }
 
@@ -1130,14 +1286,14 @@ impl HttpClient {
       via: Option<&Egress>,
    ) -> Result<Response> {
       self
-         .send_on(Method::POST, uri, extra_headers, body, via)
+         .send_on(Method::POST, uri, extra_headers, body, via, None)
          .await
    }
 
    /// Send a HEAD request.
    pub async fn head(&self, uri: &str) -> Result<Response> {
       self
-         .send_on(Method::HEAD, uri, &HeaderMap::new(), Bytes::new(), None)
+         .send_on(Method::HEAD, uri, &HeaderMap::new(), Bytes::new(), None, None)
          .await
    }
 
@@ -1148,6 +1304,7 @@ impl HttpClient {
       extra_headers: &HeaderMap,
       body: Bytes,
       via: Option<&Egress>,
+      header_deadline: Option<Duration>,
    ) -> Result<Response> {
       let direct = via.is_some_and(|egress| egress.proxy.is_none());
       let skip_direct = direct && self.has_fallback() && self.direct_is_blocked();
@@ -1164,10 +1321,14 @@ impl HttpClient {
          None
       };
       let first_via = routed.as_ref().or(via);
+      let spec = RequestSpec {
+         method: &method,
+         uri,
+         extra_headers,
+         body: &body,
+      };
 
-      let first = self
-         .dispatch(&method, uri, extra_headers, &body, first_via)
-         .await;
+      let first = self.dispatch(spec, first_via, header_deadline).await;
       self.note_answer(first_via, &first);
 
       // An HTML 429 is a per-IP Cloudflare block. Park this exact proxy port
@@ -1213,7 +1374,7 @@ impl HttpClient {
                "retrying through a healthy proxy exit"
             );
             let retry = self
-               .dispatch(&method, uri, extra_headers, &body, Some(&alternate))
+               .dispatch(spec, Some(&alternate), header_deadline)
                .await;
             self.note_answer(Some(&alternate), &retry);
             if matches!(&retry, Ok(response) if is_edge_block(response.status(), response.headers()))
@@ -1256,29 +1417,27 @@ impl HttpClient {
          session: via.expect("direct egress").session,
          proxy:   self.take_fallback(),
       };
-      self
-         .dispatch(&method, uri, extra_headers, &body, Some(&proxied))
-         .await
+      self.dispatch(spec, Some(&proxied), header_deadline).await
    }
 
    async fn dispatch(
       &self,
-      method: &Method,
-      uri: &str,
-      extra_headers: &HeaderMap,
-      body: &Bytes,
+      spec: RequestSpec<'_>,
       via: Option<&Egress>,
+      header_deadline: Option<Duration>,
    ) -> Result<Response> {
       let client = self.client_for(via)?;
-      let mut headers = extra_headers.clone();
+      let mut headers = spec.extra_headers.clone();
       if let (Some(jar), Some(egress)) = (self.cookies.as_ref(), via) {
          jar.merge_into(egress.session, &mut headers).await;
       }
       let send = || {
          async {
-            let mut request = client.request(method.clone(), uri).headers(headers.clone());
-            if !body.is_empty() {
-               request = request.body(body.clone());
+            let mut request = client
+               .request(spec.method.clone(), spec.uri)
+               .headers(headers.clone());
+            if !spec.body.is_empty() {
+               request = request.body(spec.body.clone());
             }
             let result = request.send().await;
             if let (Some(jar), Some(egress), Ok(response)) = (self.cookies.as_ref(), via, &result) {
@@ -1287,12 +1446,12 @@ impl HttpClient {
             result
          }
       };
-      if self.purpose == Purpose::Media && is_idempotent(method) {
+      if self.purpose == Purpose::Media && is_idempotent(spec.method) {
          let inner = match tokio::time::timeout(MEDIA_HEADER_DEADLINE, send()).await {
             Ok(Ok(inner)) => inner,
             Ok(Err(err)) if is_transport_blip(&err) || err.is_connect() => {
                tracing::warn!(
-                  uri = loggable(uri),
+                  uri = loggable(spec.uri),
                   error = %describe(err.without_url()),
                   "media fetch failed, retrying"
                );
@@ -1301,7 +1460,7 @@ impl HttpClient {
             Err(_elapsed) => {
                log_events::note(Event::MediaStall);
                tracing::debug!(
-                  uri = loggable(uri),
+                  uri = loggable(spec.uri),
                   "media headers stalled, opening a new connection"
                );
                send().await.map_err(describe)?
@@ -1311,10 +1470,11 @@ impl HttpClient {
          return Ok(Response { inner });
       }
 
-      if self.purpose == Purpose::Api && is_idempotent(method) {
+      if self.purpose == Purpose::Api && is_idempotent(spec.method) {
+         let deadline = header_deadline.unwrap_or(API_HEADER_DEADLINE);
          let probe = ExitProbe::start(self, via);
          let mut first = pin!(send());
-         let inner = match tokio::time::timeout(API_HEADER_DEADLINE, first.as_mut()).await {
+         let inner = match tokio::time::timeout(deadline, first.as_mut()).await {
             Ok(Ok(inner)) => {
                probe.answered();
                inner
@@ -1322,24 +1482,22 @@ impl HttpClient {
             Ok(Err(err)) if is_transport_blip(&err) || err.is_connect() => {
                probe.failed();
                tracing::warn!(
-                  uri = loggable(uri),
+                  uri = loggable(spec.uri),
                   error = %describe(err.without_url()),
                   "API connection failed, opening another"
                );
-               self
-                  .fresh_headers(method, uri, extra_headers, body, via)
-                  .await?
+               self.fresh_headers(spec, via).await?
             },
             Err(_elapsed) => {
                probe.failed();
                log_events::note(Event::HeaderStall);
                tracing::debug!(
-                  uri = loggable(uri),
+                  uri = loggable(spec.uri),
                   "API headers stalled, opening another connection"
                );
                // Boxed: the race holds a second request future, and only a
                // stall pays for it instead of every caller's future.
-               Box::pin(self.race_stalled(first, method, uri, extra_headers, body, via)).await?
+               Box::pin(self.race_stalled(first, spec, via, deadline)).await?
             },
             Ok(Err(err)) => {
                probe.failed();
@@ -1355,8 +1513,12 @@ impl HttpClient {
          // first write ("broken pipe", "connection reset") rather than with a
          // GOAWAY the client would retry itself. Safe to repeat for requests
          // that change nothing.
-         Err(err) if is_idempotent(method) && is_transport_blip(&err) => {
-            tracing::debug!(uri, "retrying after transport error: {}", describe(err));
+         Err(err) if is_idempotent(spec.method) && is_transport_blip(&err) => {
+            tracing::debug!(
+               uri = spec.uri,
+               "retrying after transport error: {}",
+               describe(err)
+            );
             send().await.map_err(describe)?
          },
          Err(err) => return Err(describe(err)),
@@ -1370,17 +1532,12 @@ impl HttpClient {
    /// retry for another header deadline.
    async fn fresh_headers(
       &self,
-      method: &Method,
-      uri: &str,
-      extra_headers: &HeaderMap,
-      body: &Bytes,
+      spec: RequestSpec<'_>,
       via: Option<&Egress>,
    ) -> Result<primp::Response> {
       self.retire(via);
       let alternate = via.and_then(|egress| self.alternate_primary(egress));
-      self
-         .send_fresh(method, uri, extra_headers, body, alternate.as_ref().or(via))
-         .await
+      self.send_fresh(spec, alternate.as_ref().or(via)).await
    }
 
    /// Headers are late on the first connection. Another connection gets one
@@ -1390,11 +1547,9 @@ impl HttpClient {
    async fn race_stalled<F>(
       &self,
       mut first: Pin<&mut F>,
-      method: &Method,
-      uri: &str,
-      extra_headers: &HeaderMap,
-      body: &Bytes,
+      spec: RequestSpec<'_>,
       via: Option<&Egress>,
+      header_deadline: Duration,
    ) -> Result<primp::Response>
    where
       F: Future<Output = primp::Result<primp::Response>>,
@@ -1406,8 +1561,7 @@ impl HttpClient {
          self.retire(via);
       }
       let race = async {
-         let mut fresh =
-            pin!(self.send_fresh(method, uri, extra_headers, body, alternate.as_ref().or(via),));
+         let mut fresh = pin!(self.send_fresh(spec, alternate.as_ref().or(via)));
          let (mut first_done, mut fresh_done) = (false, false);
          // A 5xx or an error is held in case the other side does no better.
          // A 5xx goes back up as a response, which callers retry elsewhere.
@@ -1420,7 +1574,7 @@ impl HttpClient {
                      Ok(inner) if !inner.status().is_server_error() => {
                         log_events::note(Event::LateHeaders);
                         tracing::debug!(
-                           uri = loggable(uri),
+                           uri = loggable(spec.uri),
                            "late headers arrived on the first connection"
                         );
                         return Ok(inner);
@@ -1455,7 +1609,7 @@ impl HttpClient {
          }
          fallback.unwrap_or_else(|| Err(Error::Internal("API headers stalled".into())))
       };
-      if let Ok(outcome) = tokio::time::timeout(API_HEADER_DEADLINE, race).await {
+      if let Ok(outcome) = tokio::time::timeout(header_deadline, race).await {
          return outcome;
       }
       self.retire(via);
@@ -1463,27 +1617,26 @@ impl HttpClient {
          self.retire(Some(alternate));
       }
       log_events::note(Event::StalledTwice);
-      tracing::debug!(uri = loggable(uri), "API headers stalled again");
+      tracing::debug!(uri = loggable(spec.uri), "API headers stalled again");
       Err(Error::Internal("API headers stalled".into()))
    }
 
    /// One request on the client for `retry_via`, counted against its exit.
    async fn send_fresh(
       &self,
-      method: &Method,
-      uri: &str,
-      extra_headers: &HeaderMap,
-      body: &Bytes,
+      spec: RequestSpec<'_>,
       retry_via: Option<&Egress>,
    ) -> Result<primp::Response> {
       let client = self.client_for(retry_via)?;
-      let mut headers = extra_headers.clone();
+      let mut headers = spec.extra_headers.clone();
       if let (Some(jar), Some(egress)) = (self.cookies.as_ref(), retry_via) {
          jar.merge_into(egress.session, &mut headers).await;
       }
-      let mut request = client.request(method.clone(), uri).headers(headers);
-      if !body.is_empty() {
-         request = request.body(body.clone());
+      let mut request = client
+         .request(spec.method.clone(), spec.uri)
+         .headers(headers);
+      if !spec.body.is_empty() {
+         request = request.body(spec.body.clone());
       }
       let probe = ExitProbe::start(self, retry_via);
       match request.send().await {
@@ -1648,9 +1801,9 @@ fn build_client(
    extra_headers: &HeaderMap,
    idle_per_host: usize,
 ) -> Result<primp::Client> {
-   // Images and video each get their own HTTP/1 connection, and none are
-   // kept afterwards. One shared HTTP/2 session to video.twimg.com was
-   // stalling every later fetch for seconds once the CDN had dropped it.
+   // Images and video use HTTP/1.1 with a short-lived idle pool: one shared
+   // HTTP/2 session to video.twimg.com stalls later fetches once the CDN drops
+   // it, while a small HTTP/1.1 pool reuses warm TLS+SOCKS handshakes.
    let media = purpose == Purpose::Media;
    let mut builder = primp::Client::builder()
       .impersonate(identity.profile())
@@ -1659,8 +1812,12 @@ fn build_client(
       .redirect(primp::redirect::Policy::none())
       .timeout(purpose.timeout())
       .read_timeout(BODY_IDLE_TIMEOUT)
-      .pool_idle_timeout(if media { Duration::from_secs(1) } else { POOL_IDLE })
-      .pool_max_idle_per_host(if media { 0 } else { idle_per_host })
+      .pool_idle_timeout(if media { MEDIA_POOL_IDLE } else { POOL_IDLE })
+      .pool_max_idle_per_host(if media {
+         MEDIA_POOL_PER_HOST
+      } else {
+         idle_per_host
+      })
       .http2_keep_alive_interval(KEEP_ALIVE_INTERVAL)
       .http2_keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
       .http2_keep_alive_while_idle(true)
@@ -2055,14 +2212,22 @@ impl Response {
 
    /// Collect the response body as bytes, rejecting oversized bodies.
    pub async fn bytes_limited(mut self, max_bytes: usize) -> Result<Bytes> {
-      if let Some(declared) = self.inner.content_length()
-         && usize::try_from(declared).is_ok_and(|declared| declared > max_bytes)
-      {
-         return Err(Error::Internal(format!(
-            "response body exceeded {max_bytes} bytes"
-         )));
-      }
-      let mut collected = Vec::new();
+      let initial_capacity = if let Some(declared) = self.inner.content_length() {
+         let Ok(declared) = usize::try_from(declared) else {
+            return Err(Error::Internal(format!(
+               "response body exceeded {max_bytes} bytes"
+            )));
+         };
+         if declared > max_bytes {
+            return Err(Error::Internal(format!(
+               "response body exceeded {max_bytes} bytes"
+            )));
+         }
+         declared.min(max_bytes)
+      } else {
+         DEFAULT_BODY_CAPACITY.min(max_bytes)
+      };
+      let mut collected = Vec::with_capacity(initial_capacity);
       while let Some(chunk) = self.inner.chunk().await.map_err(describe)? {
          if collected.len().saturating_add(chunk.len()) > max_bytes {
             return Err(Error::Internal(format!(
@@ -2262,10 +2427,7 @@ mod tests {
    #[test]
    fn an_exit_that_relapses_is_parked_longer() {
       let proxies = (10001..=10003).map(proxy_on).collect::<Vec<_>>();
-      let pool = PrimaryPool::new(
-         proxies.clone(),
-         proxies.iter().map(|proxy| proxy_tag(Some(proxy))).collect(),
-      );
+      let pool = PrimaryPool::new(proxies.clone());
       let tag = proxy_tag(Some(&proxies[0]));
       let now = unix_millis();
       let first = SLOW_PARKING.first;
@@ -2310,14 +2472,13 @@ mod tests {
    #[test]
    fn edge_and_slow_parkings_keep_separate_histories() {
       let proxies = (10001..=10003).map(proxy_on).collect::<Vec<_>>();
-      let pool = PrimaryPool::new(
-         proxies.clone(),
-         proxies.iter().map(|proxy| proxy_tag(Some(proxy))).collect(),
-      );
+      let pool = PrimaryPool::new(proxies.clone());
       let tag = proxy_tag(Some(&proxies[0]));
       assert_eq!(pool.park_slow(tag, unix_millis()), Some(SLOW_PARKING.first));
       // Out early by hand: a slow spell just before must not double this.
-      pool.blocked_until.lock().unwrap().clear();
+      for slot in &pool.slots {
+         slot.blocked_until.store(0, Ordering::Release);
+      }
       assert_eq!(pool.block(&proxies[0]), Some(EDGE_PARKING.first));
    }
 
@@ -2332,10 +2493,7 @@ mod tests {
       )
       .unwrap();
       let proxies = (10001..=10006).map(proxy_on).collect::<Vec<_>>();
-      let mut pool = PrimaryPool::new(
-         proxies.clone(),
-         proxies.iter().map(|proxy| proxy_tag(Some(proxy))).collect(),
-      );
+      let mut pool = PrimaryPool::new(proxies.clone());
       pool.watch_banned_file(path.clone());
       assert!(
          !pool.is_blocked(&proxies[0]),
@@ -2371,10 +2529,7 @@ mod tests {
       )
       .unwrap();
       let proxies = (10001..=10006).map(proxy_on).collect::<Vec<_>>();
-      let mut pool = PrimaryPool::new(
-         proxies.clone(),
-         proxies.iter().map(|proxy| proxy_tag(Some(proxy))).collect(),
-      );
+      let mut pool = PrimaryPool::new(proxies.clone());
       pool.watch_banned_file(path.clone());
       assert!(
          !pool.is_blocked(&proxies[0]),
@@ -2411,10 +2566,7 @@ mod tests {
    #[test]
    fn a_run_of_header_stalls_parks_briefly_and_leaves_the_rest_up() {
       let proxies = (10001..=10030).map(proxy_on).collect::<Vec<_>>();
-      let pool = PrimaryPool::new(
-         proxies.clone(),
-         proxies.iter().map(|proxy| proxy_tag(Some(proxy))).collect(),
-      );
+      let pool = PrimaryPool::new(proxies.clone());
       for proxy in &proxies {
          for _ in 0..20 {
             let _ = pool.record(proxy, true);
@@ -2456,7 +2608,11 @@ mod tests {
       let browsers: HashSet<String> = (1..=60)
          .map(|session| browser::identity_for(session).to_string())
          .collect();
-      let cached = client.sessions.lock().unwrap().len();
+      let cached: usize = client
+         .sessions
+         .iter()
+         .map(|shard| shard.read().unwrap().len())
+         .sum();
       assert!(
          cached <= browsers.len() * 2,
          "{cached} clients for {} browsers",
@@ -2749,5 +2905,65 @@ mod tests {
       shape_headers(&mut headers, Purpose::Api, &HeaderMap::new());
       assert!(headers.get("sec-fetch-mode").is_none());
       assert!(headers.get("sec-fetch-dest").is_none());
+   }
+
+   #[test]
+   fn media_unowned_client_round_robins_healthy_exits() {
+      let proxies = vec![proxy_on(10001), proxy_on(10002), proxy_on(10003)];
+      let media = HttpClient::new("", "", Purpose::Media).with_primary_proxies(proxies.clone());
+      let pool = media.primary_pool.as_ref().unwrap();
+      let ports: Vec<u16> = (0..6)
+         .map(|_| media.select_unowned_proxy(pool).unwrap().port)
+         .collect();
+      assert_eq!(ports, vec![10001, 10002, 10003, 10001, 10002, 10003]);
+
+      // Blocking exit 10002 skips it in media round-robin.
+      assert!(pool.block(&proxies[1]).is_some());
+      let healthy_ports: Vec<u16> = (0..4)
+         .map(|_| media.select_unowned_proxy(pool).unwrap().port)
+         .collect();
+      assert!(!healthy_ports.contains(&10002));
+      assert!(healthy_ports.contains(&10001));
+      assert!(healthy_ports.contains(&10003));
+
+      // When every exit is banned, media round-robin falls back to the first exit.
+      let all_banned = PrimaryPool::new(proxies.clone());
+      for proxy in &proxies {
+         assert!(all_banned.ban(proxy));
+      }
+      assert_eq!(all_banned.round_robin_healthy(2).unwrap().port, 10001);
+
+      // Non-media unowned clients stay deterministic on the first non-blocked exit.
+      let api = HttpClient::new("", "", Purpose::Api).with_primary_proxies(proxies.clone());
+      let api_pool = api.primary_pool.as_ref().unwrap();
+      assert_eq!(api.select_unowned_proxy(api_pool).unwrap().port, 10001);
+      assert!(api_pool.block(&proxies[0]).is_some());
+      assert_eq!(api.select_unowned_proxy(api_pool).unwrap().port, 10002);
+      assert_eq!(api.select_unowned_proxy(api_pool).unwrap().port, 10002);
+   }
+
+   #[tokio::test]
+   async fn get_on_with_deadline_uses_custom_header_deadline() {
+      let uri = delayed_server(vec![Duration::from_secs(10), Duration::ZERO]).await;
+      let client = HttpClient::new("", "", Purpose::Api);
+      let started = Instant::now();
+      let body = client
+         .get_on_with_deadline(
+            &uri,
+            &HeaderMap::new(),
+            None,
+            Some(Duration::from_millis(150)),
+         )
+         .await
+         .unwrap()
+         .text()
+         .await
+         .unwrap();
+      assert_eq!(body, "1");
+      assert!(
+         started.elapsed() < API_HEADER_DEADLINE,
+         "{:?}",
+         started.elapsed()
+      );
    }
 }

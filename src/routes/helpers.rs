@@ -5,7 +5,6 @@ use std::{
    iter,
    slice,
    sync::LazyLock,
-   time::Duration,
 };
 
 use axum::{
@@ -19,10 +18,7 @@ use axum::{
       Response,
    },
 };
-use tokio::{
-   sync::Semaphore,
-   time::timeout,
-};
+use tokio::sync::Semaphore;
 
 use crate::{
    AppState,
@@ -54,8 +50,6 @@ use crate::{
 /// Caps background profile prefetches so they cannot crowd out live pages.
 static PROFILE_PREFETCH: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(3));
 const PREFETCH_PROFILES: usize = 4;
-/// How long a page waits for its photo rail once everything else is in.
-const RAIL_GRACE: Duration = Duration::from_millis(60);
 
 #[derive(Clone)]
 struct CachedRss {
@@ -88,22 +82,26 @@ where
 
 /// Cached user, or a stub that only has `id` so tweets can start immediately.
 pub fn user_hint(state: &AppState, username: &str) -> Option<User> {
-   let key = cache_keys::user(username);
-   if let Some(Hit::Fresh(user) | Hit::Stale(user)) = state.cache.lookup(&key) {
-      return Some(user);
+   if state.cache.enabled() {
+      let key = cache_keys::user(username);
+      if let Some(Hit::Fresh(user) | Hit::Stale(user)) = state.cache.lookup(&key) {
+         return Some(user);
+      }
+      if let Some(id) = state.cache.get::<String>(&cache_keys::username_id(username)) {
+         return Some(User {
+            id,
+            username: username.to_owned(),
+            ..User::default()
+         });
+      }
    }
-   if let Some(id) = state
-      .cache
-      .get::<String>(&cache_keys::username_id(username))
-      .or_else(|| crate::cache::ids::get(username))
-   {
-      return Some(User {
+   crate::cache::ids::get(username).map(|id| {
+      User {
          id,
          username: username.to_owned(),
          ..User::default()
-      });
-   }
-   None
+      }
+   })
 }
 
 /// Persist the bidirectional id mapping. Does not overwrite a full user card.
@@ -112,6 +110,9 @@ pub fn remember_user_id(state: &AppState, user: &User) {
       return;
    }
    crate::cache::ids::remember(&user.username, &user.id);
+   if !state.cache.enabled() {
+      return;
+   }
    state.cache.set(
       &cache_keys::user_id(&user.id),
       &user.username,
@@ -275,8 +276,8 @@ pub async fn photo_rail(state: &AppState, username: &str, user_id: &str) -> Phot
    }
 }
 
-/// A page's main fetch, and the photo rail if it lands by then or within
-/// [`RAIL_GRACE`] after. The page is not held for a slow or stalled rail.
+/// A page's main fetch, and the photo rail if it has landed by then. The
+/// page is not held for a slow or stalled rail.
 pub fn beside_rail<T, M, R>(main: M, rail: R) -> impl Future<Output = (T, PhotoRail)>
 where
    M: Future<Output = T>,
@@ -294,11 +295,7 @@ where
             strip = &mut rail, if landed.is_none() => landed = Some(strip),
          }
       };
-      let strip = match landed {
-         Some(strip) => strip,
-         None => timeout(RAIL_GRACE, rail).await.unwrap_or_default(),
-      };
-      (value, strip)
+      (value, landed.unwrap_or_default())
    }
 }
 
@@ -409,13 +406,28 @@ where
       let fetched = fetch(user.id.clone()).await;
       return Ok((user, fetched));
    };
-   let (user, fetched) = tokio::join!(get_cached_user(state, username), fetch(id.clone()));
-   let user = user?;
-   if user.id == id {
-      return Ok((user, fetched));
-   }
-   let refetched = fetch(user.id.clone()).await;
-   Ok((user, refetched))
+   let reassigned_user = {
+      let mut user_fut = Box::pin(get_cached_user(state, username));
+      let mut fetch_fut = Box::pin(fetch(id.clone()));
+      tokio::select! {
+         user_res = &mut user_fut => {
+            let user = user_res?;
+            if user.id == id {
+               return Ok((user, fetch_fut.await));
+            }
+            user
+         },
+         fetched = &mut fetch_fut => {
+            let user = user_fut.await?;
+            if user.id == id {
+               return Ok((user, fetched));
+            }
+            user
+         },
+      }
+   };
+   let refetched = fetch(reassigned_user.id.clone()).await;
+   Ok((reassigned_user, refetched))
 }
 
 pub fn apply_context_to_user(user: &mut User, context: &AccountContext) {
@@ -821,11 +833,19 @@ mod tests {
    }
 
    #[tokio::test]
-   async fn a_rail_that_lands_first_or_just_after_is_kept() {
-      let (page, rail) = beside_rail(page_after(40), rail_after(5)).await;
-      assert_eq!((page, rail.len()), ("page", 1));
-      let (_, rail) = beside_rail(page_after(20), rail_after(30)).await;
-      assert_eq!(rail.len(), 1);
+   async fn a_rail_that_lands_first_is_kept_and_pending_is_dropped() {
+      let (fast_page, fast_rail) = beside_rail(page_after(40), rail_after(5)).await;
+      assert_eq!((fast_page, fast_rail.len()), ("page", 1));
+
+      let started = std::time::Instant::now();
+      let (slow_page, slow_rail) = beside_rail(page_after(10), rail_after(500)).await;
+      assert_eq!(slow_page, "page");
+      assert!(slow_rail.is_empty());
+      assert!(
+         started.elapsed() < Duration::from_millis(250),
+         "{:?}",
+         started.elapsed()
+      );
    }
 
    #[tokio::test]

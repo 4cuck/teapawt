@@ -210,6 +210,15 @@ pub struct ConversationData {
    pub threaded_conversation_with_injections_v2: Option<TimelineInstructions>,
 }
 
+// ── Tweet results by rest IDs (get_tweets_by_ids) ──
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct TweetResultsByRestIdsData {
+   #[serde(rename = "tweetResult", alias = "tweet_results")]
+   pub tweet_result: Vec<NestedResult<TweetData>>,
+}
+
 // ── List timeline (get_list_tweets) ──
 
 #[derive(Deserialize, Default)]

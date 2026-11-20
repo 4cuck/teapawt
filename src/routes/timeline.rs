@@ -1,6 +1,7 @@
 use std::cmp;
 
 use axum::{
+   Extension,
    Router,
    extract::{
       Path,
@@ -23,6 +24,7 @@ use serde::Deserialize;
 
 use super::{
    admin_stats,
+   agents::WantsMarkdown,
    helpers,
    helpers::extract_timeline,
    search::{
@@ -128,7 +130,11 @@ fn profile_json_ld(user: &crate::types::User, page_url: &str, image: &str) -> ma
    }
 }
 
-async fn load_first_profile(state: &AppState, username: &str) -> Result<Profile> {
+async fn load_first_profile(
+   state: &AppState,
+   username: &str,
+   skip_rail: bool,
+) -> Result<Profile> {
    let cache_key = cache_keys::profile(username);
    match state.cache.lookup::<Profile>(&cache_key) {
       Some(Hit::Fresh(profile)) => {
@@ -152,7 +158,7 @@ async fn load_first_profile(state: &AppState, username: &str) -> Result<Profile>
       None => {},
    }
 
-   match fetch_profile(state, username).await {
+   match fetch_profile(state, username, skip_rail).await {
       Ok(profile) => Ok(profile),
       Err(err) if err.is_upstream_limit() => state.cache.recall(&cache_key).ok_or(err),
       Err(err) => Err(err),
@@ -171,9 +177,17 @@ async fn refresh_profile(state: &AppState, username: &str) {
    }
 }
 
-async fn fetch_profile(state: &AppState, username: &str) -> Result<Profile> {
+async fn fetch_profile(
+   state: &AppState,
+   username: &str,
+   skip_rail: bool,
+) -> Result<Profile> {
    let hint = helpers::user_hint(state, username);
-   let rail = helpers::cached_photo_rail(state, username);
+   let rail = if skip_rail {
+      Some(Vec::new())
+   } else {
+      helpers::cached_photo_rail(state, username)
+   };
    let mut open = state
       .api
       .get_profile_hinted(username, None, hint.as_ref(), rail)
@@ -316,6 +330,10 @@ pub fn router() -> Router<AppState> {
       )
 }
 
+#[expect(
+   clippy::too_many_arguments,
+   reason = "filtered posts coordinates route identity, cursor, sort, scroll mode, and photo rail"
+)]
 async fn filtered_posts(
    state: &AppState,
    prefs: &Prefs,
@@ -324,6 +342,7 @@ async fn filtered_posts(
    filter: &'static str,
    sort: &'static str,
    is_scroll: bool,
+   include_photo_rail: bool,
 ) -> Result<Response> {
    if is_scroll {
       let user_id = helpers::user_id(state, username).await?;
@@ -352,10 +371,10 @@ async fn filtered_posts(
    let (user, (timeline_result, photo_rail)) = helpers::with_user(state, username, |user_id| {
       async move {
          let posts = filtered_timeline(state, username, &user_id, cursor, filter, sort);
-         if cursor.is_some() {
-            (posts.await, Vec::new())
-         } else {
+         if include_photo_rail && cursor.is_none() {
             helpers::beside_rail(posts, helpers::photo_rail(state, username, &user_id)).await
+         } else {
+            (posts.await, Vec::new())
          }
       }
    })
@@ -490,6 +509,7 @@ fn counts_promise_posts(user: &User, tab: TimelineKind, filter: &str) -> bool {
 async fn user_timeline(
    State(state): State<AppState>,
    jar: CookieJar,
+   wants_markdown: Option<Extension<WantsMarkdown>>,
    Path(username): Path<String>,
    Query(query): Query<TimelineQuery>,
 ) -> Result<Response> {
@@ -531,6 +551,7 @@ async fn user_timeline(
          filter,
          sort,
          is_scroll,
+         wants_markdown.is_none(),
       )
       .await;
    }
@@ -559,10 +580,11 @@ async fn user_timeline(
       };
    }
 
+   let skip_rail = is_scroll || wants_markdown.is_some();
    let profile_result = if let Some(cursor) = query.cursor.as_deref() {
       load_profile_cursor(&state, &username, cursor).await
    } else {
-      load_first_profile(&state, &username).await
+      load_first_profile(&state, &username, skip_rail).await
    };
 
    match profile_result {
@@ -872,6 +894,7 @@ async fn fetch_tab(
 async fn user_replies(
    State(state): State<AppState>,
    jar: CookieJar,
+   wants_markdown: Option<Extension<WantsMarkdown>>,
    Path(username): Path<String>,
    Query(query): Query<TimelineQuery>,
 ) -> Result<Response> {
@@ -883,7 +906,7 @@ async fn user_replies(
       &username,
       query.cursor.as_deref(),
       TimelineKind::Replies,
-      true,
+      wants_markdown.is_none(),
       "",
       is_scroll,
    )
@@ -893,6 +916,7 @@ async fn user_replies(
 async fn user_reposts(
    State(state): State<AppState>,
    jar: CookieJar,
+   wants_markdown: Option<Extension<WantsMarkdown>>,
    Path(username): Path<String>,
    Query(query): Query<TimelineQuery>,
 ) -> Result<Response> {
@@ -904,7 +928,7 @@ async fn user_reposts(
       &username,
       query.cursor.as_deref(),
       TimelineKind::Reposts,
-      true,
+      wants_markdown.is_none(),
       "",
       is_scroll,
    )
@@ -914,6 +938,7 @@ async fn user_reposts(
 async fn user_articles(
    State(state): State<AppState>,
    jar: CookieJar,
+   wants_markdown: Option<Extension<WantsMarkdown>>,
    Path(username): Path<String>,
    Query(query): Query<TimelineQuery>,
 ) -> Result<Response> {
@@ -925,7 +950,7 @@ async fn user_articles(
       &username,
       query.cursor.as_deref(),
       TimelineKind::Articles,
-      true,
+      wants_markdown.is_none(),
       "",
       is_scroll,
    )
@@ -957,15 +982,24 @@ async fn user_media(
 async fn user_search_submit(
    State(state): State<AppState>,
    jar: CookieJar,
+   wants_markdown: Option<Extension<WantsMarkdown>>,
    Path(username): Path<String>,
    axum::Form(query): axum::Form<SearchQuery>,
 ) -> Result<Response> {
-   user_search(State(state), jar, Path(username), Query(query)).await
+   user_search(
+      State(state),
+      jar,
+      wants_markdown,
+      Path(username),
+      Query(query),
+   )
+   .await
 }
 
 async fn user_search(
    State(state): State<AppState>,
    jar: CookieJar,
+   wants_markdown: Option<Extension<WantsMarkdown>>,
    Path(username): Path<String>,
    Query(query): Query<SearchQuery>,
 ) -> Result<Response> {
@@ -1042,35 +1076,36 @@ async fn user_search(
    // The photo rail runs beside the search so a slow `UserMedia` call never
    // holds up the search results.
    let (state_ref, name) = (&state, username.as_str());
-   let ((user_res, search_result), photo_rail) = if query.cursor.is_some() {
-      (
-         tokio::join!(
-            helpers::get_cached_user(state_ref, name),
-            state
-               .api
-               .search(&api_query, query.cursor.as_deref(), "Latest"),
-         ),
-         Vec::new(),
-      )
-   } else {
-      helpers::beside_rail(
-         async {
+   let ((user_res, search_result), photo_rail) =
+      if query.cursor.is_some() || wants_markdown.is_some() {
+         (
             tokio::join!(
                helpers::get_cached_user(state_ref, name),
                state
                   .api
                   .search(&api_query, query.cursor.as_deref(), "Latest"),
-            )
-         },
-         async {
-            match helpers::user_id(state_ref, name).await {
-               Ok(user_id) => helpers::photo_rail(state_ref, name, &user_id).await,
-               Err(_) => Vec::new(),
-            }
-         },
-      )
-      .await
-   };
+            ),
+            Vec::new(),
+         )
+      } else {
+         helpers::beside_rail(
+            async {
+               tokio::join!(
+                  helpers::get_cached_user(state_ref, name),
+                  state
+                     .api
+                     .search(&api_query, query.cursor.as_deref(), "Latest"),
+               )
+            },
+            async {
+               match helpers::user_id(state_ref, name).await {
+                  Ok(user_id) => helpers::photo_rail(state_ref, name, &user_id).await,
+                  Err(_) => Vec::new(),
+               }
+            },
+         )
+         .await
+      };
    let user = user_res?;
 
    match search_result {

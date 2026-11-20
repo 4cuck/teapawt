@@ -93,12 +93,19 @@ async fn render(
    let prefs = Prefs::from_cookies(&jar, &state.config);
    let cursor = cleaned_cursor(query.cursor);
    let is_scroll = query.scroll.as_deref() == Some("true");
-   let feed = match load_explore(state, slug, cursor.as_deref()).await {
+   let (feed_res, games) = if slug == "sports" && !is_scroll {
+      tokio::join!(
+         load_explore(state, slug, cursor.as_deref()),
+         super::game::sports_games(state),
+      )
+   } else {
+      (load_explore(state, slug, cursor.as_deref()).await, Vec::new())
+   };
+   let mut feed = match feed_res {
       Ok(feed) => feed,
       Err(err) => return Ok(helpers::api_error_titled(&state.config, &err, "Explore")),
    };
    let continuation = cursor.is_some();
-   let mut feed = feed;
    // A cursor that comes back with no rows is the end of a finite list.
    // Leaving it in place makes infinite scroll ask for pages that will not exist.
    if feed.items.is_empty() {
@@ -124,11 +131,6 @@ async fn render(
       return Ok(Html(fragment.into_string()).into_response());
    }
 
-   let games = if slug == "sports" {
-      super::game::sports_games(state).await
-   } else {
-      Vec::new()
-   };
    let content = explore_view::render_explore_page(
       &feed,
       &tabs,

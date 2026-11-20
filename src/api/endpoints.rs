@@ -1,5 +1,11 @@
 /// Twitter/X API constants and endpoints.
+use std::{
+   borrow::Cow,
+   sync::LazyLock,
+};
+
 use data_encoding::BASE64;
+use serde::Deserialize;
 use serde_json::json;
 
 pub const CONSUMER_KEY: &str = "3nVuSoBZnx6U4vzUxf5w";
@@ -115,6 +121,62 @@ pub const LIST_SEARCH_FEATURES: &str = SEARCH_FEATURES;
 /// Features sent with `ListByRestId` when a list page opens.
 pub const LIST_BY_ID_FEATURES: &str = r#"{"profile_label_improvements_pcf_label_in_post_enabled":true,"responsive_web_profile_redirect_enabled":true,"rweb_tipjar_consumption_enabled":false,"verified_phone_label_enabled":false,"responsive_web_graphql_timeline_navigation_enabled":true}"#;
 pub const TWEET_DETAIL_FIELD_TOGGLES: &str = r#"{"withPayments":false,"withDmBlocks":false,"withArticleRichContentState":true,"withArticlePlainText":false,"withArticleSummaryText":true,"withArticleVoiceOver":true,"withGrokAnalyze":false,"withDisallowedReplyControls":false}"#;
+
+fn encode_query_value(raw: &str) -> String {
+   form_urlencoded::byte_serialize(raw.as_bytes()).collect()
+}
+
+static ENCODED_USER_FIELD_TOGGLES: LazyLock<String> =
+   LazyLock::new(|| encode_query_value(USER_FIELD_TOGGLES));
+static ENCODED_USER_TWEETS_FIELD_TOGGLES: LazyLock<String> =
+   LazyLock::new(|| encode_query_value(USER_TWEETS_FIELD_TOGGLES));
+static ENCODED_USER_REPOSTS_FIELD_TOGGLES: LazyLock<String> =
+   LazyLock::new(|| encode_query_value(USER_REPOSTS_FIELD_TOGGLES));
+static ENCODED_USER_ARTICLES_FIELD_TOGGLES: LazyLock<String> =
+   LazyLock::new(|| encode_query_value(USER_ARTICLES_FIELD_TOGGLES));
+static ENCODED_TWEET_DETAIL_FIELD_TOGGLES: LazyLock<String> =
+   LazyLock::new(|| encode_query_value(TWEET_DETAIL_FIELD_TOGGLES));
+static ENCODED_TWEET_RESULTS_TOGGLES: LazyLock<String> =
+   LazyLock::new(|| encode_query_value(TWEET_RESULTS_TOGGLES));
+
+static ENCODED_GQL_FEATURES: LazyLock<String> =
+   LazyLock::new(|| encode_query_value(GQL_FEATURES));
+static ENCODED_USER_REPOSTS_FEATURES: LazyLock<String> =
+   LazyLock::new(|| encode_query_value(USER_REPOSTS_FEATURES));
+static ENCODED_EXPLORE_FEATURES: LazyLock<String> =
+   LazyLock::new(|| encode_query_value(EXPLORE_FEATURES));
+static ENCODED_TWEET_RESULTS_FEATURES: LazyLock<String> =
+   LazyLock::new(|| encode_query_value(TWEET_RESULTS_FEATURES));
+static ENCODED_LIST_BY_ID_FEATURES: LazyLock<String> =
+   LazyLock::new(|| encode_query_value(LIST_BY_ID_FEATURES));
+
+/// Percent-encoded query value for `fieldToggles`, reusing pre-encoded strings
+/// for all compile-time constants.
+pub fn encoded_field_toggles(raw: &str) -> Cow<'static, str> {
+   match raw {
+      USER_FIELD_TOGGLES => Cow::Borrowed(ENCODED_USER_FIELD_TOGGLES.as_str()),
+      USER_TWEETS_FIELD_TOGGLES => Cow::Borrowed(ENCODED_USER_TWEETS_FIELD_TOGGLES.as_str()),
+      USER_REPOSTS_FIELD_TOGGLES => Cow::Borrowed(ENCODED_USER_REPOSTS_FIELD_TOGGLES.as_str()),
+      USER_ARTICLES_FIELD_TOGGLES => Cow::Borrowed(ENCODED_USER_ARTICLES_FIELD_TOGGLES.as_str()),
+      TWEET_DETAIL_FIELD_TOGGLES => Cow::Borrowed(ENCODED_TWEET_DETAIL_FIELD_TOGGLES.as_str()),
+      TWEET_RESULTS_TOGGLES => Cow::Borrowed(ENCODED_TWEET_RESULTS_TOGGLES.as_str()),
+      _ => Cow::Owned(encode_query_value(raw)),
+   }
+}
+
+/// Percent-encoded query value for compiled `features`, reusing pre-encoded
+/// strings for all known static feature sets.
+pub fn encoded_features(raw: &str) -> Cow<'static, str> {
+   match raw {
+      "{}" => Cow::Borrowed("%7B%7D"),
+      GQL_FEATURES => Cow::Borrowed(ENCODED_GQL_FEATURES.as_str()),
+      USER_REPOSTS_FEATURES => Cow::Borrowed(ENCODED_USER_REPOSTS_FEATURES.as_str()),
+      EXPLORE_FEATURES => Cow::Borrowed(ENCODED_EXPLORE_FEATURES.as_str()),
+      TWEET_RESULTS_FEATURES => Cow::Borrowed(ENCODED_TWEET_RESULTS_FEATURES.as_str()),
+      LIST_BY_ID_FEATURES => Cow::Borrowed(ENCODED_LIST_BY_ID_FEATURES.as_str()),
+      _ => Cow::Owned(encode_query_value(raw)),
+   }
+}
 
 // ── Helper ──────────────────────────────────────────────────────────────
 
@@ -416,15 +478,43 @@ const URI_COMPONENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHAN
    .remove(b'(')
    .remove(b')');
 
+#[derive(Deserialize)]
+struct SearchRefVars<'a> {
+   #[serde(borrow, rename = "rawQuery")]
+   raw_query: Option<Cow<'a, str>>,
+   #[serde(borrow)]
+   product:   Option<Cow<'a, str>>,
+}
+
+#[derive(Deserialize)]
+struct ExploreRefVars<'a> {
+   #[serde(borrow, rename = "timelineId")]
+   timeline_id: Option<Cow<'a, str>>,
+}
+
+#[derive(Deserialize)]
+struct TrendRefVars<'a> {
+   #[serde(borrow, rename = "trendId")]
+   trend_id: Option<Cow<'a, str>>,
+}
+
+#[derive(Deserialize)]
+struct GameRefVars<'a> {
+   #[serde(borrow)]
+   rest_id: Option<Cow<'a, str>>,
+   #[serde(borrow, rename = "gameId")]
+   game_id: Option<Cow<'a, str>>,
+}
+
 /// The search page a `SearchTimeline` call is made from, which Chrome sends
 /// as its referer. Other operations keep the client's default referer.
 pub fn search_referer(endpoint: &str, variables: &str) -> Option<String> {
    if !endpoint.ends_with("/SearchTimeline") {
       return None;
    }
-   let variables: serde_json::Value = serde_json::from_str(variables).ok()?;
-   let query = variables.get("rawQuery")?.as_str()?;
-   let tab = match variables.get("product")?.as_str()? {
+   let parsed: SearchRefVars<'_> = serde_json::from_str(variables).ok()?;
+   let query = parsed.raw_query.as_deref()?;
+   let tab = match parsed.product.as_deref()? {
       "Latest" => "&f=live",
       "People" => "&f=user",
       "Media" => "&f=media",
@@ -446,8 +536,8 @@ pub fn explore_referer(endpoint: &str, variables: &str) -> Option<String> {
    if !endpoint.ends_with("/GenericTimelineById") {
       return None;
    }
-   let variables: serde_json::Value = serde_json::from_str(variables).ok()?;
-   let id = variables.get("timelineId")?.as_str()?;
+   let parsed: ExploreRefVars<'_> = serde_json::from_str(variables).ok()?;
+   let id = parsed.timeline_id.as_deref()?;
    let name = explore_timeline_name(id)?;
    if name == "for_you" {
       Some("https://x.com/explore".to_owned())
@@ -462,8 +552,8 @@ pub fn trend_referer(endpoint: &str, variables: &str) -> Option<String> {
    if !endpoint.ends_with("/AiTrendByRestId") {
       return None;
    }
-   let variables: serde_json::Value = serde_json::from_str(variables).ok()?;
-   let id = variables.get("trendId")?.as_str()?;
+   let parsed: TrendRefVars<'_> = serde_json::from_str(variables).ok()?;
+   let id = parsed.trend_id.as_deref()?;
    Some(format!("https://x.com/i/trending/{id}"))
 }
 
@@ -476,11 +566,11 @@ pub fn game_referer(endpoint: &str, variables: &str) -> Option<String> {
    if !game_call {
       return None;
    }
-   let variables: serde_json::Value = serde_json::from_str(variables).ok()?;
-   let id = variables
-      .get("rest_id")
-      .or_else(|| variables.get("gameId"))
-      .and_then(serde_json::Value::as_str)
+   let parsed: GameRefVars<'_> = serde_json::from_str(variables).ok()?;
+   let id = parsed
+      .rest_id
+      .as_deref()
+      .or(parsed.game_id.as_deref())
       .unwrap_or("2055084502741811200");
    Some(format!("https://x.com/i/nfl/game/{id}?page=highlights"))
 }
@@ -609,6 +699,64 @@ mod tests {
             .get("cursor")
             .is_none()
       );
+   }
+
+   #[test]
+   fn referers_handle_escaped_strings_and_game_and_trend_ids() {
+      let escaped = search_vars(r#"hello "world""#, None, "Latest");
+      assert_eq!(
+         search_referer("x/SearchTimeline", &escaped).as_deref(),
+         Some("https://x.com/search?q=hello%20%22world%22&src=typed_query&f=live")
+      );
+      assert_eq!(
+         trend_referer("x/AiTrendByRestId", &ai_trend_vars("12345")).as_deref(),
+         Some("https://x.com/i/trending/12345")
+      );
+      assert_eq!(
+         game_referer("x/NFLGameHydrate", &nfl_game_vars("98765")).as_deref(),
+         Some("https://x.com/i/nfl/game/98765?page=highlights")
+      );
+      assert_eq!(
+         game_referer("x/SportsGameTopTimeline", &sports_game_top_vars("54321")).as_deref(),
+         Some("https://x.com/i/nfl/game/54321?page=highlights")
+      );
+      assert_eq!(
+         game_referer("x/NFLSchedule", &nfl_schedule_vars()).as_deref(),
+         Some("https://x.com/i/nfl/game/2055084502741811200?page=highlights")
+      );
+   }
+
+   #[test]
+   fn pre_encoded_toggles_and_features_match_form_urlencoded() {
+      for toggles in [
+         USER_FIELD_TOGGLES,
+         USER_TWEETS_FIELD_TOGGLES,
+         USER_REPOSTS_FIELD_TOGGLES,
+         USER_ARTICLES_FIELD_TOGGLES,
+         TWEET_DETAIL_FIELD_TOGGLES,
+         TWEET_RESULTS_TOGGLES,
+      ] {
+         let encoded = encoded_field_toggles(toggles);
+         assert!(matches!(encoded, Cow::Borrowed(_)));
+         let mut qs = form_urlencoded::Serializer::new(String::new());
+         qs.append_pair("fieldToggles", toggles);
+         assert_eq!(format!("fieldToggles={encoded}"), qs.finish());
+      }
+
+      for features in [
+         "{}",
+         GQL_FEATURES,
+         USER_REPOSTS_FEATURES,
+         EXPLORE_FEATURES,
+         TWEET_RESULTS_FEATURES,
+         LIST_BY_ID_FEATURES,
+      ] {
+         let encoded = encoded_features(features);
+         assert!(matches!(encoded, Cow::Borrowed(_)));
+         let mut qs = form_urlencoded::Serializer::new(String::new());
+         qs.append_pair("features", features);
+         assert_eq!(format!("features={encoded}"), qs.finish());
+      }
    }
 }
 

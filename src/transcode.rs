@@ -41,7 +41,7 @@ impl GifTranscoder {
          cache,
          http_client,
          cache_dir: PathBuf::from(config.cache_dir),
-         semaphore: Semaphore::new(64),
+         semaphore: Semaphore::new(8),
          inflight: Mutex::new(HashMap::new()),
       })
    }
@@ -104,9 +104,8 @@ impl GifTranscoder {
    async fn do_transcode(&self, mp4_url: &str, hash: &str) -> eyre::Result<PathBuf> {
       let cache_dir = &self.cache_dir;
       let input = cache_dir.join(format!("{hash}.mp4.tmp"));
-      let palette = cache_dir.join(format!("{hash}.palette.png"));
       let output = cache_dir.join(format!("{hash}.gif.tmp"));
-      let _temp_files = TempFiles(vec![input.clone(), palette.clone(), output.clone()]);
+      let _temp_files = TempFiles(vec![input.clone(), output.clone()]);
 
       // Fetch MP4
       let response = self
@@ -125,44 +124,24 @@ impl GifTranscoder {
          .map_err(|err| eyre::eyre!("Failed to read MP4 body: {err}"))?;
       fs::write(&input, &bytes).await?;
 
-      // Pass 1: generate palette
-      let mut palette_command = Command::new("ffmpeg");
-      palette_command
-         .kill_on_drop(true)
-         .args([
-            "-loglevel",
-            "error",
-            "-i",
-            &input.to_string_lossy(),
-            "-vf",
-            "fps=15,scale=480:-1:flags=lanczos,palettegen=stats_mode=diff",
-            "-y",
-            &palette.to_string_lossy(),
-         ])
-         .stdout(Stdio::null())
-         .stderr(Stdio::piped());
-      let palette_out = timeout(FFMPEG_TIMEOUT, palette_command.output())
-         .await
-         .map_err(|_| eyre::eyre!("ffmpeg palettegen timed out"))??;
-
-      if !palette_out.status.success() {
-         let stderr = String::from_utf8_lossy(&palette_out.stderr);
-         return Err(eyre::eyre!("ffmpeg palettegen failed: {stderr}"));
-      }
-
-      // Pass 2: generate GIF with palette
+      // Single-pass palette generation + GIF encode
       let mut gif_command = Command::new("ffmpeg");
       gif_command
          .kill_on_drop(true)
          .args([
             "-loglevel",
             "error",
+            "-threads",
+            "2",
             "-i",
             &input.to_string_lossy(),
-            "-i",
-            &palette.to_string_lossy(),
-            "-lavfi",
-            "fps=15,scale=480:-1:flags=lanczos [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=5",
+            "-filter_complex_threads",
+            "2",
+            "-filter_complex",
+            "[0:v]fps=15,scale=480:-1:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];\
+             [b][p]paletteuse=dither=bayer:bayer_scale=5",
+            "-threads",
+            "2",
             "-f",
             "gif",
             "-y",
@@ -172,11 +151,11 @@ impl GifTranscoder {
          .stderr(Stdio::piped());
       let gif_out = timeout(FFMPEG_TIMEOUT, gif_command.output())
          .await
-         .map_err(|_| eyre::eyre!("ffmpeg paletteuse timed out"))??;
+         .map_err(|_| eyre::eyre!("ffmpeg gif transcode timed out"))??;
 
       if !gif_out.status.success() {
          let stderr = String::from_utf8_lossy(&gif_out.stderr);
-         return Err(eyre::eyre!("ffmpeg paletteuse failed: {stderr}"));
+         return Err(eyre::eyre!("ffmpeg gif transcode failed: {stderr}"));
       }
 
       // Read the output GIF and insert into cache

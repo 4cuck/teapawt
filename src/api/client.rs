@@ -1,6 +1,9 @@
 use std::{
+   borrow::Cow,
    collections::HashMap,
+   fmt,
    iter,
+   result::Result as StdResult,
    sync::{
       Arc,
       Mutex as StdMutex,
@@ -78,6 +81,7 @@ use crate::{
          RetweetersData,
          SearchTimelineData,
          TweetData,
+         TweetResultsByRestIdsData,
          UserResultData,
          UserTimelineData,
       },
@@ -179,25 +183,107 @@ fn search_query_of(variables: &str) -> String {
       .unwrap_or_default()
 }
 
+enum WireStr<'a> {
+   Borrowed(&'a str),
+   Shared(Arc<str>),
+   Owned(String),
+}
+
+impl WireStr<'_> {
+   fn as_str(&self) -> &str {
+      match self {
+         Self::Borrowed(value) => value,
+         Self::Shared(value) => value,
+         Self::Owned(value) => value,
+      }
+   }
+}
+
+struct WireOp<'a> {
+   path:             WireStr<'a>,
+   features:         WireStr<'a>,
+   encoded_features: WireStr<'a>,
+}
+
+fn graphql_get_url(
+   base_url: &str,
+   path: &str,
+   variables: &str,
+   encoded_features: &str,
+   field_toggles: Option<&str>,
+) -> String {
+   let encoded_toggles = field_toggles.map(endpoints::encoded_field_toggles);
+   let toggles_len = encoded_toggles
+      .as_deref()
+      .map_or(0, |toggles| "&fieldToggles=".len() + toggles.len());
+   let mut url = String::with_capacity(
+      base_url.len()
+         + 1
+         + path.len()
+         + "?variables=".len()
+         + variables.len().saturating_mul(2)
+         + "&features=".len()
+         + encoded_features.len()
+         + toggles_len,
+   );
+   url.push_str(base_url);
+   url.push('/');
+   url.push_str(path);
+   url.push_str("?variables=");
+   for chunk in form_urlencoded::byte_serialize(variables.as_bytes()) {
+      url.push_str(chunk);
+   }
+   url.push_str("&features=");
+   url.push_str(encoded_features);
+   if let Some(ref toggles) = encoded_toggles {
+      url.push_str("&fieldToggles=");
+      url.push_str(toggles);
+   }
+   url
+}
+
+fn validate_json_object<'a>(field: &str, input: &'a str) -> Result<&'a str> {
+   let trimmed = input.trim();
+   if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+      return Err(Error::Internal(format!(
+         "graphql {field}: expected JSON object"
+      )));
+   }
+   serde_json::from_str::<serde::de::IgnoredAny>(input)
+      .map_err(|err| Error::Internal(format!("graphql {field}: {err}")))?;
+   Ok(trimmed)
+}
+
 fn graphql_post_body(
    variables: &str,
    features: &str,
    field_toggles: Option<&str>,
 ) -> Result<Bytes> {
-   let parse = |field, input| {
-      serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(input)
-         .map(serde_json::Value::Object)
-         .map_err(|err| Error::Internal(format!("graphql {field}: {err}")))
-   };
-   let mut payload = serde_json::Map::new();
-   payload.insert("variables".into(), parse("variables", variables)?);
-   payload.insert("features".into(), parse("features", features)?);
+   let variables = validate_json_object("variables", variables)?;
+   let features = validate_json_object("features", features)?;
+   let field_toggles = field_toggles
+      .map(|toggles| validate_json_object("fieldToggles", toggles))
+      .transpose()?;
+
+   let toggles_len = field_toggles.map_or(0, |toggles| r#","fieldToggles":"#.len() + toggles.len());
+   let mut out = Vec::with_capacity(
+      r#"{"variables":"#.len()
+         + variables.len()
+         + r#","features":"#.len()
+         + features.len()
+         + toggles_len
+         + 1,
+   );
+   out.extend_from_slice(br#"{"variables":"#);
+   out.extend_from_slice(variables.as_bytes());
+   out.extend_from_slice(br#","features":"#);
+   out.extend_from_slice(features.as_bytes());
    if let Some(toggles) = field_toggles {
-      payload.insert("fieldToggles".into(), parse("fieldToggles", toggles)?);
+      out.extend_from_slice(br#","fieldToggles":"#);
+      out.extend_from_slice(toggles.as_bytes());
    }
-   serde_json::to_vec(&payload)
-      .map(Bytes::from)
-      .map_err(|err| Error::Internal(format!("graphql body: {err}")))
+   out.push(b'}');
+   Ok(Bytes::from(out))
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -226,39 +312,233 @@ fn is_session_error(err: &ApiError) -> bool {
    )
 }
 
-fn value_has_search_results(value: &serde_json::Value) -> bool {
-   match value {
-      serde_json::Value::Object(map) => {
-         if map.contains_key("tweet_results")
-            || map.contains_key("user_results")
-            || map.get("list").is_some_and(serde_json::Value::is_object)
-         {
-            return true;
+enum SearchDataField {
+   Result,
+   List,
+   Other,
+}
+
+impl<'de> Deserialize<'de> for SearchDataField {
+   fn deserialize<D>(deserializer: D) -> StdResult<Self, D::Error>
+   where
+      D: serde::Deserializer<'de>,
+   {
+      deserializer.deserialize_str(SearchDataFieldVisitor)
+   }
+}
+
+struct SearchDataFieldVisitor;
+
+#[expect(
+   clippy::missing_trait_methods,
+   reason = "serde Visitor defaults reject non-string keys"
+)]
+impl serde::de::Visitor<'_> for SearchDataFieldVisitor {
+   type Value = SearchDataField;
+
+   fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+      formatter.write_str("a JSON object key")
+   }
+
+   fn visit_str<E>(self, value: &str) -> StdResult<SearchDataField, E>
+   where
+      E: serde::de::Error,
+   {
+      Ok(match value {
+         "tweet_results" | "user_results" => SearchDataField::Result,
+         "list" => SearchDataField::List,
+         _ => SearchDataField::Other,
+      })
+   }
+}
+
+/// Streaming zero-allocation scanner that succeeds iff a JSON value under
+/// `"data"` contains no `tweet_results`, `user_results`, or `"list": { ... }`.
+/// Returns an error immediately to short-circuit as soon as a result is seen.
+struct SearchScan {
+   reject_object: bool,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for SearchScan {
+   type Value = ();
+
+   fn deserialize<D>(self, deserializer: D) -> StdResult<(), D::Error>
+   where
+      D: serde::Deserializer<'de>,
+   {
+      deserializer.deserialize_any(self)
+   }
+}
+
+#[expect(
+   clippy::missing_trait_methods,
+   reason = "serde Visitor defaults handle unused scalar types"
+)]
+impl<'de> serde::de::Visitor<'de> for SearchScan {
+   type Value = ();
+
+   fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+      formatter.write_str("a JSON value")
+   }
+
+   fn visit_bool<E>(self, _value: bool) -> StdResult<(), E>
+   where
+      E: serde::de::Error,
+   {
+      Ok(())
+   }
+
+   fn visit_i64<E>(self, _value: i64) -> StdResult<(), E>
+   where
+      E: serde::de::Error,
+   {
+      Ok(())
+   }
+
+   fn visit_u64<E>(self, _value: u64) -> StdResult<(), E>
+   where
+      E: serde::de::Error,
+   {
+      Ok(())
+   }
+
+   fn visit_f64<E>(self, _value: f64) -> StdResult<(), E>
+   where
+      E: serde::de::Error,
+   {
+      Ok(())
+   }
+
+   fn visit_str<E>(self, _value: &str) -> StdResult<(), E>
+   where
+      E: serde::de::Error,
+   {
+      Ok(())
+   }
+
+   fn visit_unit<E>(self) -> StdResult<(), E>
+   where
+      E: serde::de::Error,
+   {
+      Ok(())
+   }
+
+   fn visit_seq<A>(self, mut seq: A) -> StdResult<(), A::Error>
+   where
+      A: serde::de::SeqAccess<'de>,
+   {
+      while seq
+         .next_element_seed(Self {
+            reject_object: false,
+         })?
+         .is_some()
+      {}
+      Ok(())
+   }
+
+   fn visit_map<A>(self, mut map: A) -> StdResult<(), A::Error>
+   where
+      A: serde::de::MapAccess<'de>,
+   {
+      if self.reject_object {
+         return Err(serde::de::Error::custom("found"));
+      }
+      while let Some(field) = map.next_key::<SearchDataField>()? {
+         match field {
+            SearchDataField::Result => return Err(serde::de::Error::custom("found")),
+            SearchDataField::List => {
+               map.next_value_seed(Self {
+                  reject_object: true,
+               })?;
+            },
+            SearchDataField::Other => {
+               map.next_value_seed(Self {
+                  reject_object: false,
+               })?;
+            },
          }
-         map.values().any(value_has_search_results)
-      },
-      serde_json::Value::Array(items) => items.iter().any(value_has_search_results),
-      serde_json::Value::Null
-      | serde_json::Value::Bool(_)
-      | serde_json::Value::Number(_)
-      | serde_json::Value::String(_) => false,
+      }
+      Ok(())
+   }
+}
+
+struct SearchRootKey(bool);
+
+impl<'de> Deserialize<'de> for SearchRootKey {
+   fn deserialize<D>(deserializer: D) -> StdResult<Self, D::Error>
+   where
+      D: serde::Deserializer<'de>,
+   {
+      deserializer.deserialize_str(SearchRootKeyVisitor).map(Self)
+   }
+}
+
+struct SearchRootKeyVisitor;
+
+#[expect(
+   clippy::missing_trait_methods,
+   reason = "serde Visitor defaults reject non-string keys"
+)]
+impl serde::de::Visitor<'_> for SearchRootKeyVisitor {
+   type Value = bool;
+
+   fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+      formatter.write_str("a JSON object key")
+   }
+
+   fn visit_str<E>(self, value: &str) -> StdResult<bool, E>
+   where
+      E: serde::de::Error,
+   {
+      Ok(value == "data")
+   }
+}
+
+struct SearchRoot;
+
+impl<'de> Deserialize<'de> for SearchRoot {
+   fn deserialize<D>(deserializer: D) -> StdResult<Self, D::Error>
+   where
+      D: serde::Deserializer<'de>,
+   {
+      deserializer.deserialize_map(SearchRootVisitor)
+   }
+}
+
+struct SearchRootVisitor;
+
+#[expect(
+   clippy::missing_trait_methods,
+   reason = "serde Visitor defaults reject non-object roots"
+)]
+impl<'de> serde::de::Visitor<'de> for SearchRootVisitor {
+   type Value = SearchRoot;
+
+   fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+      formatter.write_str("a GraphQL response object")
+   }
+
+   fn visit_map<A>(self, mut map: A) -> StdResult<SearchRoot, A::Error>
+   where
+      A: serde::de::MapAccess<'de>,
+   {
+      while let Some(SearchRootKey(is_data)) = map.next_key()? {
+         if is_data {
+            map.next_value_seed(SearchScan {
+               reject_object: false,
+            })?;
+         } else {
+            map.next_value::<serde::de::IgnoredAny>()?;
+         }
+      }
+      Ok(SearchRoot)
    }
 }
 
 /// A decoded search page with no tweet, user, or list results is inconclusive
 /// about account health.
 pub(super) fn search_answer_is_empty(bytes: &[u8]) -> bool {
-   #[derive(Deserialize)]
-   struct SearchBody {
-      data: Option<serde_json::Value>,
-   }
-   let Ok(body) = serde_json::from_slice::<SearchBody>(bytes) else {
-      return false;
-   };
-   let Some(data) = body.data else {
-      return true;
-   };
-   !value_has_search_results(&data)
+   serde_json::from_slice::<SearchRoot>(bytes).is_ok()
 }
 
 /// X's own message when it failed a search on its side: `search_timeline`
@@ -615,7 +895,79 @@ fn auxiliary_endpoints_use_settings_suspension_probe() {
    assert!(!is_settings_probe_endpoint(endpoints::GRAPH_USER_TWEETS));
 }
 
-type InflightMap = StdMutex<HashMap<String, watch::Sender<Option<bytes::Bytes>>>>;
+const INFLIGHT_SHARDS: usize = 64;
+
+type InflightShard = StdMutex<HashMap<String, watch::Sender<Option<bytes::Bytes>>>>;
+
+fn inflight_shard_index(key: &str) -> usize {
+   let mut hash = 0xCBF2_9CE4_8422_2325_u64;
+   for byte in key.as_bytes() {
+      hash ^= u64::from(*byte);
+      hash = hash.wrapping_mul(0x100_0000_01B3);
+   }
+   let mixed = (hash ^ (hash >> 33)).wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+   usize::try_from((mixed >> 58) % (INFLIGHT_SHARDS as u64)).unwrap_or(0)
+}
+
+struct InflightCoalescer {
+   shards: Box<[InflightShard]>,
+}
+
+impl InflightCoalescer {
+   fn new() -> Self {
+      let shards = iter::repeat_with(|| StdMutex::new(HashMap::new()))
+         .take(INFLIGHT_SHARDS)
+         .collect::<Vec<_>>()
+         .into_boxed_slice();
+      Self { shards }
+   }
+
+   fn join_or_lead(self: &Arc<Self>, key: String) -> InflightTicket {
+      let shard_index = inflight_shard_index(&key);
+      let mut map = self.shards[shard_index]
+         .lock()
+         .unwrap_or_else(std::sync::PoisonError::into_inner);
+      if let Some(tx) = map.get(&key) {
+         let rx = tx.subscribe();
+         drop(map);
+         return InflightTicket::Follower(rx);
+      }
+      let (tx, _rx) = watch::channel(None);
+      map.insert(key.clone(), tx.clone());
+      drop(map);
+      InflightTicket::Leader(InflightGuard {
+         coalescer: Arc::clone(self),
+         shard_index,
+         key,
+         tx: Some(tx),
+      })
+   }
+
+   fn remove_at(&self, shard_index: usize, key: &str) {
+      if let Ok(mut map) = self.shards[shard_index].lock() {
+         map.remove(key);
+      }
+   }
+
+   #[cfg(test)]
+   fn len(&self) -> usize {
+      self
+         .shards
+         .iter()
+         .map(|shard| {
+            shard
+               .lock()
+               .unwrap_or_else(std::sync::PoisonError::into_inner)
+               .len()
+         })
+         .sum()
+   }
+
+   #[cfg(test)]
+   fn is_empty(&self) -> bool {
+      self.len() == 0
+   }
+}
 
 pub(super) enum InflightTicket {
    Leader(InflightGuard),
@@ -623,16 +975,15 @@ pub(super) enum InflightTicket {
 }
 
 pub(super) struct InflightGuard {
-   map: Arc<InflightMap>,
-   key: String,
-   tx:  Option<watch::Sender<Option<bytes::Bytes>>>,
+   coalescer:   Arc<InflightCoalescer>,
+   shard_index: usize,
+   key:         String,
+   tx:          Option<watch::Sender<Option<bytes::Bytes>>>,
 }
 
 impl InflightGuard {
    pub(super) fn complete(mut self, bytes: bytes::Bytes) {
-      if let Ok(mut map) = self.map.lock() {
-         map.remove(&self.key);
-      }
+      self.coalescer.remove_at(self.shard_index, &self.key);
       if let Some(tx) = self.tx.take() {
          let _ = tx.send(Some(bytes));
       }
@@ -641,10 +992,8 @@ impl InflightGuard {
 
 impl Drop for InflightGuard {
    fn drop(&mut self) {
-      if self.tx.is_some()
-         && let Ok(mut map) = self.map.lock()
-      {
-         map.remove(&self.key);
+      if self.tx.is_some() {
+         self.coalescer.remove_at(self.shard_index, &self.key);
       }
    }
 }
@@ -671,7 +1020,7 @@ pub struct ApiClient {
    pressure:            Arc<Pressure>,
    /// Coalesces identical concurrent in-flight GraphQL calls; entries live
    /// only while the upstream request is in flight and are removed on drop.
-   inflight:            Arc<InflightMap>,
+   inflight:            Arc<InflightCoalescer>,
    telemetry:           Option<crate::stats::StatsStore>,
    pub(crate) cookies:  Arc<Jar>,
    /// Set when accounts arrive through `/import`, so their filters are turned
@@ -765,7 +1114,7 @@ impl ApiClient {
             config.anti_ddos.sustained_minutes,
             config.anti_ddos.flood_hold_minutes,
          )),
-         inflight: Arc::new(StdMutex::new(HashMap::new())),
+         inflight: Arc::new(InflightCoalescer::new()),
          telemetry: None,
          cookies,
          filter_wakeup,
@@ -981,21 +1330,7 @@ impl ApiClient {
    }
 
    pub(super) fn join_or_lead(&self, key: String) -> InflightTicket {
-      let mut map = self
-         .inflight
-         .lock()
-         .unwrap_or_else(std::sync::PoisonError::into_inner);
-      if let Some(tx) = map.get(&key) {
-         return InflightTicket::Follower(tx.subscribe());
-      }
-      let (tx, _rx) = watch::channel(None);
-      map.insert(key.clone(), tx.clone());
-      drop(map);
-      InflightTicket::Leader(InflightGuard {
-         map: Arc::clone(&self.inflight),
-         key,
-         tx: Some(tx),
-      })
+      self.inflight.join_or_lead(key)
    }
 
    pub(super) fn parse_coalesced<T>(bytes: &[u8]) -> Result<T>
@@ -1304,9 +1639,17 @@ impl ApiClient {
       // An ambiguous search 404 quarantines its account. Only generic
       // transient failures can retry after refreshing the operation ID.
       if session.kind == SessionKind::Cookie && matches!(last, Err(Error::TransientUpstream)) {
-         let before = self.wire_operation(&session, endpoint, features).await.0;
+         let before = self
+            .wire_operation(&session, endpoint, features)
+            .path
+            .as_str()
+            .to_owned();
          self.tid.recheck_operations().await;
-         let after = self.wire_operation(&session, endpoint, features).await.0;
+         let after = self
+            .wire_operation(&session, endpoint, features)
+            .path
+            .as_str()
+            .to_owned();
          if after != before {
             tracing::info!(
                from = %before,
@@ -1351,7 +1694,11 @@ impl ApiClient {
             .timed_attempt(session, endpoint, variables, features, field_toggles)
             .await;
       }
-      let delay = self.latency.hedge_delay(endpoint);
+      let Some(delay) = self.latency.hedge_delay(endpoint) else {
+         return self
+            .timed_attempt(session, endpoint, variables, features, field_toggles)
+            .await;
+      };
       // Boxed: two request futures side by side would double the size of
       // every handler future that awaits this one.
       let mut first =
@@ -1554,8 +1901,8 @@ impl ApiClient {
       T: DeserializeOwned,
    {
       let sent_tid = self.tid_enabled && session.kind == SessionKind::Cookie;
-      let wire = self.wire_operation(session, endpoint, features).await;
-      let path = format!("/i/api/graphql/{}", wire.0);
+      let wire = self.wire_operation(session, endpoint, features);
+      let path = format!("/i/api/graphql/{}", wire.path.as_str());
       // POST endpoints carry the method in the TID signature; key the refusal
       // cache on the actual method so a stale GET entry never suppresses a TID
       // on a POST request.
@@ -1603,18 +1950,30 @@ impl ApiClient {
    /// session is the web client, so it sends the web client's current id and
    /// features once they have been read; until then, and for OAuth sessions,
    /// the compiled ones go out.
-   async fn wire_operation(
+   fn wire_operation<'a>(
       &self,
       session: &SessionLease,
-      endpoint: &str,
-      features: &str,
-   ) -> (String, String) {
+      endpoint: &'a str,
+      features: &'a str,
+   ) -> WireOp<'a> {
       if session.kind == SessionKind::Cookie
-         && let Some(live) = self.operations.resolve(endpoint).await
+         && let Some(live) = self.operations.resolve(endpoint)
       {
-         return live;
+         return WireOp {
+            path:             WireStr::Shared(live.path),
+            features:         WireStr::Shared(live.features),
+            encoded_features: WireStr::Shared(live.encoded_features),
+         };
       }
-      (endpoint.to_owned(), features.to_owned())
+      let encoded_features = match endpoints::encoded_features(features) {
+         Cow::Borrowed(value) => WireStr::Borrowed(value),
+         Cow::Owned(value) => WireStr::Owned(value),
+      };
+      WireOp {
+         path: WireStr::Borrowed(endpoint),
+         features: WireStr::Borrowed(features),
+         encoded_features,
+      }
    }
 
    /// One request. `endpoint` keys the session's rate-limit bookkeeping and
@@ -1623,7 +1982,7 @@ impl ApiClient {
       &self,
       session: &SessionLease,
       endpoint: &str,
-      wire: &(String, String),
+      wire: &WireOp<'_>,
       variables: &str,
       field_toggles: Option<&str>,
       with_tid: bool,
@@ -1631,7 +1990,8 @@ impl ApiClient {
    where
       T: DeserializeOwned,
    {
-      let (path, features) = (wire.0.as_str(), wire.1.as_str());
+      let path = wire.path.as_str();
+      let features = wire.features.as_str();
       let base_url = match session.kind {
          SessionKind::OAuth => endpoints::API_URL,
          SessionKind::Cookie => endpoints::GRAPHQL_URL,
@@ -1646,16 +2006,16 @@ impl ApiClient {
             graphql_post_body(variables, features, field_toggles)?,
          )
       } else {
-         let url = {
-            let mut qs = form_urlencoded::Serializer::new(String::new());
-            qs.append_pair("variables", variables);
-            qs.append_pair("features", features);
-            if let Some(toggles) = field_toggles {
-               qs.append_pair("fieldToggles", toggles);
-            }
-            format!("{base_url}/{path}?{}", qs.finish())
-         };
-         (url, Bytes::new())
+         (
+            graphql_get_url(
+               base_url,
+               path,
+               variables,
+               wire.encoded_features.as_str(),
+               field_toggles,
+            ),
+            Bytes::new(),
+         )
       };
       let headers = self
          .graphql_headers(
@@ -1684,7 +2044,12 @@ impl ApiClient {
       } else {
          match self
             .client
-            .get_on(&url, &headers, Some(&self.egress_for(session)))
+            .get_on_with_deadline(
+               &url,
+               &headers,
+               Some(&self.egress_for(session)),
+               Some(self.latency.header_deadline(endpoint)),
+            )
             .await
          {
             Ok(response) => response,
@@ -2430,6 +2795,41 @@ mod tests {
       assert_eq!(payload["fieldToggles"], serde_json::json!({"extra": false}));
       assert!(graphql_post_body(variables, "[]", None).is_err());
       assert!(graphql_post_body(variables, features, Some("null")).is_err());
+      assert!(graphql_post_body("{}{}", features, None).is_err());
+      assert!(graphql_post_body("{bad}", features, None).is_err());
+   }
+
+   #[test]
+   fn graphql_get_url_matches_form_urlencoded_serializer() {
+      let variables = r##"{"rawQuery":"cats & dogs #かんぱに","count":20}"##;
+      let features = endpoints::GQL_FEATURES;
+      let encoded_features = endpoints::encoded_features(features);
+      for toggles in [
+         None,
+         Some(endpoints::TWEET_DETAIL_FIELD_TOGGLES),
+         Some(r#"{"custom":true}"#),
+      ] {
+         let built = graphql_get_url(
+            endpoints::GRAPHQL_URL,
+            endpoints::GRAPH_TWEET_DETAIL,
+            variables,
+            &encoded_features,
+            toggles,
+         );
+         let mut qs = form_urlencoded::Serializer::new(String::new());
+         qs.append_pair("variables", variables);
+         qs.append_pair("features", features);
+         if let Some(raw_toggles) = toggles {
+            qs.append_pair("fieldToggles", raw_toggles);
+         }
+         let expected = format!(
+            "{}/{}?{}",
+            endpoints::GRAPHQL_URL,
+            endpoints::GRAPH_TWEET_DETAIL,
+            qs.finish()
+         );
+         assert_eq!(built, expected);
+      }
    }
 
    #[tokio::test]
@@ -2632,7 +3032,16 @@ mod tests {
       assert!(!search_answer_is_empty(
          br#"{"data":{"search_by_raw_query":{"search_timeline":{"timeline":{"instructions":[{"entries":[{"content":{"items":[{"item":{"itemContent":{"list":{"id_str":"7","name":"News"}}}}]}}]}}]}}}}}"#
       ));
+      assert!(search_answer_is_empty(br#"{"data":{"list":null}}"#));
+      assert!(search_answer_is_empty(br#"{"data":{"list":"x"}}"#));
+      assert!(!search_answer_is_empty(
+         br#"{"data":{"list":[{"tweet_results":{}}]}}"#
+      ));
+      assert!(search_answer_is_empty(
+         br#"{"errors":[{"tweet_results":{}}],"data":null}"#
+      ));
       assert!(!search_answer_is_empty(b"not json"));
+      assert!(!search_answer_is_empty(b"[]"));
    }
 
    #[test]
@@ -2785,22 +3194,22 @@ mod tests {
 
    #[tokio::test]
    async fn inflight_coalescing_shares_payload_and_leaves_nothing_stored() {
-      let map: Arc<InflightMap> = Arc::new(StdMutex::new(HashMap::new()));
+      let coalescer = Arc::new(InflightCoalescer::new());
       let key = ApiClient::inflight_key("x/TweetDetail", r#"{"focalTweetId":"1"}"#, None);
 
-      let (tx, _rx) = watch::channel(None);
-      map.lock().unwrap().insert(key.clone(), tx.clone());
-      let guard = InflightGuard {
-         map: Arc::clone(&map),
-         key: key.clone(),
-         tx:  Some(tx),
+      let guard = match coalescer.join_or_lead(key.clone()) {
+         InflightTicket::Leader(guard) => guard,
+         InflightTicket::Follower(_) => unreachable!("first caller should lead"),
       };
-      let mut follower = map.lock().unwrap().get(&key).unwrap().subscribe();
-      assert_eq!(map.lock().unwrap().len(), 1);
+      let mut follower = match coalescer.join_or_lead(key) {
+         InflightTicket::Follower(rx) => rx,
+         InflightTicket::Leader(_) => unreachable!("second caller should follow"),
+      };
+      assert_eq!(coalescer.len(), 1);
 
       guard.complete(bytes::Bytes::from_static(b"{\"data\":{\"ok\":true}}"));
       assert!(
-         map.lock().unwrap().is_empty(),
+         coalescer.is_empty(),
          "completed request must not stay stored in memory"
       );
 

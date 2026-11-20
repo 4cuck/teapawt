@@ -44,6 +44,7 @@ use super::{
    Timeline,
    Translation,
    Tweet,
+   TweetResultsByRestIdsData,
    User,
    UserResultData,
    UserTimelineData,
@@ -321,13 +322,17 @@ enum MediaInner {
 
 impl Drop for MediaFetch {
    fn drop(&mut self) {
-      if let Some(MediaInner::Flying(handle)) = self.inner.take() {
-         handle.abort();
-      }
+      self.cancel();
    }
 }
 
 impl MediaFetch {
+   fn cancel(&mut self) {
+      if let Some(MediaInner::Flying(handle)) = self.inner.take() {
+         handle.abort();
+      }
+   }
+
    fn start(api: &ApiClient, user_id: &str, given: Option<PhotoRail>) -> Self {
       let inner = match given {
          Some(rail) => Some(MediaInner::Given(rail)),
@@ -371,6 +376,69 @@ fn poll_join<T>(
 #[must_use]
 const fn user_has_no_timeline_posts(user: &User) -> bool {
    user.tweets == 0 && user.media == 0 && user.pinned_tweet == 0 && !user.has_highlights
+}
+
+enum HintedOutcome<T> {
+   /// Profile needs no timeline fetch (protected, suspended, or empty first page).
+   UserOnly(Box<User>),
+   /// User resolved with the hinted numeric id and the timeline completed.
+   Matched {
+      user:   Box<User>,
+      tweets: Box<Result<T>>,
+   },
+   /// Handle now resolves to a different numeric id than hinted.
+   Reassigned(Box<User>),
+}
+
+fn resolve_hinted_user(user_res: Result<User>, known_full: Option<&User>) -> Result<User> {
+   match user_res {
+      Ok(user) => Ok(user),
+      Err(err) => known_full.cloned().ok_or(err),
+   }
+}
+
+async fn race_hinted_user<T, U, F, M>(
+   hinted_id: &str,
+   known_full: Option<&User>,
+   skip_empty_timeline: bool,
+   user_fut: U,
+   tweets_fut: F,
+   on_no_media: M,
+) -> Result<HintedOutcome<T>>
+where
+   T: Send,
+   U: Future<Output = Result<User>> + Send,
+   F: Future<Output = Result<T>> + Send,
+   M: FnOnce() + Send,
+{
+   let mut user_fut = Box::pin(user_fut);
+   let mut tweets_fut = Box::pin(tweets_fut);
+   let (user_res, landed_tweets) = tokio::select! {
+      user_res = &mut user_fut => (user_res, None),
+      tweets_res = &mut tweets_fut => (user_fut.await, Some(tweets_res)),
+   };
+
+   let user = resolve_hinted_user(user_res, known_full)?;
+   if user.protected
+      || user.suspended
+      || (skip_empty_timeline && user_has_no_timeline_posts(&user))
+   {
+      return Ok(HintedOutcome::UserOnly(Box::new(user)));
+   }
+   if user.id != hinted_id {
+      return Ok(HintedOutcome::Reassigned(Box::new(user)));
+   }
+   if skip_empty_timeline && user.media == 0 {
+      on_no_media();
+   }
+   let tweets = match landed_tweets {
+      Some(tweets_res) => tweets_res,
+      None => tweets_fut.await,
+   };
+   Ok(HintedOutcome::Matched {
+      user:   Box::new(user),
+      tweets: Box::new(tweets),
+   })
 }
 
 fn profile_from_parts(user: User, tweets: Timeline, rail: Rail) -> Profile {
@@ -550,13 +618,47 @@ impl ApiClient {
       parser::edit_history::parse_edit_history(&data)
    }
 
+   /// Lightweight single-tweet lookup via `TweetResultsByRestIds`.
+   ///
+   /// Returns `None` if the request errors or X omits/tombstones the tweet, so
+   /// [`Self::get_tweet`] falls back to `TweetDetail` for authoritative status.
+   async fn fetch_tweet_by_rest_id(&self, tweet_id: &str) -> Option<Tweet> {
+      let ids = [tweet_id.to_owned()];
+      let data = self
+         .graphql_request::<TweetResultsByRestIdsData>(
+            endpoints::GRAPH_TWEETS_BY_IDS,
+            &endpoints::tweets_by_ids_vars(&ids),
+            endpoints::TWEET_RESULTS_FEATURES,
+            Some(endpoints::TWEET_RESULTS_TOGGLES),
+         )
+         .await
+         .ok()?;
+      let raw = data
+         .tweet_result
+         .iter()
+         .find_map(|nested| nested.result.as_deref())?;
+      let tweet_data = raw.tweet.as_deref().unwrap_or(raw);
+      let mut parsed = parser::parse_tweet_object(tweet_data).ok()?;
+      if !parsed.available || parsed.id <= 0 {
+         return None;
+      }
+      if let Ok(article) = parser::parse_article(tweet_data) {
+         parser::attach_article_preview(&mut parsed, &article);
+      }
+      Some(parsed)
+   }
+
    /// Get tweet by ID.
    ///
-   /// Uses the `TweetDetail` endpoint (same as conversation) because
-   /// `TweetResultByIdQuery` returns 404 for many tweets, but extracts the
-   /// focal tweet directly instead of parsing the reply chains.
+   /// Tries `TweetResultsByRestIds` first to avoid hydrating the reply tree,
+   /// falling back to `TweetDetail` when the tweet is unavailable or omitted.
    pub async fn get_tweet(&self, tweet_id: &str) -> Result<Tweet> {
       snowflake(tweet_id)?;
+      if let Some(mut tweet) = self.fetch_tweet_by_rest_id(tweet_id).await {
+         self.enrich_audio_space_card(&mut tweet).await;
+         self.enrich_broadcast_card(&mut tweet).await;
+         return Ok(tweet);
+      }
       let data = self
          .graphql_request::<ConversationData>(
             endpoints::GRAPH_TWEET_DETAIL,
@@ -1080,68 +1182,9 @@ impl ApiClient {
          .filter(|id| !id.is_empty());
 
       if let Some(id) = known_id {
-         if cursor.is_none() {
-            if let Some(known_user) = known.filter(|user| {
-               !user.fullname.is_empty()
-                  && !user.protected
-                  && !user.suspended
-                  && user_has_no_timeline_posts(user)
-            }) {
-               return Ok(OpenProfile::ready(profile_from_parts(
-                  known_user.clone(),
-                  Timeline::default(),
-                  Rail::Given(Vec::new()),
-               )));
-            }
-            let media = MediaFetch::start(self, id, rail);
-            let (user_res, tweets_res) =
-               tokio::join!(self.get_user(screen_name), self.get_user_tweets(id, None),);
-            let user = match user_res {
-               Ok(user) => user,
-               Err(err) => {
-                  known
-                     .filter(|user| !user.fullname.is_empty())
-                     .cloned()
-                     .ok_or(err)?
-               },
-            };
-            if user.protected || user.suspended {
-               return Ok(OpenProfile::ready(Profile {
-                  user,
-                  ..Profile::default()
-               }));
-            }
-            let tweets = tweets_res?;
-            let (rail, media) = media.take_ready();
-            return Ok(OpenProfile {
-               profile: profile_from_parts(user, tweets, rail),
-               media,
-            });
-         }
-
-         let known_user = known.filter(|user| !user.fullname.is_empty()).cloned();
-         let (user_res, tweets_res) = tokio::join!(
-            async {
-               if let Some(user) = known_user {
-                  Ok(user)
-               } else {
-                  self.get_user(screen_name).await
-               }
-            },
-            self.get_user_tweets(id, cursor),
-         );
-         let user = user_res?;
-         if user.protected || user.suspended {
-            return Ok(OpenProfile::ready(Profile {
-               user,
-               ..Profile::default()
-            }));
-         }
-         return Ok(OpenProfile::ready(profile_from_parts(
-            user,
-            tweets_res?,
-            Rail::None,
-         )));
+         return self
+            .get_profile_with_hint(screen_name, cursor, id, known, rail)
+            .await;
       }
 
       let user = self.get_user(screen_name).await?;
@@ -1159,16 +1202,16 @@ impl ApiClient {
          )));
       }
 
-      let (tweets, rail, media) = if cursor.is_none() {
-         let rail = if rail.is_none() && user.media == 0 && user.tweets > 0 {
+      let (tweets, resolved_rail, pending_media) = if cursor.is_none() {
+         let rail = if rail.is_none() && user.media == 0 {
             Some(Vec::new())
          } else {
             rail
          };
          let media = MediaFetch::start(self, &user.id, rail);
          let tweets = self.get_user_tweets(&user.id, None).await?;
-         let (rail, media) = media.take_ready();
-         (tweets, rail, media)
+         let (resolved_rail, pending_media) = media.take_ready();
+         (tweets, resolved_rail, pending_media)
       } else {
          (
             self.get_user_tweets(&user.id, cursor).await?,
@@ -1178,9 +1221,124 @@ impl ApiClient {
       };
 
       Ok(OpenProfile {
-         profile: profile_from_parts(user, tweets, rail),
-         media,
+         profile: profile_from_parts(user, tweets, resolved_rail),
+         media:   pending_media,
       })
+   }
+
+   async fn get_profile_with_hint(
+      &self,
+      screen_name: &str,
+      cursor: Option<&str>,
+      id: &str,
+      known: Option<&User>,
+      rail: Option<PhotoRail>,
+   ) -> Result<OpenProfile> {
+      let known_full = known.filter(|user| !user.fullname.is_empty());
+
+      if cursor.is_none() {
+         if let Some(known_user) = known_full.filter(|user| {
+            !user.protected && !user.suspended && user_has_no_timeline_posts(user)
+         }) {
+            return Ok(OpenProfile::ready(profile_from_parts(
+               known_user.clone(),
+               Timeline::default(),
+               Rail::Given(Vec::new()),
+            )));
+         }
+         let want_media = rail.is_none();
+         let mut media = MediaFetch::start(self, id, rail);
+         let outcome = race_hinted_user(
+            id,
+            known_full,
+            true,
+            self.get_user(screen_name),
+            self.get_user_tweets(id, None),
+            || media.cancel(),
+         )
+         .await?;
+         return match outcome {
+            HintedOutcome::UserOnly(user) => {
+               media.cancel();
+               Ok(OpenProfile::ready(profile_from_parts(
+                  *user,
+                  Timeline::default(),
+                  Rail::Given(Vec::new()),
+               )))
+            },
+            HintedOutcome::Matched { user, tweets } => {
+               let tweets = (*tweets)?;
+               let (resolved_rail, pending_media) = media.take_ready();
+               Ok(OpenProfile {
+                  profile: profile_from_parts(*user, tweets, resolved_rail),
+                  media:   pending_media,
+               })
+            },
+            HintedOutcome::Reassigned(user) => {
+               media.cancel();
+               let fresh_rail = if want_media && user.media > 0 {
+                  None
+               } else {
+                  Some(Vec::new())
+               };
+               let fresh_media = MediaFetch::start(self, &user.id, fresh_rail);
+               let tweets = self.get_user_tweets(&user.id, None).await?;
+               let (resolved_rail, pending_media) = fresh_media.take_ready();
+               Ok(OpenProfile {
+                  profile: profile_from_parts(*user, tweets, resolved_rail),
+                  media:   pending_media,
+               })
+            },
+         };
+      }
+
+      if let Some(known_user) = known_full {
+         if known_user.protected || known_user.suspended {
+            return Ok(OpenProfile::ready(Profile {
+               user: known_user.clone(),
+               ..Profile::default()
+            }));
+         }
+         let tweets = self.get_user_tweets(id, cursor).await?;
+         return Ok(OpenProfile::ready(profile_from_parts(
+            known_user.clone(),
+            tweets,
+            Rail::None,
+         )));
+      }
+
+      match race_hinted_user(
+         id,
+         None,
+         false,
+         self.get_user(screen_name),
+         self.get_user_tweets(id, cursor),
+         || {},
+      )
+      .await?
+      {
+         HintedOutcome::UserOnly(user) => {
+            Ok(OpenProfile::ready(Profile {
+               user: *user,
+               ..Profile::default()
+            }))
+         },
+         HintedOutcome::Matched { user, tweets } => {
+            Ok(OpenProfile::ready(profile_from_parts(
+               *user,
+               (*tweets)?,
+               Rail::None,
+            )))
+         },
+         HintedOutcome::Reassigned(user) => {
+            let tweets = self.get_user_tweets(&user.id, cursor).await?;
+            Ok(OpenProfile::ready(profile_from_parts(
+               *user,
+               tweets,
+               Rail::None,
+            )))
+         },
+      }
    }
 
    /// Search tweets.
@@ -2243,5 +2401,176 @@ mod first_page_tests {
          has_highlights: true,
          ..User::default()
       }));
+   }
+}
+
+#[cfg(test)]
+mod hinted_profile_tests {
+   use std::{
+      sync::atomic::{
+         AtomicBool,
+         Ordering,
+      },
+      time::{
+         Duration,
+         Instant,
+      },
+   };
+
+   use tokio::time::sleep;
+
+   use super::{
+      Error,
+      HintedOutcome,
+      Result,
+      User,
+      race_hinted_user,
+   };
+
+   fn sample_user(id: &str, tweets: i64, media: i64) -> User {
+      User {
+         id: id.to_owned(),
+         username: "alice".to_owned(),
+         fullname: "Alice".to_owned(),
+         tweets,
+         media,
+         ..User::default()
+      }
+   }
+
+   async fn slow_tweets() -> Result<&'static str> {
+      sleep(Duration::from_secs(5)).await;
+      Ok("late")
+   }
+
+   #[tokio::test]
+   async fn user_error_short_circuits_without_waiting_for_tweets() {
+      let started = Instant::now();
+      let result = race_hinted_user(
+         "100",
+         None,
+         true,
+         async { Err(Error::UserNotFound("gone".into())) },
+         slow_tweets(),
+         || {},
+      )
+      .await;
+      assert!(matches!(result, Err(Error::UserNotFound(_))));
+      assert!(started.elapsed() < Duration::from_secs(1));
+   }
+
+   #[tokio::test]
+   async fn protected_and_empty_users_short_circuit_tweets() {
+      let mut protected = sample_user("100", 50, 10);
+      protected.protected = true;
+      let protected_started = Instant::now();
+      let protected_outcome = race_hinted_user(
+         "100",
+         None,
+         true,
+         async move { Ok(protected) },
+         slow_tweets(),
+         || {},
+      )
+      .await
+      .unwrap();
+      assert!(matches!(protected_outcome, HintedOutcome::UserOnly(user) if user.protected));
+      assert!(protected_started.elapsed() < Duration::from_secs(1));
+
+      let empty = sample_user("100", 0, 0);
+      let empty_started = Instant::now();
+      let empty_outcome = race_hinted_user(
+         "100",
+         None,
+         true,
+         async move { Ok(empty) },
+         slow_tweets(),
+         || {},
+      )
+      .await
+      .unwrap();
+      assert!(matches!(empty_outcome, HintedOutcome::UserOnly(user) if user.tweets == 0));
+      assert!(empty_started.elapsed() < Duration::from_secs(1));
+   }
+
+   #[tokio::test]
+   async fn reassigned_user_id_short_circuits_wrong_tweets() {
+      let started = Instant::now();
+      let outcome = race_hinted_user(
+         "100",
+         None,
+         true,
+         async { Ok(sample_user("200", 12, 3)) },
+         slow_tweets(),
+         || {},
+      )
+      .await
+      .unwrap();
+      assert!(matches!(outcome, HintedOutcome::Reassigned(user) if user.id == "200"));
+      assert!(started.elapsed() < Duration::from_secs(1));
+   }
+
+   #[tokio::test]
+   async fn zero_media_user_cancels_media_before_tweets_complete() {
+      let cancelled = AtomicBool::new(false);
+      let outcome = race_hinted_user(
+         "100",
+         None,
+         true,
+         async { Ok(sample_user("100", 12, 0)) },
+         async {
+            sleep(Duration::from_millis(20)).await;
+            Ok("posts")
+         },
+         || cancelled.store(true, Ordering::Relaxed),
+      )
+      .await
+      .unwrap();
+      assert!(cancelled.load(Ordering::Relaxed));
+      match outcome {
+         HintedOutcome::Matched { tweets, .. } => assert_eq!((*tweets).unwrap(), "posts"),
+         HintedOutcome::UserOnly(_) | HintedOutcome::Reassigned(_) => {
+            unreachable!("expected matched outcome");
+         },
+      }
+   }
+
+   #[tokio::test]
+   async fn tweets_finishing_first_still_applies_user_checks() {
+      let reassigned_outcome = race_hinted_user(
+         "100",
+         None,
+         true,
+         async {
+            sleep(Duration::from_millis(15)).await;
+            Ok(sample_user("200", 5, 1))
+         },
+         async { Ok("stale") },
+         || {},
+      )
+      .await
+      .unwrap();
+      assert!(matches!(reassigned_outcome, HintedOutcome::Reassigned(user) if user.id == "200"));
+
+      let fallback = sample_user("100", 5, 2);
+      let fallback_outcome = race_hinted_user(
+         "100",
+         Some(&fallback),
+         true,
+         async {
+            sleep(Duration::from_millis(15)).await;
+            Err(Error::TransientUpstream)
+         },
+         async { Ok("ok") },
+         || {},
+      )
+      .await
+      .unwrap();
+      match fallback_outcome {
+         HintedOutcome::Matched { tweets, .. } => assert_eq!((*tweets).unwrap(), "ok"),
+         HintedOutcome::UserOnly(_) | HintedOutcome::Reassigned(_) => {
+            unreachable!("expected matched outcome");
+         },
+      }
    }
 }

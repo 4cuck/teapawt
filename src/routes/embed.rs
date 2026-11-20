@@ -24,7 +24,10 @@ use axum_extra::extract::CookieJar;
 use maud::html;
 use serde::Deserialize;
 
-use super::helpers::get_cached_translation;
+use super::helpers::{
+   get_cached_translation,
+   get_cached_tweet,
+};
 use crate::{
    AppState,
    cache::{
@@ -99,7 +102,7 @@ async fn tweet_embed(
    Path((_username, id)): Path<(String, String)>,
    headers: HeaderMap,
 ) -> Result<Response> {
-   let tweet = cached_conversation(&state, &id).await?.tweet;
+   let tweet = get_cached_tweet(&state, &id).await?;
    let prefs = Prefs::from_cookies(&jar, &state.config);
 
    let discord_activity = headers
@@ -117,7 +120,7 @@ async fn video_embed(
    jar: CookieJar,
    Path(id): Path<String>,
 ) -> Result<Response> {
-   let tweet = cached_conversation(&state, &id).await?.tweet;
+   let tweet = get_cached_tweet(&state, &id).await?;
    let prefs = Prefs::from_cookies(&jar, &state.config);
 
    if !embed_view::has_playable_video(&tweet) {
@@ -194,10 +197,7 @@ async fn activity_response(state: &AppState, activity: ActivityId) -> Result<Res
    let (fetched_reply, translation_res) = tokio::join!(
       async {
          if fetch_reply {
-            cached_conversation(state, &reply_id.to_string())
-               .await
-               .ok()
-               .map(|context| context.tweet)
+            get_cached_tweet(state, &reply_id.to_string()).await.ok()
          } else {
             None
          }

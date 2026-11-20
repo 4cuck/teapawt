@@ -97,15 +97,44 @@ static CHUNK_ENTRY_RE: LazyLock<Regex> =
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Operation {
-   id:       String,
+   id:               String,
    /// Feature names, in the order the web client sends them.
-   names:    Vec<String>,
+   names:            Vec<String>,
    /// The `features` query value: `names` with the homepage's values.
    #[serde(default)]
-   features: String,
+   features:         String,
    /// Lazy chunk id and URL it was found in. `None` means the main bundle.
    #[serde(default, skip_serializing_if = "Option::is_none")]
-   chunk:    Option<(String, String)>,
+   chunk:            Option<(String, String)>,
+   /// Pre-formatted `{id}/{name}` path for wire requests.
+   #[serde(skip)]
+   wire_path:        Arc<str>,
+   /// Shared view of `features` to avoid cloning the JSON blob per call.
+   #[serde(skip)]
+   features_arc:     Arc<str>,
+   /// Pre-encoded `features` query value matching `form_urlencoded::Serializer`.
+   #[serde(skip)]
+   encoded_features: Arc<str>,
+}
+
+impl Operation {
+   fn populate_wire(&mut self, name: &str) {
+      self.wire_path = Arc::from(format!("{}/{name}", self.id));
+      self.features_arc = Arc::from(self.features.as_str());
+      self.encoded_features = Arc::from(encode_form_value(&self.features));
+   }
+}
+
+/// Pre-encoded live GraphQL operation path and features ready for the wire.
+#[derive(Clone, Debug)]
+pub struct ResolvedOperation {
+   pub path:             Arc<str>,
+   pub features:         Arc<str>,
+   pub encoded_features: Arc<str>,
+}
+
+fn encode_form_value(value: &str) -> String {
+   form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -131,10 +160,13 @@ impl Operations {
    pub fn load() -> Self {
       let path =
          std::env::var("TEAPOT_GRAPHQL_OPS_FILE").unwrap_or_else(|_| "graphql-ops.json".to_owned());
-      let book = std::fs::read_to_string(&path)
+      let mut book: Book = std::fs::read_to_string(&path)
          .ok()
          .and_then(|text| serde_json::from_str(&text).ok())
          .unwrap_or_default();
+      for (name, operation) in &mut book.operations {
+         operation.populate_wire(name);
+      }
       Self {
          book: Arc::new(RwLock::new(book)),
          path: path.into(),
@@ -143,17 +175,23 @@ impl Operations {
 
    /// `endpoint` (`id/Name`) and its features as the web client sends them
    /// now, or `None` while this operation has not been read from X's client.
-   pub async fn resolve(&self, endpoint: &str) -> Option<(String, String)> {
-      let name = endpoint.rsplit_once('/').map_or(endpoint, |(_, name)| name);
+   pub fn resolve(&self, endpoint: &str) -> Option<ResolvedOperation> {
+      let name = endpoint
+         .rsplit_once('/')
+         .map_or(endpoint, |(_, op_name)| op_name);
       let book = self
          .book
          .read()
          .unwrap_or_else(std::sync::PoisonError::into_inner);
-      let operation = book.operations.get(name)?;
-      Some((
-         format!("{}/{name}", operation.id),
-         operation.features.clone(),
-      ))
+      let resolved = book.operations.get(name).map(|operation| {
+         ResolvedOperation {
+            path:             Arc::clone(&operation.wire_path),
+            features:         Arc::clone(&operation.features_arc),
+            encoded_features: Arc::clone(&operation.encoded_features),
+         }
+      });
+      drop(book);
+      resolved
    }
 
    /// Read the operations from X's client, given the logged-in homepage.
@@ -236,8 +274,9 @@ impl Operations {
          }
       }
 
-      for operation in operations.values_mut() {
+      for (name, operation) in &mut operations {
          operation.features = features_json(&operation.names, &values);
+         operation.populate_wire(name);
       }
       for (name, operation) in &operations {
          if let Some(old) = previous.get(name)
@@ -378,6 +417,9 @@ fn operations_in(js: &str) -> HashMap<String, Operation> {
             names,
             features: String::new(),
             chunk: None,
+            wire_path: Arc::default(),
+            features_arc: Arc::default(),
+            encoded_features: Arc::default(),
          })
       })
       .collect()
@@ -497,8 +539,8 @@ mod tests {
       );
    }
 
-   #[tokio::test]
-   async fn resolve_swaps_in_the_live_id() {
+   #[test]
+   fn resolve_swaps_in_the_live_id() {
       let operations = Operations {
          book: Arc::new(RwLock::new(Book::default())),
          path: "unused".into(),
@@ -506,25 +548,32 @@ mod tests {
       assert!(
          operations
             .resolve("hyPfJYJ_XAtDYoslQc-Rgg/SearchTimeline")
-            .await
             .is_none()
       );
+      let features = r#"{"rweb_video_screen_enabled":false,"articles_preview_enabled":true}"#;
+      let mut operation = Operation {
+         id:               "ph2fARFabkwfxqmSKQ1OPw".into(),
+         names:            Vec::new(),
+         features:         features.into(),
+         chunk:            None,
+         wire_path:        Arc::default(),
+         features_arc:     Arc::default(),
+         encoded_features: Arc::default(),
+      };
+      operation.populate_wire("SearchTimeline");
       operations
          .book
          .write()
          .unwrap()
          .operations
-         .insert("SearchTimeline".into(), Operation {
-            id:       "ph2fARFabkwfxqmSKQ1OPw".into(),
-            names:    Vec::new(),
-            features: "{}".into(),
-            chunk:    None,
-         });
-      let (endpoint, features) = operations
+         .insert("SearchTimeline".into(), operation);
+      let resolved = operations
          .resolve("hyPfJYJ_XAtDYoslQc-Rgg/SearchTimeline")
-         .await
          .unwrap();
-      assert_eq!(endpoint, "ph2fARFabkwfxqmSKQ1OPw/SearchTimeline");
-      assert_eq!(features, "{}");
+      assert_eq!(&*resolved.path, "ph2fARFabkwfxqmSKQ1OPw/SearchTimeline");
+      assert_eq!(&*resolved.features, features);
+      let mut qs = form_urlencoded::Serializer::new(String::new());
+      qs.append_pair("features", features);
+      assert_eq!(format!("features={}", resolved.encoded_features), qs.finish());
    }
 }

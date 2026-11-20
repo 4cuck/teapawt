@@ -115,10 +115,18 @@ pub fn router() -> Router<AppState> {
       .route("/a2a", post(a2a).options(preflight))
 }
 
+/// Request extension marking clients that asked for a markdown response
+/// (either via `Accept: text/markdown` or a `/index.md` path suffix).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WantsMarkdown;
+
 /// Serve markdown when the client asks for it, and advertise discovery
 /// documents.
 pub async fn negotiate(mut request: Request, next: Next) -> Response {
    let markdown = wants_markdown(request.headers()) || rewrite_index_md(&mut request);
+   if markdown {
+      request.extensions_mut().insert(WantsMarkdown);
+   }
    let mut response = next.run(request).await;
    response
       .headers_mut()

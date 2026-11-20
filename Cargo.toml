@@ -59,6 +59,7 @@ tokio = {
     "fs",
     "io-util",
     "process",
+    "signal",
     "time",
   ],
   version = "1.53.0",

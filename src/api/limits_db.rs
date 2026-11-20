@@ -4,11 +4,21 @@
 //! touches one account, and that update is the write that has to be fast.
 
 use std::{
-   collections::HashMap,
+   collections::{
+      HashMap,
+      HashSet,
+   },
    env,
+   time::Duration,
 };
 
-use tokio::sync::mpsc;
+use tokio::{
+   sync::mpsc,
+   time::{
+      Instant,
+      sleep_until,
+   },
+};
 use tokio_postgres::NoTls;
 
 use crate::{
@@ -20,6 +30,11 @@ use crate::{
 };
 
 const DEFAULT_URL: &str = "host=/var/run/postgresql user=teapot dbname=teapot";
+/// How long dirty account IDs are coalesced before flushing one batch.
+const FLUSH_EVERY: Duration = Duration::from_secs(2);
+/// Flush before [`FLUSH_EVERY`] elapses once this many distinct accounts are
+/// dirty.
+const MAX_BATCH_SIZE: usize = 512;
 
 const UPSERT: &str = "\
 INSERT INTO session_limits (id, body) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET body = \
@@ -128,30 +143,42 @@ impl Connected {
                return;
             },
          };
-         while let Some(first) = rx.recv().await {
-            let mut ids = vec![first];
-            while let Ok(extra) = rx.try_recv() {
-               ids.push(extra);
+         let mut pending = HashSet::with_capacity(MAX_BATCH_SIZE);
+         let mut closed = false;
+         while !closed {
+            let Some(first) = rx.recv().await else {
+               break;
+            };
+            pending.insert(first);
+            // Drain any IDs already buffered before arming the debounce timer.
+            while pending.len() < MAX_BATCH_SIZE
+               && let Ok(extra) = rx.try_recv()
+            {
+               pending.insert(extra);
             }
-            // Every response queues its account, so a busy one is queued
-            // many times over. Its row is written once, as it is now.
-            ids.sort_unstable();
-            ids.dedup();
-            let rows = ids
-               .iter()
-               .filter_map(|&id| Some((id, snapshot(id)?)))
-               .collect::<Vec<_>>();
-            let mut batch_ids: Vec<i64> = Vec::with_capacity(rows.len());
-            let mut batch_bodies: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
-            for (id, saved) in rows {
-               match serde_json::to_value(&saved) {
-                  Ok(body) => {
-                     batch_ids.push(id);
-                     batch_bodies.push(body);
-                  },
-                  Err(err) => tracing::warn!(id, "session state was not encoded: {err}"),
+            if pending.len() < MAX_BATCH_SIZE {
+               let timer = sleep_until(Instant::now() + FLUSH_EVERY);
+               tokio::pin!(timer);
+               while pending.len() < MAX_BATCH_SIZE {
+                  tokio::select! {
+                     biased;
+                     () = &mut timer => break,
+                     next = rx.recv() => match next {
+                        Some(id) => {
+                           pending.insert(id);
+                        },
+                        None => {
+                           closed = true;
+                           break;
+                        },
+                     },
+                  }
                }
             }
+            // Every response queues its account, so a busy one is queued
+            // many times over. Coalescing in a set writes its row once per
+            // flush window, as it is now.
+            let (batch_ids, batch_bodies) = encode_batch(&mut pending, &snapshot);
             if !batch_ids.is_empty()
                && let Err(err) = client.execute(&statement, &[&batch_ids, &batch_bodies]).await
             {
@@ -166,8 +193,47 @@ impl Connected {
    }
 }
 
+fn encode_batch(
+   pending: &mut HashSet<i64>,
+   snapshot: &impl Fn(i64) -> Option<SessionLimits>,
+) -> (Vec<i64>, Vec<serde_json::Value>) {
+   let rows = pending
+      .drain()
+      .filter_map(|id| Some((id, snapshot(id)?)))
+      .collect::<Vec<_>>();
+   let mut batch_ids = Vec::with_capacity(rows.len());
+   let mut batch_bodies = Vec::with_capacity(rows.len());
+   for (id, saved) in rows {
+      match serde_json::to_value(&saved) {
+         Ok(body) => {
+            batch_ids.push(id);
+            batch_bodies.push(body);
+         },
+         Err(err) => tracing::warn!(id, "session state was not encoded: {err}"),
+      }
+   }
+   (batch_ids, batch_bodies)
+}
+
 impl LimitsDb {
    pub fn save(&self, id: i64) {
       let _ = self.tx.send(id);
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn encode_batch_drains_distinct_ids_and_skips_missing_snapshots() {
+      let mut pending = HashSet::from([10_i64, 20, 30]);
+      let (mut ids, bodies) = encode_batch(&mut pending, &|id| {
+         (id != 20).then(SessionLimits::default)
+      });
+      assert!(pending.is_empty());
+      ids.sort_unstable();
+      assert_eq!(ids, [10, 30]);
+      assert_eq!(bodies.len(), 2);
    }
 }

@@ -92,15 +92,33 @@ async fn game(
       _ => "highlights",
    };
    let prefs = Prefs::from_cookies(&jar, &state.config);
-   let (board, timeline) = tokio::join!(state.api.nfl_game(&id), state.api.sports_game_top(&id));
-   let board = board?;
+   let mut board_fut = Box::pin(state.api.nfl_game(&id));
+   let mut timeline_fut = Box::pin(state.api.sports_game_top(&id));
+   let mut landed_timeline = None;
+   let board = loop {
+      tokio::select! {
+         res = &mut board_fut => break res?,
+         res = &mut timeline_fut, if landed_timeline.is_none() => landed_timeline = Some(res),
+      }
+   };
    let mut parsed = api::parse_nfl_game(&board);
-   parsed.id = id.clone();
+   parsed.id.clone_from(&id);
    if parsed.away.abbr.is_empty() && parsed.home.abbr.is_empty() {
-      tracing::debug!(game = %id, shape = %api::json_skeleton(&board), "nfl game scoreboard was empty");
+      tracing::debug!(
+         game = %id,
+         shape = %api::json_skeleton(&board),
+         "nfl game scoreboard was empty"
+      );
    }
    let mut tweets = if page == "highlights" && !parsed.highlight_ids.is_empty() {
-      match state.api.tweets_by_ids(&parsed.highlight_ids).await {
+      let mut clips_fut = Box::pin(state.api.tweets_by_ids(&parsed.highlight_ids));
+      let clips_res = loop {
+         tokio::select! {
+            res = &mut clips_fut => break res,
+            res = &mut timeline_fut, if landed_timeline.is_none() => landed_timeline = Some(res),
+         }
+      };
+      match clips_res {
          Ok(data) => api::parse_tweets_by_ids(&data, &parsed.highlight_ids),
          Err(err) => {
             tracing::debug!("highlight clips failed: {err}");
@@ -108,14 +126,15 @@ async fn game(
          },
       }
    } else {
-      timeline
-         .as_ref()
-         .map(api::tweets_in_timeline)
-         .unwrap_or_default()
+      Vec::new()
    };
    if tweets.is_empty() {
-      if let Ok(data) = &timeline {
-         tweets = api::tweets_in_timeline(data);
+      let timeline = match landed_timeline {
+         Some(res) => res,
+         None => timeline_fut.await,
+      };
+      if let Ok(data) = timeline {
+         tweets = api::tweets_in_timeline(&data);
       }
    }
    if page == "latest" {

@@ -308,9 +308,15 @@ const ACCOUNT_WRITE_DELAY: Duration = Duration::from_secs(2);
 /// How long an account's pooled HTTP/2 connection to X stays open while idle.
 const WARM_CONNECTION_SECS: u64 = 900;
 /// An account on an exit that trails the fleet ranks as if it had this
-/// fraction of the calls it has left, so the quick exits carry the load until
-/// their accounts are down to half of what the slow ones still hold.
-const SLOW_EXIT_DISCOUNT: i32 = 2;
+/// fraction of the calls it has left, and stays strictly behind quick exits
+/// that still hold at least [`SLOW_EXIT_FAST_FLOOR`] calls.
+const SLOW_EXIT_DISCOUNT: i32 = 4;
+/// Minimum calls remaining on a quick exit for it to rank strictly ahead of
+/// any slow exit on normal calls.
+const SLOW_EXIT_FAST_FLOOR: i32 = 5;
+/// Minimum calls remaining for warm HTTP/2 connection affinity to prefer an
+/// already-warm quick exit over spinning up a cold connection.
+const WARM_HEADROOM_FLOOR: i32 = 15;
 /// Accounts a parked call listens on. A release on any of them wakes it.
 const WAIT_ON_ACCOUNTS: usize = 32;
 /// A parked call looks at the pool again after this even if none of its
@@ -363,10 +369,12 @@ impl Miss {
    }
 }
 
-/// A candidate with known budget. Higher remaining is chosen, with an account
-/// on a slow exit ranked at [`SLOW_EXIT_DISCOUNT`]. At a tie, an account that
-/// has returned results for this call and already holds a warm HTTP/2
-/// connection wins.
+/// A candidate with known budget. Quick exits with at least
+/// [`SLOW_EXIT_FAST_FLOOR`] calls rank ahead of slow exits (which are also
+/// discounted by [`SLOW_EXIT_DISCOUNT`]). Among quick exits, warm HTTP/2
+/// connections with at least [`WARM_HEADROOM_FLOOR`] calls rank ahead of cold
+/// connections; otherwise higher remaining wins, breaking ties on verified
+/// status and warmth.
 #[derive(Clone, Copy)]
 struct Candidate {
    index:     usize,
@@ -391,6 +399,12 @@ struct PoolCount {
 /// so a concurrent caller claiming the first choice falls through to the next
 /// best account without rescanning the pool.
 const SCAN_TOP_K: usize = 16;
+/// Eligible, non-blocked slots inspected before early-stopping a scan once
+/// `best` already holds [`SCAN_TOP_K`] fast-exit `Safe` candidates.
+const SCAN_PROBES: usize = 96;
+/// Prime stride across large pools so concurrent callers inspect different
+/// windows instead of contending on the same accounts.
+const SCAN_STRIDE: usize = 19;
 /// Bounded rescan attempts if every top-K candidate is claimed concurrently
 /// between the read pass and per-slot claim.
 const SCAN_CLAIM_RETRIES: usize = 3;
@@ -418,21 +432,35 @@ impl<'a> ApiSpec<'a> {
    }
 }
 
-fn better_candidate(candidate: Candidate, chosen: Candidate, prefer_warm: bool) -> bool {
+const fn candidate_rank(candidate: Candidate, prefer_warm: bool) -> (bool, bool, i32, bool, bool) {
    if prefer_warm {
-      if candidate.slow_exit != chosen.slow_exit {
-         return !candidate.slow_exit;
-      }
-      if candidate.warm != chosen.warm {
-         return candidate.warm;
-      }
+      (
+         !candidate.slow_exit,
+         candidate.warm,
+         candidate.remaining,
+         candidate.verified,
+         false,
+      )
+   } else {
+      let fast_healthy = !candidate.slow_exit && candidate.remaining >= SLOW_EXIT_FAST_FLOOR;
+      let fast_warm_ample =
+         fast_healthy && candidate.warm && candidate.remaining >= WARM_HEADROOM_FLOOR;
+      (
+         fast_healthy,
+         fast_warm_ample,
+         candidate.remaining,
+         candidate.verified,
+         candidate.warm,
+      )
    }
-   candidate.remaining > chosen.remaining
-      || (candidate.remaining == chosen.remaining && candidate.verified && !chosen.verified)
-      || (candidate.remaining == chosen.remaining
-         && candidate.verified == chosen.verified
-         && candidate.warm
-         && !chosen.warm)
+}
+
+fn better_candidate(candidate: Candidate, chosen: Candidate, prefer_warm: bool) -> bool {
+   candidate_rank(candidate, prefer_warm) > candidate_rank(chosen, prefer_warm)
+}
+
+fn can_stop_early(best: &[Candidate]) -> bool {
+   best.len() >= SCAN_TOP_K && best.iter().all(|chosen| !chosen.slow_exit)
 }
 
 fn insert_best(best: &mut Vec<Candidate>, candidate: Candidate, prefer_warm: bool) {
@@ -1329,11 +1357,17 @@ impl SessionPool {
       } else {
          SCAN_CLAIM_RETRIES
       };
+      let stride = if count > SCAN_PROBES { SCAN_STRIDE } else { 1 };
 
       for attempt in 0..max_attempts {
-         let start = self.cursor.fetch_add(1, Ordering::Relaxed);
+         let start = self
+            .cursor
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_mul(stride)
+            % count;
          let now = time::OffsetDateTime::now_utc().unix_timestamp();
          let now_u64 = u64::try_from(now).unwrap_or(0);
+         let allow_early_stop = caller == Caller::Hedge || attempt + 1 < max_attempts;
          best.clear();
          fallback.clear();
          if let Some(out) = busy_out.as_deref_mut() {
@@ -1341,6 +1375,7 @@ impl SessionPool {
          }
          let mut any = false;
          let mut busy = false;
+         let mut probed = 0_usize;
 
          for offset in 0..count {
             let index = start.wrapping_add(offset) % count;
@@ -1419,6 +1454,7 @@ impl SessionPool {
                continue;
             }
 
+            probed += 1;
             let slow_exit = slot.slow_exit.load(Ordering::Relaxed);
             match headroom {
                Headroom::Blocked => {},
@@ -1428,41 +1464,35 @@ impl SessionPool {
                   } else {
                      remaining
                   };
-                  // Skip `verified_op` (a HashMap probe) whenever this slot
-                  // cannot beat the worst entry already in `best`.
-                  if best.len() == SCAN_TOP_K {
-                     let worst = best[SCAN_TOP_K - 1];
-                     if !prefer_warm && remaining < worst.remaining {
-                        continue;
-                     }
-                     if prefer_warm && slow_exit && !worst.slow_exit {
-                        continue;
-                     }
-                  }
                   let last_active = slot.last_active.load(Ordering::Relaxed);
                   let warm =
                      last_active > 0 && now_u64.saturating_sub(last_active) < WARM_CONNECTION_SECS;
-                  if best.len() == SCAN_TOP_K {
-                     let worst = best[SCAN_TOP_K - 1];
-                     if prefer_warm
-                        && slow_exit == worst.slow_exit
-                        && ((!warm && worst.warm) || (warm == worst.warm && remaining < worst.remaining))
-                     {
-                        continue;
-                     }
-                  }
-                  let verified = lim.verified_op(spec.op_name);
-                  let candidate = Candidate {
+                  // Skip `verified_op` (a HashMap probe) whenever even a
+                  // verified copy of this slot cannot beat the worst entry
+                  // already in `best`.
+                  let optimistic = Candidate {
                      index,
                      remaining,
-                     verified,
+                     verified: true,
                      warm,
                      slow_exit,
                   };
                   if best.len() < SCAN_TOP_K
-                     || better_candidate(candidate, best[SCAN_TOP_K - 1], prefer_warm)
+                     || better_candidate(optimistic, best[SCAN_TOP_K - 1], prefer_warm)
                   {
-                     insert_best(&mut best, candidate, prefer_warm);
+                     let verified = lim.verified_op(spec.op_name);
+                     let candidate = Candidate {
+                        index,
+                        remaining,
+                        verified,
+                        warm,
+                        slow_exit,
+                     };
+                     if best.len() < SCAN_TOP_K
+                        || better_candidate(candidate, best[SCAN_TOP_K - 1], prefer_warm)
+                     {
+                        insert_best(&mut best, candidate, prefer_warm);
+                     }
                   }
                },
                Headroom::Unknown => {
@@ -1479,6 +1509,10 @@ impl SessionPool {
                      insert_fallback(&mut fallback, rank, index);
                   }
                },
+            }
+
+            if allow_early_stop && probed >= SCAN_PROBES && can_stop_early(&best) {
+               break;
             }
          }
 
@@ -3913,7 +3947,9 @@ mod tests {
       let pool = SessionPool::load(path.to_str().unwrap(), 4).await.unwrap();
       assert_eq!(pool.mark_slow_exits(|id| id == 1), 1);
 
-      // Known windows: the slow exit's 40 calls rank as 20.
+      // Known windows: quick exits with at least SLOW_EXIT_FAST_FLOOR calls
+      // stay strictly ahead of slow exits, and the slow exit's 40 calls rank
+      // as 10 (discounted by SLOW_EXIT_DISCOUNT = 4).
       let reset = time::OffsetDateTime::now_utc().unix_timestamp() + 900;
       pool
          .update_session_limit(1, "UserTweets", 50, 40, reset)
@@ -3932,6 +3968,21 @@ mod tests {
       drop(fuller_quick);
       pool
          .update_session_limit(2, "UserTweets", 50, 15, reset)
+         .await;
+      let still_quick = pool
+         .acquire("UserTweets", Some(SessionKind::Cookie))
+         .await
+         .unwrap();
+      assert_eq!(
+         still_quick.id, 2,
+         "a quick exit with ample budget still beats a slow exit"
+      );
+      drop(still_quick);
+      pool
+         .update_session_limit(2, "UserTweets", 50, 4, reset)
+         .await;
+      pool
+         .update_session_limit(3, "UserTweets", 50, 3, reset)
          .await;
       let slow_fullest = pool
          .acquire("UserTweets", Some(SessionKind::Cookie))
@@ -4034,6 +4085,116 @@ mod tests {
       drop(spare);
 
       fs::remove_file(path).await.unwrap();
+   }
+
+   #[tokio::test]
+   async fn a_warm_account_with_headroom_beats_a_cold_one_on_fresh_acquire() {
+      let pool = SessionPool::empty(4);
+      let reset = time::OffsetDateTime::now_utc().unix_timestamp() + 900;
+      let sessions = vec![
+         crate::types::Session {
+            id: 1,
+            username: "cold".to_owned(),
+            kind: SessionKind::Cookie,
+            auth_token: "a".to_owned(),
+            ct0: "c".to_owned(),
+            ..crate::types::Session::default()
+         },
+         crate::types::Session {
+            id: 2,
+            username: "warm".to_owned(),
+            kind: SessionKind::Cookie,
+            auth_token: "b".to_owned(),
+            ct0: "d".to_owned(),
+            ..crate::types::Session::default()
+         },
+      ];
+      assert_eq!(pool.append_sessions(sessions).await, 2);
+
+      pool
+         .update_session_limit(1, "TweetDetail", 150, 140, reset)
+         .await;
+      pool.slots()[0]
+         .last_active
+         .store(0, super::Ordering::Relaxed);
+      pool
+         .update_session_limit(2, "TweetDetail", 150, 20, reset)
+         .await;
+
+      let warm = pool
+         .acquire("TweetDetail", Some(SessionKind::Cookie))
+         .await
+         .unwrap();
+      assert_eq!(
+         warm.id, 2,
+         "warm connection with >= WARM_HEADROOM_FLOOR calls beats cold account"
+      );
+      drop(warm);
+
+      pool
+         .update_session_limit(2, "TweetDetail", 150, 10, reset)
+         .await;
+      let fuller_cold = pool
+         .acquire("TweetDetail", Some(SessionKind::Cookie))
+         .await
+         .unwrap();
+      assert_eq!(
+         fuller_cold.id, 1,
+         "once warm account falls below WARM_HEADROOM_FLOOR, fullest account wins"
+      );
+      drop(fuller_cold);
+   }
+
+   #[tokio::test]
+   async fn bounded_scan_still_finds_quick_and_only_available_accounts() {
+      let pool = SessionPool::empty(2);
+      let reset = time::OffsetDateTime::now_utc().unix_timestamp() + 900;
+      let mut sessions = Vec::with_capacity(200);
+      for id in 1..=200_i64 {
+         let mut apis = std::collections::HashMap::new();
+         apis.insert("x/UserTweets".to_owned(), crate::types::RateLimit {
+            limit:     150,
+            remaining: 100,
+            reset,
+         });
+         apis.insert("x/TweetDetail".to_owned(), crate::types::RateLimit {
+            limit:     150,
+            remaining: if id == 200 { 50 } else { 0 },
+            reset,
+         });
+         sessions.push(crate::types::Session {
+            id,
+            username: format!("u{id}"),
+            kind: SessionKind::Cookie,
+            auth_token: "tok".to_owned(),
+            ct0: "ct0".to_owned(),
+            apis,
+            ..crate::types::Session::default()
+         });
+      }
+      assert_eq!(pool.append_sessions(sessions).await, 200);
+
+      // Even when 180 of 200 accounts (> SCAN_PROBES) are on slow exits, the
+      // bounded scan must keep scanning and always pick a quick exit.
+      assert_eq!(pool.mark_slow_exits(|id| id <= 180), 180);
+      for _ in 0..10 {
+         let lease = pool
+            .acquire("x/UserTweets", Some(SessionKind::Cookie))
+            .await
+            .unwrap();
+         assert!(lease.id > 180, "picked slow exit account {}", lease.id);
+      }
+
+      // Even when 199 of 200 accounts are spent, the scan must still find the
+      // lone available account rather than falsely returning RateLimited.
+      assert_eq!(pool.mark_slow_exits(|_| false), 0);
+      for _ in 0..5 {
+         let lease = pool
+            .acquire("x/TweetDetail", Some(SessionKind::Cookie))
+            .await
+            .unwrap();
+         assert_eq!(lease.id, 200);
+      }
    }
 
    #[tokio::test]

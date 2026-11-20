@@ -71,12 +71,12 @@ async fn story(
       .as_deref()
       .filter(|timeline| acceptable_timeline(timeline));
    if let (Some(timeline), Some(cursor)) = (timeline, cursor) {
-      let page = load_timeline(&state, timeline, Some(cursor)).await?;
-      let more = page
-         .bottom
-         .as_deref()
-         .map(|next| more_url(&id, timeline, next));
       if query.scroll.as_deref() == Some("true") {
+         let page = load_timeline(&state, timeline, Some(cursor)).await?;
+         let more = page
+            .bottom
+            .as_deref()
+            .map(|next| more_url(&id, timeline, next));
          let search = format!(
             "/search?q={}&f=tweets",
             percent_encoding::utf8_percent_encode(&id, percent_encoding::NON_ALPHANUMERIC)
@@ -90,7 +90,10 @@ async fn story(
          );
          return Ok(Html(fragment.into_string()).into_response());
       }
-      let mut story = load_story(&state, &id).await?;
+      let (page, mut story) = tokio::try_join!(
+         load_timeline(&state, timeline, Some(cursor)),
+         load_story_header(&state, &id),
+      )?;
       story.tweets = page.tweets;
       story.timeline_id = timeline.to_owned();
       story.bottom = page.bottom;
@@ -131,6 +134,17 @@ fn story_page(state: &AppState, prefs: &Prefs, story: &TrendStory) -> Response {
       markup = markup.head_extra(&scroll);
    }
    Html(markup.render().into_string()).into_response()
+}
+
+/// Fetch only the story writeup/header (reusing cached story if present),
+/// without paying for page 1's timeline when rendering a paginated cursor page.
+async fn load_story_header(state: &AppState, id: &str) -> Result<TrendStory> {
+   let key = cache_keys::trend_story(id);
+   if let Some(Hit::Fresh(story) | Hit::Stale(story)) = state.cache.lookup(&key) {
+      return Ok(story);
+   }
+   let data = state.api.ai_trend(id).await?;
+   Ok(api::parse_trend_story(id, &data))
 }
 
 async fn load_story(state: &AppState, id: &str) -> Result<TrendStory> {

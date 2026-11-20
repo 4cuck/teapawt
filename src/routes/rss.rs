@@ -24,6 +24,8 @@ use super::{
    helpers::{
       cache_rss,
       check_rss_cache,
+      remember_tweets,
+      remember_user_id,
       rss_response,
       rss_response_with_min_id,
       with_user,
@@ -183,6 +185,7 @@ async fn user_rss_handler(
    })
    .await?;
    let tweets = timeline?.content.into_iter().flatten().collect::<Vec<_>>();
+   remember_tweets(state, &tweets);
    let rss = rss_view::render_user_rss(&user, &tweets, &state.config, feed_kind, proxy);
 
    if let Some(ref key) = rss_cache_key {
@@ -295,6 +298,7 @@ async fn search_rss(
       )
       .await?;
    let tweets = timeline.content.into_iter().flatten().collect::<Vec<_>>();
+   remember_tweets(&state, &tweets);
    let rss = rss_view::render_search_rss(search_query, &tweets, &state.config, proxy);
 
    cache_rss(
@@ -342,6 +346,7 @@ async fn user_search_rss(
 
    let timeline = state.api.search(&api_query, None, "Latest").await?;
    let tweets = timeline.content.into_iter().flatten().collect::<Vec<_>>();
+   remember_tweets(&state, &tweets);
    let rss = rss_view::render_search_rss(
       &format!("from:{username} {search_query}"),
       &tweets,
@@ -392,6 +397,18 @@ async fn thread_rss(
          tweets.push(tweet);
       }
    }
+   for tweet in &tweets {
+      remember_user_id(&state, &tweet.user);
+      if let Some(quote) = tweet.quote.as_deref() {
+         remember_user_id(&state, &quote.user);
+      }
+      if let Some(retweet) = tweet.retweet.as_deref() {
+         remember_user_id(&state, &retweet.user);
+         if let Some(quote) = retweet.quote.as_deref() {
+            remember_user_id(&state, &quote.user);
+         }
+      }
+   }
 
    let rss = rss_view::render_thread_rss(&conversation.tweet, &tweets, &state.config, proxy);
    let min_id = tweets.iter().map(|tweet| tweet.id).min();
@@ -424,6 +441,7 @@ async fn list_rss(
    let list = list?;
    let timeline = timeline?;
    let tweets = timeline.content.into_iter().flatten().collect::<Vec<_>>();
+   remember_tweets(&state, &tweets);
    let rss = rss_view::render_list_rss(&list, &tweets, &state.config, proxy);
 
    if let Some(ref key) = rss_cache_key {
@@ -457,6 +475,7 @@ async fn list_by_slug_rss(
       .get_list_tweets(&list.id, query.cursor.as_deref())
       .await?;
    let tweets = timeline.content.into_iter().flatten().collect::<Vec<_>>();
+   remember_tweets(&state, &tweets);
    let rss = rss_view::render_list_rss(&list, &tweets, &state.config, proxy);
 
    if let Some(ref key) = rss_cache_key {
