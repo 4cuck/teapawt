@@ -570,7 +570,12 @@ impl PrimaryPool {
 
    fn is_blocked(&self, proxy: &ProxyConfig) -> bool {
       let tag = proxy_tag(Some(proxy));
-      if self.banned_tags().contains(&tag) {
+      if self
+         .banned
+         .lock()
+         .ok()
+         .is_some_and(|banned| banned.contains(&tag))
+      {
          return true;
       }
       self

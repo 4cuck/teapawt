@@ -16,6 +16,7 @@ use std::{
    sync::{
       Arc,
       LazyLock,
+      RwLock,
    },
 };
 
@@ -28,10 +29,7 @@ use serde::{
 use serde_json::Value;
 use tokio::{
    fs,
-   sync::{
-      RwLock,
-      Semaphore,
-   },
+   sync::Semaphore,
    task::JoinSet,
 };
 
@@ -147,7 +145,10 @@ impl Operations {
    /// now, or `None` while this operation has not been read from X's client.
    pub async fn resolve(&self, endpoint: &str) -> Option<(String, String)> {
       let name = endpoint.rsplit_once('/').map_or(endpoint, |(_, name)| name);
-      let book = self.book.read().await;
+      let book = self
+         .book
+         .read()
+         .unwrap_or_else(std::sync::PoisonError::into_inner);
       let operation = book.operations.get(name)?;
       Some((
          format!("{}/{name}", operation.id),
@@ -173,7 +174,10 @@ impl Operations {
       let chunks = chunk_urls(home);
 
       let (previous, mut absent, same_build) = {
-         let book = self.book.read().await;
+         let book = self
+            .book
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
          (
             book.operations.clone(),
             book.absent.clone(),
@@ -256,7 +260,10 @@ impl Operations {
       }
 
       let text = {
-         let mut book = self.book.write().await;
+         let mut book = self
+            .book
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
          book.bundle = bundle;
          book.operations = operations;
          book.absent = absent;
@@ -505,7 +512,7 @@ mod tests {
       operations
          .book
          .write()
-         .await
+         .unwrap()
          .operations
          .insert("SearchTimeline".into(), Operation {
             id:       "ph2fARFabkwfxqmSKQ1OPw".into(),

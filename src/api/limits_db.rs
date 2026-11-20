@@ -116,7 +116,7 @@ impl Connected {
 
    pub fn spawn(
       self,
-      limits: std::sync::Arc<tokio::sync::RwLock<HashMap<i64, SessionLimits>>>,
+      snapshot: impl Fn(i64) -> Option<SessionLimits> + Send + 'static,
    ) -> LimitsDb {
       let (tx, mut rx) = mpsc::unbounded_channel::<i64>();
       tokio::spawn(async move {
@@ -137,12 +137,10 @@ impl Connected {
             // many times over. Its row is written once, as it is now.
             ids.sort_unstable();
             ids.dedup();
-            let rows = {
-               let limits = limits.read().await;
-               ids.iter()
-                  .filter_map(|id| Some((*id, limits.get(id)?.clone())))
-                  .collect::<Vec<_>>()
-            };
+            let rows = ids
+               .iter()
+               .filter_map(|&id| Some((id, snapshot(id)?)))
+               .collect::<Vec<_>>();
             let mut batch_ids: Vec<i64> = Vec::with_capacity(rows.len());
             let mut batch_bodies: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
             for (id, saved) in rows {

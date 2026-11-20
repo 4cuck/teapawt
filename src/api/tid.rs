@@ -9,6 +9,7 @@ use std::{
    collections::HashMap,
    sync::{
       Arc,
+      RwLock,
       atomic::{
          AtomicU64,
          Ordering,
@@ -26,10 +27,7 @@ use axum::http::{
    HeaderMap,
    header,
 };
-use tokio::sync::{
-   Mutex,
-   RwLock,
-};
+use tokio::sync::Mutex;
 use xitter_txid::transaction::ClientTransaction;
 
 use super::{
@@ -135,7 +133,10 @@ impl TidClient {
          return None;
       }
       self.ensure_fresh().await;
-      let guard = self.inner.read().await;
+      let guard = self
+         .inner
+         .read()
+         .unwrap_or_else(std::sync::PoisonError::into_inner);
       guard
          .as_ref()
          .map(|ct| ct.generate_transaction_id(method, path))
@@ -145,7 +146,10 @@ impl TidClient {
    /// refuses a transaction ID it will not accept. Returns `true` when the
    /// refusal is new or its previous window had expired.
    pub async fn note_refused(&self, method: &str, path: &str) -> bool {
-      let mut guard = self.refused.write().await;
+      let mut guard = self
+         .refused
+         .write()
+         .unwrap_or_else(std::sync::PoisonError::into_inner);
       let key = Self::refusal_key(method, path);
       let now = Instant::now();
       let newly_refused = guard
@@ -160,29 +164,36 @@ impl TidClient {
       self
          .refused
          .write()
-         .await
+         .unwrap_or_else(std::sync::PoisonError::into_inner)
          .remove(&Self::refusal_key(method, path));
    }
 
    pub(crate) async fn is_refused(&self, method: &str, path: &str) -> bool {
-      let guard = self.refused.read().await;
-      if guard.is_empty() {
-         return false;
-      }
-      let key = Self::refusal_key(method, path);
-      let refused_at = guard.get(&key).copied();
-      drop(guard);
-      match refused_at {
-         Some(at) if at.elapsed() < REFUSAL_INTERVAL => true,
-         Some(_) => {
-            // Expired entries are dropped here so the map cannot grow forever.
-            // Only an expired entry takes the write lock; the common case of no
-            // entry at all stays a shared read.
-            self.refused.write().await.remove(&key);
-            false
-         },
-         None => false,
-      }
+      let key = {
+         let guard = self
+            .refused
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+         if guard.is_empty() {
+            return false;
+         }
+         let key = Self::refusal_key(method, path);
+         let refused_at = guard.get(&key).copied();
+         match refused_at {
+            Some(at) if at.elapsed() < REFUSAL_INTERVAL => return true,
+            Some(_) => key,
+            None => return false,
+         }
+      };
+      // Expired entries are dropped here so the map cannot grow forever.
+      // Only an expired entry takes the write lock; the common case of no
+      // entry at all stays a shared read.
+      self
+         .refused
+         .write()
+         .unwrap_or_else(std::sync::PoisonError::into_inner)
+         .remove(&key);
+      false
    }
 
    fn refusal_key(method: &str, path: &str) -> String {
@@ -206,7 +217,11 @@ impl TidClient {
          return;
       }
 
-      let bootstrapping = self.inner.read().await.is_none();
+      let bootstrapping = self
+         .inner
+         .read()
+         .unwrap_or_else(std::sync::PoisonError::into_inner)
+         .is_none();
       let mut last = if bootstrapping {
          self.last_fetch.lock().await
       } else {
@@ -220,11 +235,19 @@ impl TidClient {
          return;
       }
 
-      if self.inner.read().await.is_none() {
+      if self
+         .inner
+         .read()
+         .unwrap_or_else(std::sync::PoisonError::into_inner)
+         .is_none()
+      {
          let outcome = self.fetch_client().await;
          Self::record_refresh(&mut last, &self.next_refresh, &outcome);
          if let Ok(ct) = outcome {
-            *self.inner.write().await = Some(ct);
+            *self
+               .inner
+               .write()
+               .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ct);
          }
          return;
       }
@@ -243,7 +266,10 @@ impl TidClient {
          let mut last = this.last_fetch.lock().await;
          Self::record_refresh(&mut last, &this.next_refresh, &outcome);
          if let Ok(ct) = outcome {
-            *this.inner.write().await = Some(ct);
+            *this
+               .inner
+               .write()
+               .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ct);
          }
       });
    }
@@ -410,7 +436,7 @@ mod tests {
       tid.clear_refused("GET", path).await;
       assert!(tid.note_refused("GET", path).await);
 
-      tid.refused.write().await.insert(
+      tid.refused.write().unwrap().insert(
          TidClient::refusal_key("GET", path),
          Instant::now().checked_sub(REFUSAL_INTERVAL).unwrap(),
       );

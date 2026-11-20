@@ -17,7 +17,12 @@ use std::{
       HashMap,
       HashSet,
    },
-   sync::Arc,
+   iter,
+   sync::{
+      Arc,
+      Mutex,
+      RwLock,
+   },
    time::Duration,
 };
 
@@ -26,10 +31,7 @@ use axum::http::{
    header,
 };
 use serde::Serialize;
-use tokio::sync::{
-   Notify,
-   RwLock,
-};
+use tokio::sync::Notify;
 
 use crate::{
    accounts::AccountStore,
@@ -39,10 +41,15 @@ use crate::{
 
 type CookieBags = HashMap<i64, BTreeMap<String, String>>;
 
-#[derive(Default)]
-struct JarState {
-   cookies: CookieBags,
-   dirty:   HashSet<i64>,
+/// Shard count for per-session cookie jars, keeping concurrent requests on
+/// different accounts from contending on a single lock.
+const SHARDS: usize = 64;
+
+fn shard_for(session: i64) -> usize {
+   usize::try_from(
+      (session.cast_unsigned().wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 58) % (SHARDS as u64),
+   )
+   .unwrap_or_default()
 }
 
 /// How long the jar may sit dirty before it is written out.
@@ -58,8 +65,9 @@ const SESSION_OWNED: [&str; 2] = ["auth_token", "ct0"];
 
 /// Every account's cookies, keyed by session id.
 pub struct Jar {
-   state: RwLock<JarState>,
-   flush: Notify,
+   shards: Vec<RwLock<CookieBags>>,
+   dirty:  Mutex<HashSet<i64>>,
+   flush:  Notify,
 }
 
 impl Jar {
@@ -73,21 +81,30 @@ impl Jar {
    }
 
    fn new(cookies: CookieBags) -> Arc<Self> {
+      let mut buckets: Vec<CookieBags> = iter::repeat_with(HashMap::new).take(SHARDS).collect();
+      for (id, bag) in cookies {
+         buckets[shard_for(id)].insert(id, bag);
+      }
       Arc::new(Self {
-         state: RwLock::new(JarState {
-            cookies,
-            dirty: HashSet::new(),
-         }),
-         flush: Notify::new(),
+         shards: buckets.into_iter().map(RwLock::new).collect(),
+         dirty:  Mutex::new(HashSet::new()),
+         flush:  Notify::new(),
       })
+   }
+
+   fn shard(&self, session: i64) -> &RwLock<CookieBags> {
+      &self.shards[shard_for(session)]
    }
 
    /// Seed only unpublished accounts, leaving existing runtime jars alone.
    pub async fn seed_imports(&self, sessions: &[Session], mut cookies: CookieBags) {
-      let mut state = self.state.write().await;
       for session in sessions {
          if let Some(bag) = cookies.remove(&session.id) {
-            state.cookies.entry(session.id).or_insert(bag);
+            let mut shard = self
+               .shard(session.id)
+               .write()
+               .unwrap_or_else(std::sync::PoisonError::into_inner);
+            shard.entry(session.id).or_insert(bag);
          }
       }
    }
@@ -99,19 +116,34 @@ impl Jar {
          loop {
             jar.flush.notified().await;
             tokio::time::sleep(FLUSH_EVERY).await;
-            let pending = {
-               let mut state = jar.state.write().await;
-               let ids = std::mem::take(&mut state.dirty);
-               ids.into_iter()
-                  .map(|id| (id, state.cookies[&id].clone()))
-                  .collect::<CookieBags>()
-            };
+            let ids = std::mem::take(
+               &mut *jar
+                  .dirty
+                  .lock()
+                  .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            let pending = ids
+               .into_iter()
+               .map(|id| {
+                  let bag = jar
+                     .shard(id)
+                     .read()
+                     .unwrap_or_else(std::sync::PoisonError::into_inner)
+                     .get(&id)
+                     .cloned()
+                     .unwrap_or_default();
+                  (id, bag)
+               })
+               .collect::<CookieBags>();
             if !pending.is_empty()
                && let Err(err) = store.save_cookies(&pending).await
             {
                // Re-mark ids, not stale snapshots: the next flush will read
                // the newest jar, including changes made during this write.
-               jar.state.write().await.dirty.extend(pending.into_keys());
+               jar.dirty
+                  .lock()
+                  .unwrap_or_else(std::sync::PoisonError::into_inner)
+                  .extend(pending.into_keys());
                jar.flush.notify_one();
                tracing::warn!("cookie jars not written; will retry: {err}");
             }
@@ -122,31 +154,63 @@ impl Jar {
    /// Keep the cookies an answer set. A value X deletes or expires is dropped
    /// rather than stored, so a cleared cookie stops being sent.
    pub async fn absorb(&self, session: i64, headers: &HeaderMap) {
-      let mut changed = false;
-      let mut state = self.state.write().await;
-      let jar = state.cookies.entry(session).or_default();
-      for value in headers.get_all(header::SET_COOKIE) {
-         let Ok(line) = value.to_str() else {
-            continue;
-         };
-         let Some((name, cookie)) = parse(line) else {
-            continue;
-         };
-         if SESSION_OWNED.contains(&name.as_str()) {
-            continue;
-         }
-         match cookie {
-            Some(value) => {
-               if jar.get(&name) != Some(&value) {
-                  jar.insert(name, value);
-                  changed = true;
+      if headers.get(header::SET_COOKIE).is_none() {
+         return;
+      }
+      let updates: Vec<(String, Option<String>)> = headers
+         .get_all(header::SET_COOKIE)
+         .iter()
+         .filter_map(|value| value.to_str().ok())
+         .filter_map(parse)
+         .filter(|(name, _)| !SESSION_OWNED.contains(&name.as_str()))
+         .collect();
+      if updates.is_empty() {
+         return;
+      }
+      let shard = self.shard(session);
+      // Common case: X replays the same cookies on every response. Check under
+      // a shared read lock first so unchanged cookies never take a write lock.
+      {
+         let bags = shard
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+         let needs_write = match bags.get(&session) {
+            Some(jar) => updates.iter().any(|(name, cookie)| {
+               match cookie {
+                  Some(value) => jar.get(name) != Some(value),
+                  None => jar.contains_key(name),
                }
-            },
-            None => changed |= jar.remove(&name).is_some(),
+            }),
+            None => updates.iter().any(|(_, cookie)| cookie.is_some()),
+         };
+         if !needs_write {
+            return;
+         }
+      }
+      let mut changed = false;
+      {
+         let mut bags = shard
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+         let jar = bags.entry(session).or_default();
+         for (name, cookie) in updates {
+            match cookie {
+               Some(value) => {
+                  if jar.get(&name) != Some(&value) {
+                     jar.insert(name, value);
+                     changed = true;
+                  }
+               },
+               None => changed |= jar.remove(&name).is_some(),
+            }
          }
       }
       if changed {
-         state.dirty.insert(session);
+         self
+            .dirty
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session);
          self.flush.notify_one();
       }
    }
@@ -163,21 +227,35 @@ impl Jar {
          .filter_map(|pair| pair.split('=').next())
          .map(str::trim)
          .collect();
-      let state = self.state.read().await;
-      let Some(cookies) = state.cookies.get(&session) else {
-         return;
-      };
-      let mut merged = existing.to_owned();
-      for (name, value) in cookies {
-         if names.contains(&name.as_str()) || SESSION_OWNED.contains(&name.as_str()) {
-            continue;
+      let merged = {
+         let bags = self
+            .shard(session)
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+         let Some(cookies) = bags.get(&session) else {
+            return;
+         };
+         if cookies.is_empty() {
+            return;
          }
-         merged.push_str("; ");
-         merged.push_str(name);
-         merged.push('=');
-         merged.push_str(value);
-         names.push(name);
-      }
+         let mut merged = existing.to_owned();
+         let mut appended = false;
+         for (name, value) in cookies {
+            if names.contains(&name.as_str()) || SESSION_OWNED.contains(&name.as_str()) {
+               continue;
+            }
+            merged.push_str("; ");
+            merged.push_str(name);
+            merged.push('=');
+            merged.push_str(value);
+            names.push(name);
+            appended = true;
+         }
+         if !appended {
+            return;
+         }
+         merged
+      };
       if let Ok(value) = merged.parse() {
          headers.insert(header::COOKIE, value);
       }
@@ -190,10 +268,9 @@ impl Jar {
 
    pub async fn snapshot(&self, session: i64) -> BTreeMap<String, String> {
       self
-         .state
+         .shard(session)
          .read()
-         .await
-         .cookies
+         .unwrap_or_else(std::sync::PoisonError::into_inner)
          .get(&session)
          .cloned()
          .unwrap_or_default()

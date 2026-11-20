@@ -193,7 +193,7 @@ pub(crate) fn is_self_service(name: &str) -> bool {
 
 /// A profile read. One 429 sits the account out for the window. A second
 /// takes it off profile pages for good.
-fn is_profile_op(name: &str) -> bool {
+pub(crate) fn is_profile_op(name: &str) -> bool {
    matches!(
       name,
       "UserTweets"
@@ -242,12 +242,36 @@ pub(crate) enum Headroom {
 impl SessionLimits {
    /// Room for another call to `api` that will not be the one X rejects.
    pub(crate) fn headroom_at(&self, api: &str, op_name: &str, now: i64) -> Headroom {
+      self.headroom_at_classified(
+         api,
+         op_name,
+         op_name == "SearchTimeline",
+         is_self_service(op_name),
+         is_profile_op(op_name),
+         now,
+      )
+   }
+
+   /// Same as [`Self::headroom_at`], reusing pre-classified flags for `op_name`
+   /// across a full pool scan.
+   pub(crate) fn headroom_at_classified(
+      &self,
+      api: &str,
+      op_name: &str,
+      is_search: bool,
+      self_service: bool,
+      profile_op: bool,
+      now: i64,
+   ) -> Headroom {
       if self.rejected
          || self.is_globally_limited_at(now)
-         || self.refuses_at(op_name, now)
+         || self.refuses_at_classified(op_name, is_search, self_service, profile_op, now)
          || self.resting_at(api, now)
       {
          return Headroom::Blocked;
+      }
+      if self.apis.is_empty() {
+         return Headroom::Unknown;
       }
       let Some(rate) = self.apis.get(api) else {
          return Headroom::Unknown;
@@ -304,7 +328,7 @@ impl SessionLimits {
    }
 
    pub(crate) fn resting_at(&self, api: &str, now: i64) -> bool {
-      self.resting.get(api).is_some_and(|rest| rest.until > now)
+      !self.resting.is_empty() && self.resting.get(api).is_some_and(|rest| rest.until > now)
    }
 
    /// Whether X refuses this account `api`. A confirmed suspension is
@@ -318,6 +342,23 @@ impl SessionLimits {
    }
 
    pub(crate) fn refuses_at(&self, name: &str, now: i64) -> bool {
+      self.refuses_at_classified(
+         name,
+         name == "SearchTimeline",
+         is_self_service(name),
+         is_profile_op(name),
+         now,
+      )
+   }
+
+   pub(crate) fn refuses_at_classified(
+      &self,
+      name: &str,
+      is_search: bool,
+      self_service: bool,
+      profile_op: bool,
+      now: i64,
+   ) -> bool {
       // A rotated `ct0` closes every call the pool makes, not one of them.
       if self.ct0_dead {
          return true;
@@ -331,13 +372,13 @@ impl SessionLimits {
       // what confirmed the suspension, so repeating it only spends a call to
       // learn the same thing. Its one view attempt is still allowed — that is
       // how a suspended account shows whether it can read profiles.
-      if self.suspended && is_self_service(name) {
+      if self.suspended && self_service {
          return true;
       }
-      if self.search_only && name != "SearchTimeline" && !is_self_service(name) {
+      if self.search_only && !is_search && !self_service {
          return true;
       }
-      if name == "SearchTimeline"
+      if is_search
          && (self.search_banned
             || self
                .search_404_at
@@ -345,8 +386,11 @@ impl SessionLimits {
       {
          return true;
       }
-      if self.profile_banned && is_profile_op(name) {
+      if self.profile_banned && profile_op {
          return true;
+      }
+      if self.refused_ops.is_empty() {
+         return false;
       }
       let Some(&at) = self.refused_ops.get(name) else {
          return false;
@@ -354,7 +398,7 @@ impl SessionLimits {
       // An empty search page is what a query with no matches gets, and what an
       // account X age-gated or filtered hides, so a search refusal is a rest
       // rather than a verdict: the account is tried again within the hour.
-      let window = if name == "SearchTimeline" {
+      let window = if is_search {
          SEARCH_REFUSED_SECS
       } else {
          REFUSED_OP_SECS
@@ -383,7 +427,7 @@ impl SessionLimits {
 
    #[must_use]
    pub(crate) fn verified_op(&self, op_name: &str) -> bool {
-      self.verified_ops.contains_key(op_name)
+      !self.verified_ops.is_empty() && self.verified_ops.contains_key(op_name)
    }
 
    /// Record that this account got results for `api`.
