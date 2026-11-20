@@ -182,7 +182,7 @@ async fn fetch_profile(
    username: &str,
    skip_rail: bool,
 ) -> Result<Profile> {
-   let hint = helpers::user_hint(state, username);
+   let hint = helpers::user_hint_resolved(state, username).await;
    let rail = if skip_rail {
       Some(Vec::new())
    } else {
@@ -207,7 +207,7 @@ async fn load_profile_cursor(state: &AppState, username: &str, cursor: &str) -> 
       return Ok(profile);
    }
 
-   let hint = helpers::user_hint(state, username);
+   let hint = helpers::user_hint_resolved(state, username).await;
    match state
       .api
       .get_profile_hinted(username, Some(cursor), hint.as_ref(), None)

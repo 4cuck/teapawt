@@ -23,7 +23,10 @@ pub use community::{
    parse_community,
    parse_community_timeline,
 };
-pub use conversation::parse_conversation;
+pub use conversation::{
+   parse_conversation,
+   settle_thread,
+};
 pub use explore::{
    parse_explore,
    timeline_posts,

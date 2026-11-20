@@ -183,3 +183,19 @@ replaceTwitter = ""
 replaceYouTube = ""
 
 infiniteScroll = false
+
+# Reply order on a post's page for visitors who have not picked one in
+# Preferences: "relevance" (X's own ranking), "likes" or "recency". X takes
+# about half as long again over its relevance ranking as over the other two:
+# a median 300 ms per page against 200, and the gap is wider on busy threads.
+#
+# The thread around a post is shown the same way in every order where the
+# page holds it. By likes it came out as it does by relevance on 43 of 46
+# threads checked; by date the rest of a busy thread is on a later page, so
+# "recency" shows about one thread in five ending at the post being read.
+# Set to "likes", thread RSS feeds are asked for in that order as well.
+#
+# X's own web client asks by relevance unless the reader picks another order.
+# Any other value here changes what nearly every TweetDetail call from every
+# account looks like to X, so watch the account restrictions after changing it.
+replySort = "relevance"

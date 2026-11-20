@@ -263,8 +263,7 @@ impl PrefsForm {
          gallery_size:         parse_str(&self.gallery_size, defaults.gallery_size),
          compact_gallery:      parse_bool(&self.compact_gallery),
          reply_sort:           Prefs::normalize_reply_sort(self.reply_sort.as_deref())
-            .unwrap_or("relevance")
-            .to_owned(),
+            .map_or(defaults.reply_sort, str::to_owned),
       }
    }
 }

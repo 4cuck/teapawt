@@ -49,7 +49,16 @@ const HEADER_DEADLINE_FLOOR: Duration = Duration::from_millis(600);
 /// Default and upper bound for per-operation header deadlines.
 const HEADER_DEADLINE_CAP: Duration = Duration::from_millis(1500);
 /// Multiplier on an operation's median answer time for its header deadline.
-const HEADER_DEADLINE_MEDIANS: u64 = 4;
+///
+/// Six, because an operation's slow answers do not shrink with its median.
+/// `TweetDetail` asked for by likes answers in a median 215 ms, but a long
+/// thread still takes X most of a second. At four medians (860 ms), 230 of
+/// those a minute were taken for stalled and sent again through the
+/// account's failover exit while X was still writing the first answer,
+/// which nearly every time arrived anyway. Asked for by relevance, with a
+/// 310 ms median and a 1,240 ms deadline, it was about 60 a minute. Six
+/// puts the deadline back there, at 1,290 ms.
+const HEADER_DEADLINE_MEDIANS: u64 = 6;
 /// Minimum recent hedges before low-rescue suppression activates.
 const HEDGE_SUPPRESS_MIN: u32 = 32;
 /// Rolling hedge count at which recent counters halve so suppression adapts
@@ -328,7 +337,7 @@ impl Latency {
       delay
    }
 
-   /// Header deadline for `endpoint`, set to four times its recent median and
+   /// Header deadline for `endpoint`, set to six times its recent median and
    /// clamped between 600 ms and 1500 ms.
    #[must_use]
    pub fn header_deadline(&self, endpoint: &str) -> Duration {
@@ -509,16 +518,17 @@ mod tests {
       );
       for _ in 0..40 {
          latency.record("x/UserByScreenName", Duration::from_millis(97), None);
-         latency.record("x/TweetDetail", Duration::from_millis(250), None);
+         latency.record("x/TweetDetail", Duration::from_millis(215), None);
          latency.record("x/UserTweets", Duration::from_millis(500), None);
       }
       assert_eq!(
          latency.header_deadline("x/UserByScreenName"),
          Duration::from_millis(600)
       );
+      // Six medians: clear of the long threads that take X 800 to 900 ms.
       assert_eq!(
          latency.header_deadline("x/TweetDetail"),
-         Duration::from_millis(1000)
+         Duration::from_millis(1290)
       );
       assert_eq!(
          latency.header_deadline("x/UserTweets"),

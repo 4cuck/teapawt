@@ -380,7 +380,8 @@ async fn thread_rss(
       return Ok(cached);
    }
 
-   let conversation = state.api.get_conversation(&id, None, "Relevance").await?;
+   let ranking = Prefs::thread_ranking_mode(&state.config);
+   let conversation = state.api.get_conversation(&id, None, ranking).await?;
 
    // Collect thread tweet references: before → main → after
    let mut tweets: Vec<&Tweet> = Vec::new();

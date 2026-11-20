@@ -25,6 +25,7 @@ use crate::{
    api::OpenProfile,
    cache::{
       Hit,
+      ids,
       keys as cache_keys,
       ttl,
    },
@@ -101,6 +102,21 @@ pub fn user_hint(state: &AppState, username: &str) -> Option<User> {
          username: username.to_owned(),
          ..User::default()
       }
+   })
+}
+
+/// [`user_hint`], or the id from its own Postgres row while the id directory
+/// is still loading after a restart. Without it every profile opened in
+/// those 40 seconds waited for `UserByScreenName` before asking for posts.
+pub async fn user_hint_resolved(state: &AppState, username: &str) -> Option<User> {
+   if let Some(user) = user_hint(state, username) {
+      return Some(user);
+   }
+   let id = ids::from_table(username).await?;
+   Some(User {
+      id,
+      username: username.to_owned(),
+      ..User::default()
    })
 }
 
@@ -381,7 +397,8 @@ pub async fn get_cached_user(state: &AppState, username: &str) -> Result<User> {
 /// Numeric user id, from the id directory when known or `UserByScreenName` on a
 /// first visit. Used by scroll fragments that do not render the profile header.
 pub async fn user_id(state: &AppState, username: &str) -> Result<String> {
-   if let Some(id) = user_hint(state, username)
+   if let Some(id) = user_hint_resolved(state, username)
+      .await
       .map(|user| user.id)
       .filter(|id| !id.is_empty())
    {
@@ -398,7 +415,8 @@ where
    F: Fn(String) -> Fut,
    Fut: Future<Output = T>,
 {
-   let known = user_hint(state, username)
+   let known = user_hint_resolved(state, username)
+      .await
       .map(|user| user.id)
       .filter(|id| !id.is_empty());
    let Some(id) = known else {

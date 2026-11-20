@@ -6,10 +6,13 @@
 //! The maps are the working copy of the table. There is no size cap: Postgres
 //! is what remembers them across a restart.
 //!
-//! The table runs to tens of millions of rows. It is read after the server is
-//! already answering, and a name asked for before its row arrives just takes
-//! the slower path. Each map is split into shards behind their own locks: one
-//! map that size stops every reader for seconds whenever it doubles.
+//! The table runs to tens of millions of rows. Reading it takes about 40
+//! seconds, and the server answers meanwhile. A name asked for in that time
+//! is read from its own row instead of waiting for the whole table: left to
+//! the slower path, every profile opened after a restart took one
+//! `UserByScreenName` longer, about 95 ms, until the last row was in. Each map
+//! is split into shards behind their own locks: one map that size stops every
+//! reader for seconds whenever it doubles.
 
 use std::{
    collections::HashMap,
@@ -18,12 +21,12 @@ use std::{
    hash::{BuildHasher as _, Hasher as _, RandomState},
    iter,
    pin::pin,
-   sync::{OnceLock, RwLock},
-   time::Instant,
+   sync::{Arc, OnceLock, RwLock},
+   time::{Duration, Instant},
 };
 
 use futures_core::Stream as _;
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::timeout};
 use tokio_postgres::NoTls;
 
 const DEFAULT_URL: &str = "host=/var/run/postgresql user=teapot dbname=teapot";
@@ -31,6 +34,13 @@ const DEFAULT_URL: &str = "host=/var/run/postgresql user=teapot dbname=teapot";
 const UPSERT: &str = "\
 INSERT INTO user_ids (username, id) VALUES ($1, $2) \
 ON CONFLICT (username) DO UPDATE SET id = EXCLUDED.id";
+
+const SELECT_ONE: &str = "SELECT id FROM user_ids WHERE username = $1";
+
+/// A read by primary key answers in a fraction of a millisecond. One that
+/// has not answered by now is given up on, and the profile takes the path it
+/// would have taken without the row.
+const ROW_PATIENCE: Duration = Duration::from_millis(25);
 
 /// A shard resizes alone, holding up only the names that hash to it.
 const SHARDS: usize = 64;
@@ -57,6 +67,20 @@ fn sender() -> &'static OnceLock<mpsc::UnboundedSender<(String, String)>> {
    &TX
 }
 
+/// A connection of its own for single rows. The one reading the table is
+/// busy with that until the last row.
+struct RowReader {
+   client: tokio_postgres::Client,
+   select: tokio_postgres::Statement,
+}
+
+/// Set only while the table is being read. Once the maps hold every row, a
+/// name they do not have is not in the table either.
+fn row_reader() -> &'static RwLock<Option<Arc<RowReader>>> {
+   static READER: RwLock<Option<Arc<RowReader>>> = RwLock::new(None);
+   &READER
+}
+
 fn name_shard(name: &str) -> usize {
    static SEED: OnceLock<RandomState> = OnceLock::new();
    let mut hasher = SEED.get_or_init(RandomState::new).build_hasher();
@@ -80,6 +104,37 @@ pub fn username_for(id: &str) -> Option<String> {
    let id = id.parse::<u64>().ok()?;
    let ids = directory().by_id[id_shard(id)].read().ok()?;
    ids.get(&id).map(ToString::to_string)
+}
+
+/// The id stored for `username`, read from its own row while the table is
+/// still loading. `None` once it has loaded: [`get`] is the whole answer then.
+pub async fn from_table(username: &str) -> Option<String> {
+   let reader = row_reader().read().ok()?.clone()?;
+   let key = username.to_lowercase();
+   let row = timeout(ROW_PATIENCE, reader.client.query_opt(&reader.select, &[&key]))
+      .await
+      .ok()?
+      .ok()??;
+   let id = row.try_get::<_, &str>(0).ok()?.parse::<u64>().ok()?;
+   file_row(&key, id);
+   Some(id.to_string())
+}
+
+/// Keep a row read ahead of the table. A name learned from X since the start
+/// is newer than its row and stays, as it does when the table is adopted.
+fn file_row(key: &str, id: u64) {
+   let directory = directory();
+   let Ok(mut names) = directory.by_name[name_shard(key)].write() else {
+      return;
+   };
+   if names.contains_key(key) {
+      return;
+   }
+   names.insert(key.into(), id);
+   drop(names);
+   if let Ok(mut ids) = directory.by_id[id_shard(id)].write() {
+      ids.entry(id).or_insert_with(|| key.into());
+   }
 }
 
 pub fn remember(username: &str, id: &str) {
@@ -134,15 +189,50 @@ pub async fn load() {
    let (tx, rx) = mpsc::unbounded_channel();
    let _ = sender().set(tx);
 
+   // Single rows are answered beside the table read, until the maps hold
+   // them all.
+   let reader = open_row_reader().await;
+   if let Ok(mut slot) = row_reader().write() {
+      *slot = reader;
+   }
+
    let started = Instant::now();
    let (names, ids, count) = read_table(&client).await;
    adopt(names, ids);
+   if let Ok(mut slot) = row_reader().write() {
+      *slot = None;
+   }
    tracing::info!(
       count,
       secs = started.elapsed().as_secs_f32(),
       "loaded user ids from postgres"
    );
    tokio::spawn(write_new_ids(client, rx));
+}
+
+/// The connection single rows are read on while the table loads. Without one
+/// a name waits for the table as before.
+async fn open_row_reader() -> Option<Arc<RowReader>> {
+   let url = env::var("TEAPOT_LIMITS_DATABASE_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
+   let (client, connection) = match tokio_postgres::connect(&url, NoTls).await {
+      Ok(connected) => connected,
+      Err(err) => {
+         tracing::warn!("user ids wait for the whole table, no second connection: {err}");
+         return None;
+      },
+   };
+   tokio::spawn(async move {
+      if let Err(err) = connection.await {
+         tracing::warn!("postgres user-id row connection closed: {err}");
+      }
+   });
+   match client.prepare(SELECT_ONE).await {
+      Ok(select) => Some(Arc::new(RowReader { client, select })),
+      Err(err) => {
+         tracing::warn!("user ids wait for the whole table, row read not prepared: {err}");
+         None
+      },
+   }
 }
 
 /// The table's connection, with the table created if it was not there.
@@ -284,7 +374,10 @@ fn adopt(names: Vec<Names>, ids: Vec<Ids>) {
 mod tests {
    use std::iter;
 
-   use super::{Ids, Names, SHARDS, adopt, get, id_shard, name_shard, remember, username_for};
+   use super::{
+      Ids, Names, SHARDS, adopt, file_row, from_table, get, id_shard, name_shard, remember,
+      username_for,
+   };
 
    #[test]
    fn an_id_is_found_again_without_storing_posts() {
@@ -317,6 +410,26 @@ mod tests {
       assert_eq!(get("MovedHandle").as_deref(), Some("5001"));
       assert_eq!(get("tableonly").as_deref(), Some("4001"));
       assert_eq!(username_for("4001").as_deref(), Some("tableonly"));
+   }
+
+   #[test]
+   fn a_row_read_ahead_of_the_table_is_kept_and_does_not_undo_a_newer_name() {
+      file_row("rowahead", 6001);
+      assert_eq!(get("RowAhead").as_deref(), Some("6001"));
+      assert_eq!(username_for("6001").as_deref(), Some("rowahead"));
+
+      // X has since said the handle belongs to another account.
+      remember("RowMoved", "6003");
+      file_row("rowmoved", 6002);
+      assert_eq!(get("rowmoved").as_deref(), Some("6003"));
+      assert_eq!(username_for("6002"), None);
+   }
+
+   #[tokio::test]
+   async fn no_row_is_read_once_the_table_is_in() {
+      // The reader is only set while the table loads; without it a miss in
+      // the maps is the answer and nothing is asked of Postgres.
+      assert_eq!(from_table("NeverStoredAnywhere").await, None);
    }
 
    #[test]

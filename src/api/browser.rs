@@ -257,9 +257,9 @@ fn accepted_profile(engine: Engine) -> Impersonate {
 /// How long one probe handshake may take before the version is skipped.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// Handshakes a version must pass in a row, across the operating systems its
-/// sessions run on. A single one once let Chrome 152 through while X refused
-/// it on nearly every later connection.
+/// Handshakes a version must pass, every one of them, across the operating
+/// systems its sessions run on. A single one once let Chrome 152 through
+/// while X refused it on nearly every later connection.
 const PROBE_HANDSHAKES: usize = 3;
 
 /// Find, per engine, the newest profile X accepts, by handshaking with
@@ -308,8 +308,16 @@ pub async fn probe_accepted(proxy: Option<ProxyConfig>) {
 async fn newest_accepted(engine: Engine, proxy: Option<&ProxyConfig>) -> Option<Impersonate> {
    'versions: for &profile in engine.candidates() {
       let oses = os_weights(engine);
+      // Sent together. One after another they were a second of every start,
+      // and the server takes no request until they are done.
+      let mut rounds = JoinSet::new();
       for round in 0..PROBE_HANDSHAKES.max(oses.len()) {
-         if !handshakes(profile, oses[round % oses.len()].0, proxy).await {
+         let os = oses[round % oses.len()].0;
+         let proxy = proxy.cloned();
+         rounds.spawn(async move { handshakes(profile, os, proxy.as_ref()).await });
+      }
+      while let Some(passed) = rounds.join_next().await {
+         if !passed.unwrap_or(false) {
             tracing::debug!(%engine, ?profile, "X refused this browser profile");
             continue 'versions;
          }

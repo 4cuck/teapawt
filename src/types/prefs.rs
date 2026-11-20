@@ -68,7 +68,9 @@ impl Prefs {
          media_view: "Timeline".to_owned(),
          gallery_size: "Medium".to_owned(),
          compact_gallery: false,
-         reply_sort: "relevance".to_owned(),
+         reply_sort: Self::normalize_reply_sort(Some(&config.preferences.reply_sort))
+            .unwrap_or("relevance")
+            .to_owned(),
       }
    }
 
@@ -140,6 +142,23 @@ impl Prefs {
          "recency" => "Recency",
          "likes" => "Likes",
          _ => "Relevance",
+      }
+   }
+
+   /// Twitter's `rankingMode` for a post's page that is read only for the
+   /// thread around the post, as a thread feed is.
+   ///
+   /// None of the replies are shown, so the order decides nothing but how
+   /// long X takes: about a third less by likes or by date than by relevance.
+   /// Likes is asked for once the site's own pages are served that way,
+   /// since they then already rely on a thread put together from such a
+   /// page. By date the continuation of a busy thread is on a later page, so
+   /// a site set to that order keeps relevance here.
+   #[must_use]
+   pub fn thread_ranking_mode(config: &Config) -> &'static str {
+      match config.preferences.reply_sort.as_str() {
+         "likes" => Self::reply_ranking_mode("likes"),
+         _ => Self::reply_ranking_mode("relevance"),
       }
    }
 

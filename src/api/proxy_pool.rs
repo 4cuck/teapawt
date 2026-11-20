@@ -411,6 +411,13 @@ async fn pick_fastest_host(hostname: &str, probe_port: u16) -> String {
    if ips.is_empty() {
       return hostname.to_owned();
    }
+   // One address is the answer whatever it pings. `ping -c 3` sends its
+   // packets a second apart, so asking anyway held every restart back two
+   // seconds, with the listener down and nginx answering 502 meanwhile.
+   if let &[only] = ips.as_slice() {
+      tracing::info!(ip = %only, "SOCKS5 host has one address, not probing");
+      return only.to_string();
+   }
 
    // Probed together: run one after another, six addresses held the listener
    // back for twelve seconds on every restart while requests piled up.

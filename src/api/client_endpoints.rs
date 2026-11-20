@@ -816,6 +816,12 @@ impl ApiClient {
          parser::attach_article_preview(&mut conversation.tweet, &article);
       }
       if cursor.is_none() {
+         // Only Relevance sends the thread around a post as a thread. The
+         // same answer in another order is put in that shape here, from the
+         // posts it already holds.
+         if ranking_mode != endpoints::RANK_RELEVANCE {
+            parser::settle_thread(&mut conversation);
+         }
          let quote_id = conversation
             .tweet
             .quote

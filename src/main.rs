@@ -30,7 +30,7 @@ use axum::{
    http::{Extensions, HeaderMap, StatusCode, Version, header::HeaderValue},
    middleware,
 };
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpSocket};
 use tower::{Layer as _, limit::ConcurrencyLimitLayer};
 use tower_http::{
    CompressionLevel,
@@ -76,6 +76,26 @@ pub struct AppState {
 
 /// Log lines held for stdout before new ones are dropped.
 const LOG_BUFFER_LINES: usize = 10_000;
+
+/// Connections the kernel holds until they are accepted. A restart leaves
+/// them unaccepted for most of a second, while the pool loads and the
+/// browser probe runs, and nginx opens one per request in that time, up to
+/// 1,500 a second. That can fill tokio's own 1,024 before the first is taken.
+const LISTEN_BACKLOG: u32 = 8192;
+
+/// Listen on `addr` now; connections queue until they are accepted.
+fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
+   let socket = if addr.is_ipv4() {
+      TcpSocket::new_v4()?
+   } else {
+      TcpSocket::new_v6()?
+   };
+   // As `TcpListener::bind` sets it, so a restart is not refused the address
+   // while the last process's connections are still closing.
+   socket.set_reuseaddr(true)?;
+   socket.bind(addr)?;
+   socket.listen(LISTEN_BACKLOG)
+}
 
 /// Pages, feeds, JSON, scripts and playlists. Images, video and audio come
 /// compressed already, and a video relay must stream byte ranges as they are.
@@ -129,6 +149,15 @@ async fn main() -> eyre::Result<()> {
       rate_limited: config.config.rate_limited_message.clone(),
       internal_error: config.config.internal_error_message.clone(),
    });
+
+   // Bound before the account pool, the proxy exits and the browser probe,
+   // which together take most of a second. Until the address was bound
+   // nginx had nowhere to connect, and one restart answered 4,254 requests
+   // with a 502. Bound first, those requests wait in the accept queue and
+   // are served as soon as the router is up. The other side of that: should
+   // start-up stall, they wait for it instead of being refused at once.
+   let addr = SocketAddr::new(config.server.address.parse()?, config.server.port);
+   let listener = bind(addr)?;
 
    // Require the offline migration before starting background work; never
    // import account files from the web process.
@@ -337,9 +366,6 @@ async fn main() -> eyre::Result<()> {
         .with_state(state);
 
    // Start server
-   let addr = SocketAddr::new(config.server.address.parse()?, config.server.port);
-   let listener = TcpListener::bind(addr).await?;
-
    tracing::info!("Listening on {addr}");
    // `/user/` and `/user/status/id/` are the same pages as the slash-free paths.
    axum::serve(

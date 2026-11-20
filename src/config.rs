@@ -2,7 +2,10 @@ use std::{fs, net::IpAddr, path::Path, process::Command};
 
 use serde::Deserialize;
 
-use crate::error::{Error, Result};
+use crate::{
+   error::{Error, Result},
+   types::Prefs,
+};
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -548,6 +551,12 @@ pub struct PreferencesConfig {
    pub replace_reddit: String,
    #[serde(default, rename = "infiniteScroll")]
    pub infinite_scroll: bool,
+   /// Reply order on a post's page for a visitor who has not picked one:
+   /// `relevance`, `likes` or `recency`. Empty is `relevance`, X's own
+   /// ranking, which X takes about half as long again over as the other two.
+   /// Set to `likes`, thread feeds are asked for in that order as well.
+   #[serde(default, rename = "replySort")]
+   pub reply_sort: String,
 }
 
 // Default value functions
@@ -670,6 +679,19 @@ impl Config {
          },
          GifTranscodingMode::Off => {},
       }
+
+      // A misspelt order would otherwise read as relevance without a word.
+      let reply_sort = config.preferences.reply_sort.trim();
+      let known = Prefs::normalize_reply_sort(Some(reply_sort));
+      if known.is_none() && !reply_sort.is_empty() {
+         tracing::error!(
+            "preferences.replySort {reply_sort:?} is not relevance, likes or recency — falling \
+             back to relevance"
+         );
+      }
+      known
+         .unwrap_or("relevance")
+         .clone_into(&mut config.preferences.reply_sort);
 
       // The Kagi token file takes precedence over the inline value
       if !config.config.kagi_token_file.is_empty() {

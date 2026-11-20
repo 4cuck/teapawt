@@ -841,3 +841,35 @@ fn activity_media_with_missing_dimensions_uses_finite_fallback() {
 fn best_dimensions_parse_non_widescreen_video_url() {
    assert_eq!(video().best_dimensions(), (720, 1280));
 }
+
+#[test]
+fn the_configured_reply_order_is_the_one_a_visitor_starts_on() {
+   let mut config = test_config();
+   assert_eq!(Prefs::with_defaults(&config).reply_sort, "relevance");
+
+   config.preferences.reply_sort = "likes".to_owned();
+   let prefs = Prefs::with_defaults(&config);
+   assert_eq!(prefs.resolved_reply_sort(None), "likes");
+   assert_eq!(
+      Prefs::reply_ranking_mode(prefs.resolved_reply_sort(None)),
+      "Likes"
+   );
+   // A link that names an order still wins over the site's.
+   assert_eq!(prefs.resolved_reply_sort(Some("relevance")), "relevance");
+
+   config.preferences.reply_sort = "newest".to_owned();
+   assert_eq!(Prefs::with_defaults(&config).reply_sort, "relevance");
+}
+
+#[test]
+fn a_thread_feed_is_asked_for_by_likes_only_where_the_pages_are() {
+   let mut config = test_config();
+   assert_eq!(Prefs::thread_ranking_mode(&config), "Relevance");
+
+   config.preferences.reply_sort = "likes".to_owned();
+   assert_eq!(Prefs::thread_ranking_mode(&config), "Likes");
+
+   // By date the continuation of a busy thread is not on the first page.
+   config.preferences.reply_sort = "recency".to_owned();
+   assert_eq!(Prefs::thread_ranking_mode(&config), "Relevance");
+}
