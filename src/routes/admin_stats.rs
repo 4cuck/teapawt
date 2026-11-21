@@ -47,7 +47,18 @@ use super::{
 use crate::{
    AppState,
    accounts::AccountIdentity,
-   api::auth::SEARCH_EMPTY_STREAK_ALERT,
+   api::{
+      auth::{
+         OutAccountEntry,
+         OutBreakdown,
+         OutOperationCounts,
+         SEARCH_EMPTY_STREAK_ALERT,
+      },
+      probe::{
+         ProbeMode,
+         ProbeVerdict,
+      },
+   },
    error::Error,
    stats::{
       AccountEvent,
@@ -70,12 +81,14 @@ use crate::{
 };
 
 const EVENT_PAGE: i64 = 50;
+const OUT_PAGE_SIZE: usize = 50;
 const SCAN_BATCHES: usize = 20;
 const SCAN_BATCH_SIZE: i64 = 250;
 /// `StatsStore::recent_account_events_filtered` clamps `limit` to 200 rows per
 /// query, so any batch smaller than this has reached the end of the table.
 const STORE_BATCH_CAP: usize = 200;
 const MAX_JSON_BYTES: usize = 4096;
+const MAX_CT0_JSON_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct InvestigationQuery {
@@ -218,23 +231,221 @@ pub(crate) struct AccountData {
    pub(crate) search_7d:  Option<SearchAccountSummary>,
 }
 
-/// What a manual health probe found, and whether it changed the stored verdict.
+/// What a manual health or search probe found, and whether it changed the
+/// stored verdict.
 #[derive(Serialize)]
 pub(crate) struct ProbeResult {
-   pub(crate) verdict:    &'static str,
-   pub(crate) detail:     Option<String>,
+   pub(crate) mode:            &'static str,
+   pub(crate) verdict:         &'static str,
+   pub(crate) detail:          Option<String>,
    /// The stored flags before the probe, so the operator can see what changed.
-   pub(crate) before:     ProbeFlags,
-   pub(crate) after:      ProbeFlags,
-   /// True when a stored suspension was contradicted and cleared.
-   pub(crate) reinstated: bool,
+   pub(crate) before:          ProbeFlags,
+   pub(crate) after:           ProbeFlags,
+   /// True when a stored restriction verdict was contradicted and cleared.
+   pub(crate) reinstated:      bool,
+   /// True when this probe verified `SearchTimeline` for a search-pool account.
+   pub(crate) verified_search: bool,
 }
 
 #[derive(Serialize)]
 pub(crate) struct ProbeFlags {
-   pub(crate) suspended: bool,
-   pub(crate) retired:   bool,
-   pub(crate) pool:      &'static str,
+   pub(crate) suspended:            bool,
+   pub(crate) retired:              bool,
+   pub(crate) ct0_dead:             bool,
+   pub(crate) credentials_rejected: bool,
+   pub(crate) verified_search:      bool,
+   pub(crate) pool:                 &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OutAccountsQuery {
+   pub op:     Option<String>,
+   pub pool:   Option<String>,
+   pub reason: Option<String>,
+   pub q:      Option<String>,
+   pub sort:   Option<String>,
+   pub page:   usize,
+}
+
+impl Default for OutAccountsQuery {
+   fn default() -> Self {
+      Self {
+         op:     None,
+         pool:   None,
+         reason: None,
+         q:      None,
+         sort:   None,
+         page:   1,
+      }
+   }
+}
+
+impl OutAccountsQuery {
+   pub(crate) fn from_uri(uri: &Uri) -> Self {
+      let mut parsed = Self::default();
+      let Some(raw) = uri.query() else {
+         return parsed;
+      };
+      for (key, value) in form_urlencoded::parse(raw.as_bytes()) {
+         let trimmed = value.trim();
+         if trimmed.is_empty() {
+            continue;
+         }
+         match key.as_ref() {
+            "op" => {
+               parsed.op = match trimmed {
+                  "SearchTimeline" | "UserTweets" | "UserByScreenName" | "TweetDetail" => {
+                     Some(trimmed.to_owned())
+                  },
+                  _ => None,
+               };
+            },
+            "pool" => {
+               parsed.pool = match trimmed {
+                  "search" | "view" | "demoted" => Some(trimmed.to_owned()),
+                  _ => None,
+               };
+            },
+            "reason" => {
+               parsed.reason = match trimmed {
+                  "ct0_dead"
+                  | "credentials_rejected"
+                  | "unverified"
+                  | "retired"
+                  | "suspended"
+                  | "search_banned"
+                  | "profile_banned"
+                  | "refused"
+                  | "search_404"
+                  | "globally_limited" => Some(trimmed.to_owned()),
+                  _ => None,
+               };
+            },
+            "q" => parsed.q = Some(trimmed.to_owned()),
+            "sort" => {
+               parsed.sort = match trimmed {
+                  "id_asc" | "id_desc" | "last_active" => Some(trimmed.to_owned()),
+                  _ => None,
+               };
+            },
+            "page" => {
+               if let Ok(page) = trimmed.parse::<usize>()
+                  && page > 0
+               {
+                  parsed.page = page;
+               }
+            },
+            _ => {},
+         }
+      }
+      parsed
+   }
+
+   pub(crate) fn has_filters(&self) -> bool {
+      self.op.is_some()
+         || self.pool.is_some()
+         || self.reason.is_some()
+         || self.q.as_deref().is_some_and(|val| !val.trim().is_empty())
+         || self.sort.is_some()
+         || self.page > 1
+   }
+
+   pub(crate) fn to_uri(&self, base_path: &str, page_override: Option<usize>) -> String {
+      let mut serializer = form_urlencoded::Serializer::new(String::new());
+      let mut any = false;
+      if let Some(op) = self.op.as_deref() {
+         serializer.append_pair("op", op);
+         any = true;
+      }
+      if let Some(pool) = self.pool.as_deref() {
+         serializer.append_pair("pool", pool);
+         any = true;
+      }
+      if let Some(reason) = self.reason.as_deref() {
+         serializer.append_pair("reason", reason);
+         any = true;
+      }
+      if let Some(q) = self.q.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+         serializer.append_pair("q", q);
+         any = true;
+      }
+      if let Some(sort) = self.sort.as_deref() {
+         serializer.append_pair("sort", sort);
+         any = true;
+      }
+      let page = page_override.unwrap_or(self.page);
+      if page > 1 {
+         serializer.append_pair("page", &page.to_string());
+         any = true;
+      }
+      if any {
+         format!("{base_path}?{}", serializer.finish())
+      } else {
+         base_path.to_owned()
+      }
+   }
+
+   pub(crate) fn with_scope(&self, op: Option<&str>, pool: Option<&str>) -> String {
+      Self {
+         op:     op.map(str::to_owned),
+         pool:   pool.map(str::to_owned),
+         reason: None,
+         q:      self.q.clone(),
+         sort:   self.sort.clone(),
+         page:   1,
+      }
+      .to_uri("/admin/stats/out", Some(1))
+   }
+
+   pub(crate) fn with_reason(&self, reason: Option<&str>) -> String {
+      Self {
+         op:     self.op.clone(),
+         pool:   self.pool.clone(),
+         reason: reason.map(str::to_owned),
+         q:      self.q.clone(),
+         sort:   self.sort.clone(),
+         page:   1,
+      }
+      .to_uri("/admin/stats/out", Some(1))
+   }
+}
+
+#[derive(Serialize)]
+pub(crate) struct OutAccountRow {
+   pub entry:        OutAccountEntry,
+   pub latest_event: Option<AccountEvent>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct OutAccountsPageData {
+   pub counts:         OutOperationCounts,
+   pub breakdown:      OutBreakdown,
+   pub total_filtered: usize,
+   pub page:           usize,
+   pub total_pages:    usize,
+   pub page_size:      usize,
+   pub accounts:       Vec<OutAccountRow>,
+   pub now:            i64,
+}
+
+#[derive(Deserialize, Default)]
+struct ProbeRequest {
+   mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Ct0UpdateRequest {
+   ct0:   String,
+   #[serde(default)]
+   probe: Option<String>,
+}
+
+#[derive(Serialize)]
+struct Ct0UpdateResponse {
+   ok:               bool,
+   ct0_len:          usize,
+   cleared_ct0_dead: bool,
+   probe:            Option<ProbeResult>,
 }
 
 #[derive(Deserialize)]
@@ -253,12 +464,15 @@ pub(super) fn router() -> Router<AppState> {
    Router::new()
       .route("/admin/stats", get(page))
       .route("/admin/stats/data", get(data))
+      .route("/admin/stats/out", get(out_accounts_page))
+      .route("/admin/stats/out/data", get(out_accounts_data))
       .route("/admin/stats/restrictions", get(restrictions))
       .route("/admin/stats/restrictions/data", get(restrictions_data))
       .route("/admin/stats/sessions/{id}", get(session_page))
       .route("/admin/stats/sessions/{id}/data", get(session_data))
       .route("/admin/stats/sessions/{id}/cookies", get(cookies))
       .route("/admin/stats/sessions/{id}/probe", post(probe))
+      .route("/admin/stats/sessions/{id}/ct0", post(set_ct0))
       .route("/admin/stats/sessions/{id}/pool", post(set_pool))
 }
 
@@ -796,6 +1010,189 @@ async fn session_page(
       .into_response()
 }
 
+async fn out_accounts_snapshot(state: &AppState, query: &OutAccountsQuery) -> OutAccountsPageData {
+   let sort = query.sort.as_deref().unwrap_or("priority");
+   let snap = state.api.sessions.out_accounts_snapshot(
+      query.op.as_deref(),
+      query.pool.as_deref(),
+      query.reason.as_deref(),
+      query.q.as_deref(),
+      sort,
+      query.page,
+      OUT_PAGE_SIZE,
+   );
+   let page_ids: Vec<i64> = snap.accounts.iter().map(|entry| entry.id).collect();
+   let mut latest_events = if let Some(store) = state.stats.as_ref()
+      && !page_ids.is_empty()
+   {
+      tokio::time::timeout(
+         Duration::from_secs(3),
+         store.latest_account_events(&page_ids),
+      )
+      .await
+      .ok()
+      .and_then(Result::ok)
+      .unwrap_or_default()
+   } else {
+      std::collections::HashMap::new()
+   };
+   let accounts = snap
+      .accounts
+      .into_iter()
+      .map(|entry| {
+         let latest_event = latest_events.remove(&entry.id);
+         OutAccountRow {
+            entry,
+            latest_event,
+         }
+      })
+      .collect();
+   OutAccountsPageData {
+      counts: snap.counts,
+      breakdown: snap.breakdown,
+      total_filtered: snap.total_filtered,
+      page: snap.page,
+      total_pages: snap.total_pages,
+      page_size: snap.page_size,
+      accounts,
+      now: snap.now,
+   }
+}
+
+async fn out_accounts_page(
+   State(state): State<AppState>,
+   jar: CookieJar,
+   request: Request,
+) -> Response {
+   let theme = Prefs::from_cookies(&jar, &state.config).theme;
+   if !administrator(&state, &jar).await {
+      return forbidden_html(&theme);
+   }
+   let query = OutAccountsQuery::from_uri(request.uri());
+   let data = out_accounts_snapshot(&state, &query).await;
+   let canonical_uri = query.to_uri("/admin/stats/out", Some(data.page));
+   Html(view::out_accounts(&theme, &data, &query, &canonical_uri).into_string()).into_response()
+}
+
+async fn out_accounts_data(
+   State(state): State<AppState>,
+   jar: CookieJar,
+   request: Request,
+) -> Response {
+   if !administrator(&state, &jar).await {
+      return StatusCode::FORBIDDEN.into_response();
+   }
+   let query = OutAccountsQuery::from_uri(request.uri());
+   Json(out_accounts_snapshot(&state, &query).await).into_response()
+}
+
+fn parse_probe_mode(raw: Option<&str>) -> std::result::Result<ProbeMode, &'static str> {
+   match raw.map(str::trim).filter(|val| !val.is_empty()) {
+      None | Some("health") => Ok(ProbeMode::Health),
+      Some("search") => Ok(ProbeMode::Search),
+      Some(_) => Err("Probe mode must be \"health\" or \"search\"."),
+   }
+}
+
+fn flags_from_state(account: &crate::api::auth::AccountState) -> ProbeFlags {
+   ProbeFlags {
+      suspended:            account.suspended,
+      retired:              account.retired,
+      ct0_dead:             account.ct0_dead,
+      credentials_rejected: account.credentials_rejected,
+      verified_search:      account.verified_operations.contains_key("SearchTimeline"),
+      pool:                 account.pool,
+   }
+}
+
+async fn execute_probe(
+   state: &AppState,
+   id: i64,
+   mode: ProbeMode,
+) -> std::result::Result<ProbeResult, StatusCode> {
+   let Some(before_state) = state.api.sessions.account_state(id).await else {
+      return Err(StatusCode::NOT_FOUND);
+   };
+   let before = flags_from_state(&before_state);
+   let mode_label = match mode {
+      ProbeMode::Health => "health",
+      ProbeMode::Search => "search",
+   };
+
+   let (verdict_enum, mut detail, report_verified_search, fresh_ct0) =
+      match state.api.probe_account_with_mode(id, mode).await {
+         Ok(report) => (
+            Some(report.verdict),
+            report.detail,
+            report.verified_search,
+            report.fresh_ct0,
+         ),
+         Err(err) => (None, Some(err.to_string()), false, None),
+      };
+
+   let verdict = verdict_enum.map_or("error", ProbeVerdict::label);
+   let mut reinstated = false;
+   let mut verified_search = false;
+
+   match verdict_enum {
+      Some(ProbeVerdict::Alive) => {
+         reinstated = state.api.sessions.reinstate(id).await;
+         if report_verified_search {
+            let in_search = state
+               .api
+               .sessions
+               .account_state(id)
+               .await
+               .is_some_and(|acct| acct.pool == "search");
+            if in_search {
+               state.api.record_probe_search_verified(id).await;
+               verified_search = true;
+            } else {
+               let note = "Account is currently in the view pool; use Move to Search Pool to \
+                           promote it.";
+               detail = Some(match detail {
+                  Some(existing) => format!("{existing}. {note}"),
+                  None => note.to_owned(),
+               });
+            }
+         }
+      },
+      Some(ProbeVerdict::CsrfRejected) => {
+         let current_ct0 = state.api.sessions.ct0(id).unwrap_or_default();
+         if let Some(replacement) = fresh_ct0.filter(|val| val != &current_ct0) {
+            state.api.sessions.hold_ct0(id, replacement);
+            state.api.sessions.clear_ct0_dead(id).await;
+            let note = "X returned a replacement ct0 in Set-Cookie and it was saved; run Probe \
+                        again to verify.";
+            detail = Some(match detail {
+               Some(existing) => format!("{existing}. {note}"),
+               None => note.to_owned(),
+            });
+         } else {
+            state.api.sessions.mark_ct0_dead(id).await;
+         }
+      },
+      _ => {},
+   }
+
+   let after = state
+      .api
+      .sessions
+      .account_state(id)
+      .await
+      .map_or_else(before_pool, |account| flags_from_state(&account));
+
+   Ok(ProbeResult {
+      mode: mode_label,
+      verdict,
+      detail,
+      before,
+      after,
+      reinstated,
+      verified_search,
+   })
+}
+
 /// Ask X about one account and, when the answer contradicts a stored verdict,
 /// clear it.
 ///
@@ -820,54 +1217,189 @@ async fn probe(
    if !administrator(&state, &jar).await {
       return StatusCode::FORBIDDEN.into_response();
    }
-   let Some(before_state) = state.api.sessions.account_state(id).await else {
-      return StatusCode::NOT_FOUND.into_response();
+   let Ok(body) = to_bytes(request.into_body(), MAX_JSON_BYTES).await else {
+      return (StatusCode::BAD_REQUEST, "Could not read request body.").into_response();
    };
-   let before = ProbeFlags {
-      suspended: before_state.suspended,
-      retired:   before_state.retired,
-      pool:      before_state.pool,
+   let payload = if body.is_empty() {
+      ProbeRequest::default()
+   } else {
+      let Ok(parsed) = serde_json::from_slice::<ProbeRequest>(&body) else {
+         return (
+            StatusCode::BAD_REQUEST,
+            "Expected JSON {\"mode\": \"health\" | \"search\"}.",
+         )
+            .into_response();
+      };
+      parsed
+   };
+   let mode = match parse_probe_mode(payload.mode.as_deref()) {
+      Ok(mode) => mode,
+      Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
    };
 
-   let (verdict, detail) = match state.api.probe_account(id).await {
-      Ok(verdict) => (verdict.label(), None),
-      Err(err) => ("error", Some(err.to_string())),
-   };
+   match execute_probe(&state, id, mode).await {
+      Ok(result) => Json(result).into_response(),
+      Err(status) => status.into_response(),
+   }
+}
 
-   // Only a live answer clears a verdict. A refused settings write or a dead
-   // credential clears nothing, and an error says nothing at all. `reinstate`
-   // decides whether there is anything to undo: an account that was moved out
-   // of search goes back to it even when no suspension flag is left standing.
-   let reinstated = verdict == "alive" && state.api.sessions.reinstate(id).await;
-
-   let after = state
-      .api
-      .sessions
-      .account_state(id)
-      .await
-      .map_or(before_pool(), |account| {
-         ProbeFlags {
-            suspended: account.suspended,
-            retired:   account.retired,
-            pool:      account.pool,
+fn extract_ct0_from_json(value: &serde_json::Value) -> Option<&str> {
+   match value {
+      serde_json::Value::Array(items) => {
+         items.iter().find_map(|item| {
+            let name = item.get("name")?.as_str()?;
+            name.eq_ignore_ascii_case("ct0")
+               .then(|| item.get("value").and_then(serde_json::Value::as_str))
+               .flatten()
+         })
+      },
+      serde_json::Value::Object(map) => {
+         if map
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case("ct0"))
+         {
+            return map.get("value").and_then(serde_json::Value::as_str);
          }
-      });
+         if let Some(ct0) = map.get("ct0").and_then(serde_json::Value::as_str) {
+            return Some(ct0);
+         }
+         map.get("cookies").and_then(extract_ct0_from_json)
+      },
+      _ => None,
+   }
+}
 
-   Json(ProbeResult {
-      verdict,
-      detail,
-      before,
-      after,
-      reinstated,
+fn parse_ct0_input(raw: &str) -> std::result::Result<String, &'static str> {
+   let trimmed = raw.trim();
+   if trimmed.is_empty() {
+      return Err("ct0 value cannot be empty.");
+   }
+   let extracted = if trimmed.starts_with('[') || trimmed.starts_with('{') {
+      let parsed = serde_json::from_str::<serde_json::Value>(trimmed)
+         .map_err(|_| "Could not parse pasted JSON for ct0.")?;
+      extract_ct0_from_json(&parsed)
+         .map(str::trim)
+         .ok_or("Pasted JSON did not contain a ct0 cookie.")?
+         .to_owned()
+   } else if trimmed.contains(';')
+      || trimmed.contains('=')
+      || trimmed
+         .get(..7)
+         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cookie:"))
+   {
+      let header_val = trimmed
+         .get(..7)
+         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cookie:"))
+         .then(|| trimmed[7..].trim())
+         .unwrap_or(trimmed);
+      header_val
+         .split(';')
+         .filter_map(|part| part.split_once('='))
+         .find(|(name, _)| name.trim().eq_ignore_ascii_case("ct0"))
+         .map(|(_, value)| value.trim().trim_matches('"').to_owned())
+         .ok_or("Pasted cookie header did not contain a ct0=... pair.")?
+   } else {
+      trimmed
+         .strip_prefix('"')
+         .and_then(|val| val.strip_suffix('"'))
+         .unwrap_or(trimmed)
+         .trim()
+         .to_owned()
+   };
+
+   if extracted.is_empty() {
+      return Err("ct0 value cannot be empty.");
+   }
+   if extracted.len() > 512 {
+      return Err("ct0 value is too long (maximum 512 characters).");
+   }
+   if !extracted
+      .bytes()
+      .all(|byte| byte.is_ascii_graphic() && byte != b';')
+      || HeaderValue::from_str(&extracted).is_err()
+   {
+      return Err("ct0 contains invalid cookie characters (whitespace, semicolons, or control bytes).");
+   }
+   Ok(extracted)
+}
+
+async fn set_ct0(
+   State(state): State<AppState>,
+   jar: CookieJar,
+   Path(id): Path<i64>,
+   request: Request,
+) -> Response {
+   let origin = current_origin(state.config.url_prefix());
+   if cross_origin(request.headers(), &origin) {
+      return (
+         StatusCode::FORBIDDEN,
+         "Cross-origin requests are not permitted.",
+      )
+         .into_response();
+   }
+   if !administrator(&state, &jar).await {
+      return StatusCode::FORBIDDEN.into_response();
+   }
+   let Ok(body) = to_bytes(request.into_body(), MAX_CT0_JSON_BYTES).await else {
+      return (StatusCode::BAD_REQUEST, "Could not read request body.").into_response();
+   };
+   let Ok(payload) = serde_json::from_slice::<Ct0UpdateRequest>(&body) else {
+      return (
+         StatusCode::BAD_REQUEST,
+         "Expected JSON {\"ct0\": \"...\", \"probe\"?: \"health\" | \"search\"}.",
+      )
+         .into_response();
+   };
+   let ct0 = match parse_ct0_input(&payload.ct0) {
+      Ok(ct0) => ct0,
+      Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+   };
+   let probe_mode = match payload.probe.as_deref().map(str::trim).filter(|val| !val.is_empty()) {
+      None => None,
+      Some(mode) => {
+         match parse_probe_mode(Some(mode)) {
+            Ok(parsed) => Some(parsed),
+            Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+         }
+      },
+   };
+
+   let ct0_len = ct0.len();
+   let cleared_ct0_dead = match state.api.sessions.set_ct0(id, ct0).await {
+      Ok(cleared) => cleared,
+      Err(Error::NotFound(message)) => return (StatusCode::NOT_FOUND, message).into_response(),
+      Err(Error::InvalidConfig(message)) => return (StatusCode::CONFLICT, message).into_response(),
+      Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+   };
+
+   let probe = match probe_mode {
+      Some(mode) => {
+         match execute_probe(&state, id, mode).await {
+            Ok(result) => Some(result),
+            Err(status) => return status.into_response(),
+         }
+      },
+      None => None,
+   };
+
+   Json(Ct0UpdateResponse {
+      ok: true,
+      ct0_len,
+      cleared_ct0_dead,
+      probe,
    })
    .into_response()
 }
 
 const fn before_pool() -> ProbeFlags {
    ProbeFlags {
-      suspended: false,
-      retired:   false,
-      pool:      "view",
+      suspended:            false,
+      retired:              false,
+      ct0_dead:             false,
+      credentials_rejected: false,
+      verified_search:      false,
+      pool:                 "view",
    }
 }
 
@@ -1144,6 +1676,9 @@ mod tests {
          pool:                 "view",
          demoted_from_search:  false,
          available:            true,
+         has_auth_token:       true,
+         ct0_present:          true,
+         ct0_len:              160,
          credentials_rejected: false,
          search_banned:        false,
          profile_banned:       false,
@@ -1210,5 +1745,74 @@ mod tests {
          response.headers()["cloudflare-cdn-cache-control"],
          "no-store"
       );
+   }
+
+   #[test]
+   fn parse_ct0_input_supports_raw_header_and_json_formats() {
+      let token = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+      assert_eq!(parse_ct0_input(token).unwrap(), token);
+      assert_eq!(parse_ct0_input(&format!("  \"{token}\" \n")).unwrap(), token);
+      assert_eq!(parse_ct0_input(&format!("ct0={token};")).unwrap(), token);
+      assert_eq!(
+         parse_ct0_input(&format!("Cookie: auth_token=deadbeef; ct0={token}; lang=en")).unwrap(),
+         token
+      );
+      assert_eq!(
+         parse_ct0_input(&format!(
+            r#"[{{"name":"auth_token","value":"x"}},{{"name":"ct0","value":"{token}"}}]"#
+         ))
+         .unwrap(),
+         token
+      );
+      assert_eq!(
+         parse_ct0_input(&format!(r#"{{"ct0":"{token}"}}"#)).unwrap(),
+         token
+      );
+      assert_eq!(
+         parse_ct0_input(&format!(r#"{{"name":"ct0","value":"{token}"}}"#)).unwrap(),
+         token
+      );
+
+      for bad in [
+         "",
+         "   ",
+         "has space",
+         "ct0=",
+         "auth_token=only",
+         r#"[{"name":"auth_token","value":"abc"}]"#,
+         &"a".repeat(600),
+      ] {
+         assert!(parse_ct0_input(bad).is_err(), "should reject {bad:?}");
+      }
+   }
+
+   #[test]
+   fn out_accounts_query_round_trips_and_scopes_cleanly() {
+      let uri: Uri = "/admin/stats/out?op=SearchTimeline&reason=ct0_dead&q=alice&sort=id_desc&page=3"
+         .parse()
+         .unwrap();
+      let query = OutAccountsQuery::from_uri(&uri);
+      assert_eq!(query.op.as_deref(), Some("SearchTimeline"));
+      assert_eq!(query.reason.as_deref(), Some("ct0_dead"));
+      assert_eq!(query.q.as_deref(), Some("alice"));
+      assert_eq!(query.sort.as_deref(), Some("id_desc"));
+      assert_eq!(query.page, 3);
+      assert!(query.has_filters());
+
+      let switched = query.with_scope(Some("UserTweets"), None);
+      assert!(switched.contains("op=UserTweets"));
+      assert!(!switched.contains("reason="));
+      assert!(!switched.contains("page="));
+      assert!(switched.contains("q=alice"));
+
+      let with_reason = query.with_reason(Some("unverified"));
+      assert!(with_reason.contains("op=SearchTimeline"));
+      assert!(with_reason.contains("reason=unverified"));
+      assert!(!with_reason.contains("page="));
+
+      assert_eq!(parse_probe_mode(None).unwrap(), ProbeMode::Health);
+      assert_eq!(parse_probe_mode(Some("health")).unwrap(), ProbeMode::Health);
+      assert_eq!(parse_probe_mode(Some("search")).unwrap(), ProbeMode::Search);
+      assert!(parse_probe_mode(Some("invalid")).is_err());
    }
 }

@@ -13,8 +13,10 @@ use time::{
 
 mod account;
 mod investigation;
+mod out;
 pub(crate) use account::account;
 pub(crate) use investigation::restrictions;
+pub(crate) use out::out_accounts;
 
 use crate::{
    api::auth::{
@@ -393,6 +395,7 @@ pub(crate) fn frame(
 ) -> Markup {
    let mode = theme_mode(theme);
    let nav_overview = active == "dashboard" || active == "overview";
+   let nav_out = active == "out";
    let nav_restrictions = active == "restrictions" || active == "account";
    html! {
       (DOCTYPE)
@@ -402,8 +405,8 @@ pub(crate) fn frame(
             meta name="viewport" content="width=device-width, initial-scale=1";
             meta name="robots" content="noindex, nofollow";
             title { (title) " · Teapot administration" }
-            link rel="stylesheet" href="/css/admin-stats.css?v=8";
-            script src="/js/admin-stats.js?v=8" defer="" {}
+            link rel="stylesheet" href="/css/admin-stats.css?v=9";
+            script src="/js/admin-stats.js?v=9" defer="" {}
          }
          body data-theme=(mode) {
             div class="admin-layout admin-workspace" {
@@ -413,6 +416,7 @@ pub(crate) fn frame(
                      span { "operations" }
                   }
                   a href="/admin/stats" aria-current=[nav_overview.then_some("page")] { "Overview & pools" }
+                  a href="/admin/stats/out" aria-current=[nav_out.then_some("page")] { "Out / unverified" }
                   a href="/admin/stats/restrictions" aria-current=[nav_restrictions.then_some("page")] { "Restrictions" }
                   a href="/admin/import" { "Account import" }
                   a class="admin-home" href="/" { "← Back to site" }
@@ -894,23 +898,42 @@ fn pools_section(
                dt { "Demoted from search" }
                dd id="stats-demoted" {
                   @if census.demoted_from_search > 0 {
-                     a href="/admin/stats/restrictions?pool=view" { (census.demoted_from_search) }
+                     a href="/admin/stats/out?pool=demoted" { (census.demoted_from_search) }
                   } @else {
                      "0"
                   }
                }
                dd class="admin-stats-note" { "Queued for trickle SearchTimeline recovery" }
             }
-            (metric(
-               "stats-out-rotation",
-               "Out of rotation",
-               Some(census.out_of_rotation.to_string()),
-               &format!(
-                  "{} stale ct0 · {} retired · {} bad auth",
-                  census.ct0_dead, census.retired, census.credentials_rejected
-               ),
-               if census.out_of_rotation > 0 { "warn" } else { "" },
-            ))
+            div class=(if census.out_of_rotation > 0 { "admin-kpi admin-stats-metric admin-kpi--warn admin-stats-metric--warn" } else { "admin-kpi admin-stats-metric" }) {
+               dt { "Out of rotation" }
+               dd id="stats-out-rotation" {
+                  @if census.out_of_rotation > 0 {
+                     a href="/admin/stats/out" { (census.out_of_rotation) }
+                  } @else {
+                     "0"
+                  }
+               }
+               dd class="admin-stats-note" {
+                  @if census.ct0_dead > 0 {
+                     a href="/admin/stats/out?reason=ct0_dead" { (census.ct0_dead) " stale ct0" }
+                  } @else {
+                     (census.ct0_dead) " stale ct0"
+                  }
+                  " · "
+                  @if census.retired > 0 {
+                     a href="/admin/stats/out?reason=retired" { (census.retired) " retired" }
+                  } @else {
+                     (census.retired) " retired"
+                  }
+                  " · "
+                  @if census.credentials_rejected > 0 {
+                     a href="/admin/stats/out?reason=credentials_rejected" { (census.credentials_rejected) " bad auth" }
+                  } @else {
+                     (census.credentials_rejected) " bad auth"
+                  }
+               }
+            }
             (metric(
                "stats-bans",
                "Bans & suspensions",
@@ -954,7 +977,10 @@ fn pools_section(
                         span { i class="admin-legend-swatch admin-legend-swatch--held" {} "Held" }
                         span { i class="admin-legend-swatch admin-legend-swatch--resting" {} "Resting (429)" }
                         span { i class="admin-legend-swatch admin-legend-swatch--spent" {} "Window spent" }
-                        span { i class="admin-legend-swatch admin-legend-swatch--out" {} "Out / unverified" }
+                        a class="admin-legend-link" href="/admin/stats/out" title="Inspect all Out / unverified accounts" {
+                           i class="admin-legend-swatch admin-legend-swatch--out" {}
+                           "Out / unverified"
+                        }
                      }
                   }
                   thead {
@@ -984,17 +1010,16 @@ fn pools_section(
 
 fn operation_row(op: &OperationPool) -> Markup {
    let total = op.accounts.max(1) as f64;
-   let segments = [
+   let non_out_segments = [
       (op.free, "admin-bar-fill--free"),
       (op.busy, "admin-bar-fill--busy"),
       (op.held, "admin-bar-fill--held"),
       (op.resting, "admin-bar-fill--resting"),
       (op.spent, "admin-bar-fill--spent"),
-      (op.out, "admin-bar-fill--out"),
    ];
    let mut cursor_x = 0.0_f64;
    let mut rects = Vec::new();
-   for (count, class_name) in segments {
+   for (count, class_name) in non_out_segments {
       if count == 0 {
          continue;
       }
@@ -1002,6 +1027,14 @@ fn operation_row(op: &OperationPool) -> Markup {
       rects.push((format!("{cursor_x:.2}"), format!("{width:.2}"), class_name));
       cursor_x = (cursor_x + width).min(100.0);
    }
+
+   let out_href = format!("/admin/stats/out?op={}", op.operation);
+   let out_rect = (op.out > 0).then(|| {
+      let raw_width = (op.out as f64 * 100.0 / total).clamp(0.0, 100.0);
+      let width = raw_width.max(3.0).min(100.0);
+      let x = (100.0 - width).min(cursor_x);
+      (format!("{x:.2}"), format!("{width:.2}"))
+   });
 
    let pool_badge = if op.pool == "search" {
       "admin-badge admin-badge--search"
@@ -1014,9 +1047,26 @@ fn operation_row(op: &OperationPool) -> Markup {
          th scope="row" { (op.operation) }
          td { span class=(pool_badge) { (op.pool) } }
          td {
-            svg class="admin-bar-svg" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true" {
+            svg
+               class="admin-bar-svg"
+               viewBox="0 0 100 10"
+               preserveAspectRatio="none"
+               role="group"
+               aria-label=(format!("{} slot utilization", op.operation))
+            {
                @for (x, width, class_name) in &rects {
-                  rect x=(x) y="0" width=(width) height="8" class=(class_name) {}
+                  rect x=(x) y="0" width=(width) height="10" class=(class_name) {}
+               }
+               @if let Some((x, width)) = &out_rect {
+                  a
+                     href=(out_href)
+                     class="admin-bar-link"
+                     aria-label=(format!("Inspect {} out or unverified {} accounts", op.out, op.operation))
+                  {
+                     rect x=(x) y="0" width=(width) height="10" class="admin-bar-fill--out" {
+                        title { (op.out) " out / unverified — click to inspect" }
+                     }
+                  }
                }
             }
          }
@@ -1024,7 +1074,19 @@ fn operation_row(op: &OperationPool) -> Markup {
          td { (op.busy + op.held) }
          td { (op.resting) }
          td { (op.spent) }
-         td { (op.out) }
+         td {
+            @if op.out > 0 {
+               a
+                  class="admin-out-link"
+                  href=(out_href)
+                  title=(format!("Inspect {} out / unverified {} accounts", op.out, op.operation))
+               {
+                  (op.out)
+               }
+            } @else {
+               "0"
+            }
+         }
          td { (op.accounts) }
       }
    }
@@ -1598,8 +1660,9 @@ mod tests {
 
       let markup = page("light", Some(&dashboard), WEEK_MINUTES).into_string();
       assert!(markup.contains("data-theme=\"light\""));
-      assert!(markup.contains("/css/admin-stats.css?v=8"));
-      assert!(markup.contains("/js/admin-stats.js?v=8"));
+      assert!(markup.contains("/css/admin-stats.css?v=9"));
+      assert!(markup.contains("/js/admin-stats.js?v=9"));
+      assert!(markup.contains("href=\"/admin/stats/out?op=UserTweets\""));
       assert!(!markup.contains("style=\""));
       assert!(!markup.contains("<script>"));
       assert!(markup.contains("Anti-DDoS &amp; timeline pressure"));

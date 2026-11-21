@@ -539,6 +539,36 @@ impl StatsStore {
          .await
    }
 
+   /// Latest recorded operational event for each supplied session ID.
+   pub async fn latest_account_events(
+      &self,
+      session_ids: &[i64],
+   ) -> Result<HashMap<i64, AccountEvent>, Error> {
+      if session_ids.is_empty() {
+         return Ok(HashMap::new());
+      }
+      let events = self
+         .account_events(
+            "SELECT e.id, e.session_id, e.kind, e.observed_unix, e.endpoint, e.http_status, \
+             e.upstream_code, e.evidence
+          FROM unnest($1::bigint[]) AS s(id)
+          CROSS JOIN LATERAL (
+             SELECT id, session_id, kind, observed_unix, endpoint, http_status, upstream_code, \
+                    evidence
+             FROM stats_account_events
+             WHERE session_id = s.id
+             ORDER BY observed_unix DESC, id DESC
+             LIMIT 1
+          ) AS e",
+            &[&session_ids],
+         )
+         .await?;
+      Ok(events
+         .into_iter()
+         .map(|event| (event.session_id, event))
+         .collect())
+   }
+
    async fn account_events(
       &self,
       sql: &str,

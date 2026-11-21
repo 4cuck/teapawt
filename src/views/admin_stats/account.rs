@@ -7,7 +7,10 @@ use super::{
    frame,
    minute_label,
 };
-use crate::routes::AccountData;
+use crate::{
+   routes::AccountData,
+   types::SessionKind,
+};
 
 pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Markup {
    let identity = data.and_then(|item| item.identity.as_ref());
@@ -32,19 +35,24 @@ pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Marku
       Some(id),
       html! {
          header class="admin-page-header" {
-            a class="admin-text-link" href="/admin/stats/restrictions" { "← Restriction log" }
+            div class="admin-breadcrumbs" {
+               a class="admin-text-link" href="/admin/stats/out" { "← Out / unverified" }
+               span class="admin-muted" { "·" }
+               a class="admin-text-link" href="/admin/stats/restrictions" { "Restriction log" }
+            }
             p class="admin-eyebrow" { "Operations / session #" (id) }
             h1 { (heading) }
-            p { "Live runtime pool flags, authenticated probe & pool reassignment controls, and 30-day restriction evidence." }
+            p { "Live runtime pool flags, authenticated probe & ct0 replacement controls, browser cookie export, and 30-day restriction evidence." }
          }
 
          @if let Some(acct) = runtime {
             @let in_search = acct.pool == "search";
             @let in_clean_view = acct.pool != "search" && !acct.demoted_from_search;
+            @let is_cookie = acct.kind == SessionKind::Cookie;
             section class="admin-stats-panel admin-actions-card" data-session=(id) {
                h2 { "Operator actions" }
                p class="admin-hint" {
-                  "Run Health Probe checks account/settings and falls back to an authenticated GraphQL read over the account's pinned SOCKS5 exit (never loading x.com HTML or triggering bulk Cloudflare challenges). Pool moves apply immediately in memory and PostgreSQL."
+                  "Health Probe checks account/settings and falls back to an authenticated GraphQL read over the account's pinned SOCKS5 exit. Search Probe directly tests SearchTimeline and verifies search-pool accounts when posts are returned. Pool moves apply immediately in memory and PostgreSQL."
                }
                div class="admin-action-buttons admin-probe-actions" {
                   button
@@ -52,8 +60,18 @@ pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Marku
                      class="admin-btn admin-btn--primary"
                      type="button"
                      data-session=(id)
+                     data-probe-mode="health"
                   {
                      "Run Health Probe"
+                  }
+                  button
+                     id="run-search-probe"
+                     class="admin-btn"
+                     type="button"
+                     data-session=(id)
+                     data-probe-mode="search"
+                  {
+                     "Run Search Probe"
                   }
                   button
                      id="move-pool-search"
@@ -77,6 +95,71 @@ pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Marku
                   }
                }
                p id="account-action-status" class="admin-notice" role="status" hidden {}
+            }
+
+            @if is_cookie {
+               section class="admin-stats-panel admin-ct0-panel" data-session=(id) {
+                  div class="admin-section-heading" {
+                     div {
+                        h2 { "Replace ct0 CSRF cookie" }
+                        p {
+                           "Paste a fresh ct0 cookie copied from your browser to repair a stale CSRF token. Accepts a raw ct0 value, a ct0=... cookie pair, a Cookie header, or Cookie-Editor JSON. Saved immediately in memory and PostgreSQL."
+                        }
+                     }
+                     div class="admin-badge-row" {
+                        @if acct.ct0_dead {
+                           span class="admin-badge admin-badge--bad" {
+                              "ct0 stale / rejected (" (acct.ct0_len) " chars)"
+                           }
+                        } @else if acct.ct0_present {
+                           span class="admin-badge admin-badge--ok" {
+                              "ct0 present (" (acct.ct0_len) " chars)"
+                           }
+                        } @else {
+                           span class="admin-badge admin-badge--bad" { "ct0 missing" }
+                        }
+                     }
+                  }
+                  div class="admin-ct0-form-row" {
+                     input
+                        id="ct0-input"
+                        class="admin-ct0-input"
+                        type="text"
+                        name="ct0"
+                        autocomplete="off"
+                        spellcheck="false"
+                        placeholder="Paste new ct0 value, ct0=..., Cookie header, or Cookie-Editor JSON"
+                        aria-label="New ct0 cookie value";
+                     button
+                        id="save-ct0"
+                        class="admin-btn admin-ct0-submit"
+                        type="button"
+                        data-session=(id)
+                        data-probe=""
+                     {
+                        "Save ct0"
+                     }
+                     button
+                        id="save-ct0-probe"
+                        class="admin-btn admin-btn--primary admin-ct0-submit"
+                        type="button"
+                        data-session=(id)
+                        data-probe="health"
+                     {
+                        "Save ct0 & Health Probe"
+                     }
+                     button
+                        id="save-ct0-search-probe"
+                        class="admin-btn admin-ct0-submit"
+                        type="button"
+                        data-session=(id)
+                        data-probe="search"
+                     {
+                        "Save ct0 & Search Probe"
+                     }
+                  }
+                  p id="ct0-status" class="admin-notice admin-inline-ct0-status" role="status" hidden {}
+               }
             }
 
             section id="account-runtime-panel" class="admin-stats-panel" {
@@ -264,10 +347,17 @@ pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Marku
          section class="admin-stats-panel admin-cookie-panel" data-session=(id) {
             h2 { "Cookie export" }
             p class="admin-hint" {
-               "Exports a Cookie-Editor JSON bundle with the latest in-memory ct0 token. Keep exported credentials private."
+               "Exports a Cookie-Editor JSON bundle with the latest in-memory ct0 token for importing into your browser. Keep exported credentials private."
             }
             div class="admin-cookie-actions" {
-               button id="show-cookies" class="admin-btn" type="button" { "Reveal cookies" }
+               button
+                  id="quick-copy-cookies"
+                  class="admin-btn admin-btn--primary"
+                  type="button"
+                  data-session=(id)
+               {
+                  "Copy Cookie-Editor JSON"
+               }
                a
                   id="download-cookies"
                   class="admin-btn"
@@ -276,6 +366,7 @@ pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Marku
                {
                   "Download JSON"
                }
+               button id="show-cookies" class="admin-btn" type="button" { "Reveal cookies" }
             }
             div id="cookie-confirmation" hidden {
                p class="admin-hint" { "Confirm revealing raw authentication cookies on screen?" }
@@ -347,4 +438,64 @@ fn bad_flag(label: &str, active: bool) -> Markup {
       ("admin-state admin-state--inactive", "clear")
    };
    html! { span class=(class_name) { (label) ": " (state) } }
+}
+
+#[cfg(test)]
+mod tests {
+   use std::collections::BTreeMap;
+
+   use super::*;
+   use crate::api::auth::AccountState;
+
+   #[test]
+   fn account_page_renders_ct0_editor_search_probe_and_is_csp_clean() {
+      let data = AccountData {
+         account:    Some(AccountState {
+            id:                        77,
+            username:                  "stale_acct".to_owned(),
+            kind:                      SessionKind::Cookie,
+            pool:                      "search",
+            demoted_from_search:       false,
+            available:                 false,
+            has_auth_token:            true,
+            ct0_present:               true,
+            ct0_len:                   160,
+            credentials_rejected:      false,
+            search_banned:             false,
+            profile_banned:            false,
+            ct0_dead:                  true,
+            suspended:                 false,
+            retired:                   false,
+            filters_cleared:           false,
+            filters_retry_at:          0,
+            filters_failed:            false,
+            globally_limited:          false,
+            limited_at:                None,
+            profile_strikes:           0,
+            active_calls:              0,
+            last_active:               None,
+            search_empty_streak:       0,
+            search_empty_total:        0,
+            search_non_empty_total:    0,
+            search_rate_limited_total: 0,
+            last_search_empty:         None,
+            rate_limits:               BTreeMap::new(),
+            refused_operations:        BTreeMap::new(),
+            verified_operations:       BTreeMap::new(),
+         }),
+         identity:   None,
+         events:     Vec::new(),
+         search_24h: None,
+         search_7d:  None,
+      };
+      let markup = account("dark", 77, Some(&data)).into_string();
+      assert!(!markup.contains("style=\""));
+      assert!(!markup.contains("<script>"));
+      assert!(markup.contains("Replace ct0 CSRF cookie"));
+      assert!(markup.contains("Save ct0 &amp; Health Probe"));
+      assert!(markup.contains("Save ct0 &amp; Search Probe"));
+      assert!(markup.contains("Run Search Probe"));
+      assert!(markup.contains("Copy Cookie-Editor JSON"));
+      assert!(markup.contains("href=\"/admin/stats/out\""));
+   }
 }

@@ -865,7 +865,7 @@ fn log_upstream(body: &str) -> String {
 }
 
 /// The `ct0` in one `set-cookie` line, when it is the one X just issued.
-fn ct0_cookie(value: &header::HeaderValue) -> Option<String> {
+pub(super) fn ct0_cookie(value: &header::HeaderValue) -> Option<String> {
    let text = value.to_str().ok()?;
    let (pair, _) = text.split_once(';').unwrap_or((text, ""));
    let (name, cookie) = pair.split_once('=')?;
@@ -1168,7 +1168,7 @@ impl ApiClient {
 
    pub(crate) async fn cookie_snapshot(&self, session_id: i64) -> Option<Vec<EditorCookie>> {
       let (auth_token, ct0) = self.sessions.cookie_credentials(session_id)?;
-      if auth_token.is_empty() || ct0.is_empty() {
+      if auth_token.is_empty() {
          return None;
       }
       let cookies = self.cookies.snapshot(session_id).await;
@@ -2596,7 +2596,11 @@ impl ApiClient {
             // so the account recovers on this call: no page load of x.com, and
             // no second request. Only an account X answers without a token is
             // taken out of rotation.
-            match fresh_ct0.filter(|ct0| ct0 != &session.ct0) {
+            let current_ct0 = self
+               .sessions
+               .ct0(session.id)
+               .unwrap_or_else(|| session.ct0.clone());
+            match fresh_ct0.filter(|ct0| ct0 != &current_ct0) {
                Some(ct0) => {
                   self.sessions.hold_ct0(session.id, ct0);
                   self.sessions.clear_ct0_dead(session.id).await;

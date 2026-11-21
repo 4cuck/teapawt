@@ -296,8 +296,9 @@ pub(super) fn export_cookies(
    auth_token: String,
    ct0: String,
 ) -> Vec<EditorCookie> {
+   let ct0_entry = (!ct0.is_empty()).then(|| ("ct0".to_owned(), ct0));
    std::iter::once(("auth_token".to_owned(), auth_token))
-      .chain(std::iter::once(("ct0".to_owned(), ct0)))
+      .chain(ct0_entry)
       .chain(
          cookies
             .into_iter()
@@ -411,5 +412,18 @@ mod tests {
       headers.insert(header::COOKIE, "auth_token=t".parse().unwrap());
       jar.merge_into(7, &mut headers).await;
       assert_eq!(headers[header::COOKIE].to_str().unwrap(), "auth_token=t");
+   }
+
+   #[test]
+   fn export_cookies_allows_missing_ct0_so_operator_can_refresh_in_browser() {
+      let mut bag = BTreeMap::new();
+      bag.insert("lang".to_owned(), "en".to_owned());
+      let exported = export_cookies(bag, "auth-only".to_owned(), String::new());
+      let names: Vec<&str> = exported.iter().map(|c| c.name.as_str()).collect();
+      assert_eq!(names, vec!["auth_token", "lang"]);
+
+      let with_ct0 = export_cookies(BTreeMap::new(), "a".to_owned(), "c".to_owned());
+      let names: Vec<&str> = with_ct0.iter().map(|c| c.name.as_str()).collect();
+      assert_eq!(names, vec!["auth_token", "ct0"]);
    }
 }

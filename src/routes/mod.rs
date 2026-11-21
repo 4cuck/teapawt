@@ -8,6 +8,9 @@ pub(crate) use admin_stats::{
    InvestigationData,
    InvestigationQuery,
    Observation,
+   OutAccountRow,
+   OutAccountsPageData,
+   OutAccountsQuery,
    admin_no_store,
    record_search,
 };

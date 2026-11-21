@@ -111,14 +111,27 @@
   function getErrorBanner() {
     return (
       document.getElementById('stats-status') ||
+      document.getElementById('out-status') ||
       document.getElementById('investigation-status') ||
       document.getElementById('account-action-status') ||
+      document.getElementById('ct0-status') ||
       document.getElementById('probe-status')
     );
   }
 
-  function getAccountStatusElement() {
-    return document.getElementById('account-action-status') || document.getElementById('probe-status');
+  function getAccountStatusElement(contextElement) {
+    if (contextElement) {
+      const inlineBox = contextElement.closest('.admin-inline-ct0-box, .admin-ct0-panel');
+      if (inlineBox) {
+        const localStatus = inlineBox.querySelector('.admin-inline-ct0-status, #ct0-status');
+        if (localStatus) return localStatus;
+      }
+    }
+    return (
+      document.getElementById('account-action-status') ||
+      document.getElementById('out-status') ||
+      document.getElementById('probe-status')
+    );
   }
 
   function syncCountdownText() {
@@ -1265,7 +1278,7 @@
 
   function snapshotAccountButtons() {
     const buttons = document.querySelectorAll(
-      '#run-probe, #move-pool-search, #move-pool-view, [data-page="account"] button[data-pool], .admin-actions-card button[data-pool]'
+      '#run-probe, #run-search-probe, #move-pool-search, #move-pool-view, #save-ct0, #save-ct0-probe, #save-ct0-search-probe, .admin-out-probe, .admin-ct0-submit, [data-page="account"] button[data-pool], .admin-actions-card button[data-pool]'
     );
     const priorDisabled = new Map();
     for (const btn of buttons) {
@@ -1284,14 +1297,20 @@
   }
 
   function formatProbeSummary(result) {
+    const mode = result && result.mode === 'search' ? 'Search probe' : 'Health probe';
     const verdict = result && typeof result.verdict === 'string' ? result.verdict : 'error';
     const beforePool = result && result.before && result.before.pool ? result.before.pool : 'unknown';
     const afterPool = result && result.after && result.after.pool ? result.after.pool : beforePool;
-    const reinstatement =
-      result && result.reinstated
-        ? 'reinstated — stored verdict cleared'
-        : 'stored verdict unchanged';
-    let summary = `Probe verdict: ${verdict} (${beforePool} -> ${afterPool}; ${reinstatement}).`;
+    const notes = [];
+    if (result && result.reinstated) {
+      notes.push('reinstated — stored verdict cleared');
+    } else {
+      notes.push('stored verdict unchanged');
+    }
+    if (result && result.verified_search) {
+      notes.push('SearchTimeline verified');
+    }
+    let summary = `${mode} verdict: ${verdict} (${beforePool} -> ${afterPool}; ${notes.join(', ')}).`;
     if (result && typeof result.detail === 'string' && result.detail.trim() !== '') {
       summary += ` ${result.detail.trim()}`;
     }
@@ -1300,7 +1319,7 @@
 
   function probeTone(verdict) {
     if (verdict === 'alive') return 'ok';
-    if (verdict === 'settings refused') return 'warn';
+    if (verdict === 'settings refused' || verdict === 'search empty') return 'warn';
     return 'error';
   }
 
@@ -1325,14 +1344,24 @@
   async function handleRunProbe(button) {
     if (accountActionInFlight) return;
     const id = resolveSessionId(button);
+    const mode = button.dataset.probeMode === 'search' ? 'search' : 'health';
+    const statusTarget = getAccountStatusElement(button);
+    const pageBanner =
+      document.getElementById('account-action-status') ||
+      document.getElementById('out-status') ||
+      document.getElementById('probe-status');
     if (!id) {
-      setStatusBanner(getAccountStatusElement(), 'Could not determine account session ID.', 'error');
+      setStatusBanner(statusTarget, 'Could not determine account session ID.', 'error');
       return;
     }
 
     accountActionInFlight = true;
     const priorDisabled = snapshotAccountButtons();
-    setStatusBanner(getAccountStatusElement(), 'Running live probe against X...', 'warn');
+    const label = mode === 'search' ? 'Running live SearchTimeline probe against X...' : 'Running live health probe against X...';
+    setStatusBanner(statusTarget, label, 'warn');
+    if (pageBanner && pageBanner !== statusTarget) {
+      setStatusBanner(pageBanner, `Account #${id}: ${label}`, 'warn');
+    }
 
     try {
       const response = await fetch(`/admin/stats/sessions/${encodeURIComponent(id)}/probe`, {
@@ -1340,8 +1369,10 @@
         credentials: 'same-origin',
         cache: 'no-store',
         headers: {
+          'Content-Type': 'application/json',
           'Accept': 'application/json'
-        }
+        },
+        body: JSON.stringify({ mode })
       });
 
       if (!response.ok) {
@@ -1350,18 +1381,200 @@
       }
 
       const result = await response.json();
-      const message = formatProbeSummary(result);
+      const summary = formatProbeSummary(result);
+      const isOutPage = getMain(document)?.dataset.page === 'out';
+      const displayMsg = isOutPage ? `Account #${id}: ${summary}` : summary;
       const tone = probeTone(result.verdict);
 
-      setStatusBanner(getAccountStatusElement(), message, tone);
+      setStatusBanner(statusTarget, displayMsg, tone);
       await refreshMain(window.location.href);
-      setStatusBanner(getAccountStatusElement(), message, tone);
+      const freshBanner =
+        document.getElementById('account-action-status') ||
+        document.getElementById('out-status') ||
+        document.getElementById('probe-status');
+      setStatusBanner(freshBanner, displayMsg, tone);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Live probe could not run.';
-      setStatusBanner(getAccountStatusElement(), message, 'error');
+      setStatusBanner(statusTarget, message, 'error');
+      if (pageBanner && pageBanner !== statusTarget) {
+        setStatusBanner(pageBanner, `Account #${id}: ${message}`, 'error');
+      }
     } finally {
       restoreAccountButtons(priorDisabled);
       accountActionInFlight = false;
+    }
+  }
+
+  async function handleSaveCt0(button) {
+    if (accountActionInFlight) return;
+    const id = resolveSessionId(button);
+    const container = button.closest('.admin-ct0-panel, .admin-inline-ct0-box');
+    const input = container ? container.querySelector('.admin-ct0-input, #ct0-input') : null;
+    const statusTarget = getAccountStatusElement(button);
+    const pageBanner =
+      document.getElementById('ct0-status') ||
+      document.getElementById('out-status') ||
+      document.getElementById('account-action-status');
+
+    if (!id || !input) {
+      setStatusBanner(statusTarget, 'Could not locate account ct0 input.', 'error');
+      return;
+    }
+
+    const rawCt0 = input.value.trim();
+    if (!rawCt0) {
+      setStatusBanner(statusTarget, 'Paste a ct0 cookie value before saving.', 'warn');
+      input.focus();
+      return;
+    }
+
+    const probeMode = (button.dataset.probe || '').trim();
+    const isOutPage = getMain(document)?.dataset.page === 'out';
+
+    accountActionInFlight = true;
+    const priorDisabled = snapshotAccountButtons();
+    const pendingMsg = probeMode
+      ? `Saving new ct0 and running live ${probeMode} probe against X...`
+      : 'Saving new ct0 to memory and PostgreSQL...';
+    setStatusBanner(statusTarget, pendingMsg, 'warn');
+    if (pageBanner && pageBanner !== statusTarget) {
+      setStatusBanner(pageBanner, `Account #${id}: ${pendingMsg}`, 'warn');
+    }
+
+    try {
+      const response = await fetch(`/admin/stats/sessions/${encodeURIComponent(id)}/ct0`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          ct0: rawCt0,
+          probe: probeMode || null
+        })
+      });
+
+      if (!response.ok) {
+        const errMsg = await readErrorMessage(response, `Could not update ct0 (HTTP ${response.status}).`);
+        throw new Error(errMsg);
+      }
+
+      const result = await response.json();
+      const parts = [
+        `Saved ct0 (${result.ct0_len} chars)${result.cleared_ct0_dead ? ' and cleared stale CSRF flag' : ''}.`
+      ];
+      let tone = 'ok';
+      if (result.probe) {
+        parts.push(formatProbeSummary(result.probe));
+        tone = probeTone(result.probe.verdict);
+      }
+      const message = isOutPage ? `Account #${id}: ${parts.join(' ')}` : parts.join(' ');
+
+      await refreshMain(window.location.href);
+      const freshBanner =
+        document.getElementById('ct0-status') ||
+        document.getElementById('out-status') ||
+        document.getElementById('account-action-status');
+      setStatusBanner(freshBanner, message, tone);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not update ct0.';
+      setStatusBanner(statusTarget, message, 'error');
+      if (pageBanner && pageBanner !== statusTarget) {
+        setStatusBanner(pageBanner, `Account #${id}: ${message}`, 'error');
+      }
+    } finally {
+      restoreAccountButtons(priorDisabled);
+      accountActionInFlight = false;
+    }
+  }
+
+  async function handleQuickCopyCookies(button) {
+    const id = resolveSessionId(button);
+    const username = (button.dataset.username || '').trim();
+    const statusTarget =
+      document.getElementById('cookie-status') ||
+      document.getElementById('out-status') ||
+      getErrorBanner();
+    if (!id) return;
+
+    const label = username ? `@${username} (#${id})` : `Account #${id}`;
+    button.disabled = true;
+    setStatusBanner(statusTarget, `Fetching Cookie-Editor JSON for ${label}...`, 'warn');
+
+    try {
+      const response = await fetch(`/admin/stats/sessions/${encodeURIComponent(id)}/cookies`, {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: {
+          'Accept': 'application/json'
+        }
+      });
+      if (!response.ok) {
+        const errMsg = await readErrorMessage(
+          response,
+          `Cookie export is unavailable for ${label}.`
+        );
+        throw new Error(errMsg);
+      }
+      const cookies = await response.json();
+      const jsonText = JSON.stringify(cookies, null, 2);
+
+      try {
+        await navigator.clipboard.writeText(jsonText);
+        setStatusBanner(
+          statusTarget,
+          `Copied Cookie-Editor JSON for ${label} (${cookies.length} cookies). Import into Cookie-Editor in your browser and keep credentials private.`,
+          'ok'
+        );
+      } catch {
+        const text = document.getElementById('cookie-json');
+        const output = document.getElementById('cookie-export');
+        if (text && output) {
+          text.value = jsonText;
+          setHidden(output, false);
+          text.focus();
+          text.select();
+          setStatusBanner(
+            statusTarget,
+            `Clipboard blocked by browser. Cookie-Editor JSON for ${label} is selected below — copy it manually.`,
+            'warn'
+          );
+        } else {
+          setStatusBanner(
+            statusTarget,
+            `Clipboard unavailable in this browser context. Use the JSON download link or open Inspect for ${label}.`,
+            'warn'
+          );
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Cookie export failed.';
+      setStatusBanner(statusTarget, message, 'error');
+    } finally {
+      if (button.isConnected) {
+        button.disabled = false;
+      }
+    }
+  }
+
+  function toggleInlineCt0Row(sessionId, forceOpen) {
+    const row = document.querySelector(`tr[data-ct0-row="${CSS.escape(String(sessionId))}"]`);
+    if (!row) return;
+    const shouldOpen = forceOpen === undefined ? row.hidden : Boolean(forceOpen);
+    setHidden(row, !shouldOpen);
+    const toggleBtn = document.querySelector(
+      `.admin-out-toggle-ct0[data-session="${CSS.escape(String(sessionId))}"]`
+    );
+    if (toggleBtn) {
+      toggleBtn.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+    }
+    if (shouldOpen) {
+      const input = row.querySelector('.admin-ct0-input');
+      if (input) {
+        input.focus();
+      }
     }
   }
 
@@ -1513,6 +1726,21 @@
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && pinnedMinute !== null) {
       unpinSample();
+      return;
+    }
+    if (
+      event.key === 'Enter' &&
+      event.target instanceof Element &&
+      event.target.matches('.admin-ct0-input, #ct0-input')
+    ) {
+      event.preventDefault();
+      const container = event.target.closest('.admin-ct0-panel, .admin-inline-ct0-box');
+      const primaryBtn = container
+        ? container.querySelector('.admin-ct0-submit.admin-btn--primary, .admin-ct0-submit')
+        : null;
+      if (primaryBtn) {
+        void handleSaveCt0(primaryBtn);
+      }
     }
   });
 
@@ -1550,17 +1778,47 @@
       return;
     }
 
-    const investigationBtn = target.closest('#investigation-refresh');
+    const investigationBtn = target.closest('#investigation-refresh, #out-refresh');
     if (investigationBtn) {
       event.preventDefault();
       void handleInvestigationRefresh(investigationBtn);
       return;
     }
 
-    const probeBtn = target.closest('#run-probe');
+    const probeBtn = target.closest('#run-probe, #run-search-probe, .admin-out-probe');
     if (probeBtn) {
       event.preventDefault();
       void handleRunProbe(probeBtn);
+      return;
+    }
+
+    const ct0SubmitBtn = target.closest('.admin-ct0-submit, #save-ct0, #save-ct0-probe, #save-ct0-search-probe');
+    if (ct0SubmitBtn) {
+      event.preventDefault();
+      void handleSaveCt0(ct0SubmitBtn);
+      return;
+    }
+
+    const toggleCt0Btn = target.closest('.admin-out-toggle-ct0');
+    if (toggleCt0Btn) {
+      event.preventDefault();
+      const id = resolveSessionId(toggleCt0Btn);
+      if (id) toggleInlineCt0Row(id);
+      return;
+    }
+
+    const closeCt0Btn = target.closest('.admin-out-close-ct0');
+    if (closeCt0Btn) {
+      event.preventDefault();
+      const id = resolveSessionId(closeCt0Btn);
+      if (id) toggleInlineCt0Row(id, false);
+      return;
+    }
+
+    const quickCopyBtn = target.closest('#quick-copy-cookies, .admin-out-copy-cookies');
+    if (quickCopyBtn) {
+      event.preventDefault();
+      void handleQuickCopyCookies(quickCopyBtn);
       return;
     }
 

@@ -367,6 +367,30 @@ impl SessionLimits {
       )
    }
 
+   pub(crate) fn search_404_cooling_at(&self, now: i64) -> bool {
+      self
+         .search_404_at
+         .is_some_and(|at| now - at < SEARCH_404_COOLDOWN_SECS)
+   }
+
+   pub(crate) fn op_refused_at(&self, name: &str, is_search: bool, now: i64) -> bool {
+      if self.refused_ops.is_empty() {
+         return false;
+      }
+      let Some(&at) = self.refused_ops.get(name) else {
+         return false;
+      };
+      // An empty search page is what a query with no matches gets, and what an
+      // account X age-gated or filtered hides, so a search refusal is a rest
+      // rather than a verdict: the account is tried again within the hour.
+      let window = if is_search {
+         SEARCH_REFUSED_SECS
+      } else {
+         REFUSED_OP_SECS
+      };
+      now - at < window
+   }
+
    pub(crate) fn refuses_at_classified(
       &self,
       name: &str,
@@ -394,32 +418,13 @@ impl SessionLimits {
       if self.search_only && !is_search && !self_service {
          return true;
       }
-      if is_search
-         && (self.search_banned
-            || self
-               .search_404_at
-               .is_some_and(|at| now - at < SEARCH_404_COOLDOWN_SECS))
-      {
+      if is_search && (self.search_banned || self.search_404_cooling_at(now)) {
          return true;
       }
       if self.profile_banned && profile_op {
          return true;
       }
-      if self.refused_ops.is_empty() {
-         return false;
-      }
-      let Some(&at) = self.refused_ops.get(name) else {
-         return false;
-      };
-      // An empty search page is what a query with no matches gets, and what an
-      // account X age-gated or filtered hides, so a search refusal is a rest
-      // rather than a verdict: the account is tried again within the hour.
-      let window = if is_search {
-         SEARCH_REFUSED_SECS
-      } else {
-         REFUSED_OP_SECS
-      };
-      now - at < window
+      self.op_refused_at(name, is_search, now)
    }
 
    /// Leave this account out of `api` for a while. The account stays reserved
