@@ -1,12 +1,12 @@
 //! The browser each account pretends to be.
 //!
-//! Every cookie session presents one real browser's TLS and HTTP/2 fingerprint
-//! and the headers to match. The engine is drawn from the session id, so an
-//! account keeps the same browser across restarts the way it keeps its proxy
-//! port, and the mix is weighted like real desktop traffic rather than
-//! uniform. Within an engine the newest version X still accepts is used; that
-//! is found by a handshake at startup, since a profile can advertise something
-//! X's edge rejects (Chrome 152 did at the time of writing).
+//! Every cookie session presents one real browser's TLS, HTTP/2, and HTTP/3
+//! (QUIC) fingerprint and the headers to match. The engine is drawn from the
+//! session id, so an account keeps the same browser across restarts the way it
+//! keeps its proxy port, and the mix is weighted like real desktop traffic
+//! rather than uniform. Within an engine the newest version X still accepts is
+//! used; that is found by a handshake at startup, since a profile can advertise
+//! something X's edge rejects.
 
 use std::{
    collections::HashMap,
@@ -15,13 +15,23 @@ use std::{
    time::Duration,
 };
 
-use primp::{
-   Impersonate,
-   ImpersonateOS,
+use koon_core::{
+   BrowserProfile,
+   Chrome,
+   Client,
+   Edge,
+   Firefox,
+   IpVersion,
+   Opera,
+   Os,
+   Safari,
 };
 use tokio::task::JoinSet;
 
-use super::http::ProxyConfig;
+use super::http::{
+   ProxyConfig,
+   ProxyKind,
+};
 
 /// Browser families a session can present as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -31,6 +41,40 @@ pub enum Engine {
    Firefox,
    Safari,
    Opera,
+}
+
+/// Specific version of an [`Engine`] supported by `koon-core`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ProfileVersion {
+   Chrome(u32),
+   Edge(u32),
+   Firefox(u32),
+   Safari(&'static str),
+   Opera(u32),
+}
+
+impl ProfileVersion {
+   fn build(self, os: Os) -> BrowserProfile {
+      match self {
+         Self::Chrome(major) => Chrome::version(major, os).unwrap_or_else(|_| Chrome::latest()),
+         Self::Edge(major) => Edge::version(major, os).unwrap_or_else(|_| Edge::latest()),
+         Self::Firefox(major) => Firefox::version(major, os).unwrap_or_else(|_| Firefox::latest()),
+         Self::Safari(version) => Safari::version(version, os).unwrap_or_else(|_| Safari::latest()),
+         Self::Opera(major) => Opera::version(major, os).unwrap_or_else(|_| Opera::latest()),
+      }
+   }
+}
+
+impl fmt::Display for ProfileVersion {
+   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      match *self {
+         Self::Chrome(major) => write!(f, "Chrome{major}"),
+         Self::Edge(major) => write!(f, "Edge{major}"),
+         Self::Firefox(major) => write!(f, "Firefox{major}"),
+         Self::Safari(version) => write!(f, "Safari{version}"),
+         Self::Opera(major) => write!(f, "Opera{major}"),
+      }
+   }
 }
 
 impl Engine {
@@ -43,56 +87,55 @@ impl Engine {
    ];
 
    /// Profiles newest first. Only the newest that X accepts is ever used.
-   fn candidates(self) -> &'static [Impersonate] {
+   const fn candidates(self) -> &'static [ProfileVersion] {
       match self {
          Self::Chrome => {
             &[
-               Impersonate::ChromeV153,
-               Impersonate::ChromeV152,
-               Impersonate::ChromeV151,
-               Impersonate::ChromeV150,
-               Impersonate::ChromeV149,
-               Impersonate::ChromeV148,
-               Impersonate::ChromeV147,
-               Impersonate::ChromeV146,
+               ProfileVersion::Chrome(158),
+               ProfileVersion::Chrome(157),
+               ProfileVersion::Chrome(156),
+               ProfileVersion::Chrome(155),
+               ProfileVersion::Chrome(154),
+               ProfileVersion::Chrome(153),
+               ProfileVersion::Chrome(152),
             ]
          },
          Self::Edge => {
             &[
-               Impersonate::EdgeV153,
-               Impersonate::EdgeV152,
-               Impersonate::EdgeV151,
-               Impersonate::EdgeV150,
-               Impersonate::EdgeV149,
-               Impersonate::EdgeV148,
-               Impersonate::EdgeV147,
-               Impersonate::EdgeV146,
+               ProfileVersion::Edge(157),
+               ProfileVersion::Edge(156),
+               ProfileVersion::Edge(155),
+               ProfileVersion::Edge(154),
+               ProfileVersion::Edge(153),
+               ProfileVersion::Edge(152),
             ]
          },
          Self::Firefox => {
             &[
-               Impersonate::FirefoxV151,
-               Impersonate::FirefoxV150,
-               Impersonate::FirefoxV149,
-               Impersonate::FirefoxV148,
-               Impersonate::FirefoxV147,
-               Impersonate::FirefoxV146,
+               ProfileVersion::Firefox(159),
+               ProfileVersion::Firefox(158),
+               ProfileVersion::Firefox(157),
+               ProfileVersion::Firefox(156),
+               ProfileVersion::Firefox(155),
             ]
          },
          Self::Safari => {
             &[
-               Impersonate::SafariV26_4,
-               Impersonate::SafariV26_3,
-               Impersonate::SafariV26,
-               Impersonate::SafariV18_5,
+               ProfileVersion::Safari("27.0"),
+               ProfileVersion::Safari("26.6"),
+               ProfileVersion::Safari("26.5"),
+               ProfileVersion::Safari("26.4"),
+               ProfileVersion::Safari("26.3"),
+               ProfileVersion::Safari("26.0"),
+               ProfileVersion::Safari("18.5"),
             ]
          },
          Self::Opera => {
             &[
-               Impersonate::OperaV135,
-               Impersonate::OperaV134,
-               Impersonate::OperaV133,
-               Impersonate::OperaV132,
+               ProfileVersion::Opera(139),
+               ProfileVersion::Opera(138),
+               ProfileVersion::Opera(137),
+               ProfileVersion::Opera(136),
             ]
          },
       }
@@ -116,52 +159,15 @@ impl fmt::Display for Engine {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity {
    pub engine: Engine,
-   pub os:     ImpersonateOS,
+   pub os:     Os,
 }
 
 impl Identity {
-   /// The profile to build a client from: this engine's newest accepted
-   /// version.
+   /// The browser profile (TLS, HTTP/2, HTTP/3, and headers) for this identity:
+   /// this engine's newest accepted version on its OS.
    #[must_use]
-   pub fn profile(self) -> Impersonate {
-      accepted_profile(self.engine)
-   }
-
-   /// The version this identity names in its headers.
-   ///
-   /// primp's newest Chrome profile is 153. Its ClientHello is the same bytes
-   /// for every version from 150 up — same cipher suites, signature schemes,
-   /// groups and extension order — so a browser is only told apart from its
-   /// predecessor by what it says about itself. Sessions created in Chrome 157
-   /// have to keep saying 157, or the account changes browser between signup
-   /// and the first request teapot makes.
-   #[must_use]
-   pub fn version_headers(self) -> Option<[(&'static str, &'static str); 2]> {
-      if self.engine != Engine::Chrome {
-         return None;
-      }
-      let user_agent = match self.os {
-         ImpersonateOS::Windows => {
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/157.0.0.0 Safari/537.36"
-         },
-         ImpersonateOS::MacOS => {
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like \
-             Gecko) Chrome/157.0.0.0 Safari/537.36"
-         },
-         ImpersonateOS::Linux => {
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/157.0.0.0 Safari/537.36"
-         },
-         _ => return None,
-      };
-      Some([
-         ("user-agent", user_agent),
-         (
-            "sec-ch-ua",
-            "\"Not-A.Brand\";v=\"99\", \"Google Chrome\";v=\"157\", \"Chromium\";v=\"157\"",
-         ),
-      ])
+   pub fn profile(self) -> BrowserProfile {
+      accepted_profile(self.engine).build(self.os)
    }
 }
 
@@ -182,25 +188,13 @@ const ENGINE_WEIGHTS: [(Engine, u64); 5] = [
 
 /// Operating systems each engine is seen on, weighted. Safari stays on macOS
 /// and Edge on Windows; a Safari-on-Windows user agent does not exist.
-fn os_weights(engine: Engine) -> &'static [(ImpersonateOS, u64)] {
+const fn os_weights(engine: Engine) -> &'static [(Os, u64)] {
    match engine {
-      Engine::Chrome => {
-         &[
-            (ImpersonateOS::Windows, 75),
-            (ImpersonateOS::MacOS, 20),
-            (ImpersonateOS::Linux, 5),
-         ]
-      },
-      Engine::Edge => &[(ImpersonateOS::Windows, 90), (ImpersonateOS::MacOS, 10)],
-      Engine::Firefox => {
-         &[
-            (ImpersonateOS::Windows, 70),
-            (ImpersonateOS::Linux, 20),
-            (ImpersonateOS::MacOS, 10),
-         ]
-      },
-      Engine::Safari => &[(ImpersonateOS::MacOS, 100)],
-      Engine::Opera => &[(ImpersonateOS::Windows, 100)],
+      Engine::Chrome => &[(Os::Windows, 75), (Os::MacOS, 20), (Os::Linux, 5)],
+      Engine::Edge => &[(Os::Windows, 90), (Os::MacOS, 10)],
+      Engine::Firefox => &[(Os::Windows, 70), (Os::Linux, 20), (Os::MacOS, 10)],
+      Engine::Safari => &[(Os::MacOS, 100)],
+      Engine::Opera => &[(Os::Windows, 100)],
    }
 }
 
@@ -228,7 +222,7 @@ fn pick<T: Copy>(weights: &[(T, u64)], seed: &mut u64) -> T {
 }
 
 /// Deterministic 64-bit mixer, so identities do not depend on an RNG.
-fn splitmix64(mut state: u64) -> u64 {
+const fn splitmix64(mut state: u64) -> u64 {
    state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
    let mut result = state;
    result = (result ^ (result >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -236,18 +230,22 @@ fn splitmix64(mut state: u64) -> u64 {
    result ^ (result >> 31)
 }
 
-/// Newest version per engine that completed a TLS handshake with X.
-static ACCEPTED: OnceLock<HashMap<Engine, Impersonate>> = OnceLock::new();
+/// Newest version per engine that completed a handshake with X.
+static ACCEPTED: OnceLock<HashMap<Engine, ProfileVersion>> = OnceLock::new();
 
 /// Newest known-accepted fallback when the probe has not run or an engine
 /// could not be tested: the second newest candidate, since the newest is the
 /// one most likely to run ahead of what X's edge understands.
-fn fallback_profile(engine: Engine) -> Impersonate {
+const fn fallback_profile(engine: Engine) -> ProfileVersion {
    let candidates = engine.candidates();
-   candidates.get(1).copied().unwrap_or(candidates[0])
+   if candidates.len() > 1 {
+      candidates[1]
+   } else {
+      candidates[0]
+   }
 }
 
-fn accepted_profile(engine: Engine) -> Impersonate {
+fn accepted_profile(engine: Engine) -> ProfileVersion {
    ACCEPTED
       .get()
       .and_then(|accepted| accepted.get(&engine).copied())
@@ -258,12 +256,11 @@ fn accepted_profile(engine: Engine) -> Impersonate {
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Handshakes a version must pass, every one of them, across the operating
-/// systems its sessions run on. A single one once let Chrome 152 through
-/// while X refused it on nearly every later connection.
+/// systems its sessions run on.
 const PROBE_HANDSHAKES: usize = 3;
 
 /// Find, per engine, the newest profile X accepts, by handshaking with
-/// x.com through `proxy` (or directly). Runs once at startup; a second call
+/// `x.com` through `proxy` (or directly). Runs once at startup; a second call
 /// is a no-op.
 pub async fn probe_accepted(proxy: Option<ProxyConfig>) {
    if ACCEPTED.get().is_some() {
@@ -280,8 +277,9 @@ pub async fn probe_accepted(proxy: Option<ProxyConfig>) {
          continue;
       };
       match profile {
-         Some(profile) => {
-            accepted.insert(engine, profile);
+         Some((version, protocol)) => {
+            accepted.insert(engine, version);
+            tracing::debug!(%engine, %version, %protocol, "X accepted browser profile");
          },
          None => {
             tracing::warn!(%engine, "no browser profile completed a handshake with X, using fallback");
@@ -292,7 +290,7 @@ pub async fn probe_accepted(proxy: Option<ProxyConfig>) {
       .iter()
       .map(|engine| {
          format!(
-            "{engine}={:?}",
+            "{engine}={}",
             accepted
                .get(engine)
                .copied()
@@ -305,8 +303,11 @@ pub async fn probe_accepted(proxy: Option<ProxyConfig>) {
    let _ = ACCEPTED.set(accepted);
 }
 
-async fn newest_accepted(engine: Engine, proxy: Option<&ProxyConfig>) -> Option<Impersonate> {
-   'versions: for &profile in engine.candidates() {
+async fn newest_accepted(
+   engine: Engine,
+   proxy: Option<&ProxyConfig>,
+) -> Option<(ProfileVersion, String)> {
+   'versions: for &version in engine.candidates() {
       let oses = os_weights(engine);
       // Sent together. One after another they were a second of every start,
       // and the server takes no request until they are done.
@@ -314,35 +315,47 @@ async fn newest_accepted(engine: Engine, proxy: Option<&ProxyConfig>) -> Option<
       for round in 0..PROBE_HANDSHAKES.max(oses.len()) {
          let os = oses[round % oses.len()].0;
          let proxy = proxy.cloned();
-         rounds.spawn(async move { handshakes(profile, os, proxy.as_ref()).await });
+         rounds.spawn(async move { handshakes(version, os, proxy.as_ref()).await });
       }
+      let mut protocol = String::new();
       while let Some(passed) = rounds.join_next().await {
-         if !passed.unwrap_or(false) {
-            tracing::debug!(%engine, ?profile, "X refused this browser profile");
+         let Ok(Some(ver)) = passed else {
+            tracing::debug!(%engine, %version, "X refused this browser profile");
             continue 'versions;
+         };
+         if protocol.is_empty() || ver == "h3" {
+            protocol = ver;
          }
       }
-      return Some(profile);
+      return Some((version, protocol));
    }
    None
 }
 
-/// Whether a fresh client built from `profile` gets any HTTP answer from
-/// x.com. The status does not matter; a refused ClientHello never gets one.
-async fn handshakes(profile: Impersonate, os: ImpersonateOS, proxy: Option<&ProxyConfig>) -> bool {
-   let mut builder = primp::Client::builder()
-      .impersonate(profile)
-      .impersonate_os(os)
-      .redirect(primp::redirect::Policy::none())
-      .timeout(PROBE_TIMEOUT);
-   builder = match proxy.and_then(|proxy| primp::Proxy::all(proxy.url()).ok()) {
-      Some(proxy) => builder.proxy(proxy),
-      None => builder.no_proxy(),
-   };
-   let Ok(client) = builder.build() else {
-      return false;
-   };
-   client.get("https://x.com/").send().await.is_ok()
+/// Whether a fresh client built from `version` on `os` gets any HTTP answer
+/// from `x.com`. Seeds `Alt-Svc` for `x.com:443` so QUIC/HTTP/3 is exercised
+/// alongside TCP fallback.
+async fn handshakes(
+   version: ProfileVersion,
+   os: Os,
+   proxy: Option<&ProxyConfig>,
+) -> Option<String> {
+   let mut builder = Client::builder(version.build(os))
+      .follow_redirects(false)
+      .cookie_jar(false)
+      .timeout(PROBE_TIMEOUT)
+      .alt_svc_h3("x.com", 443, 443);
+   if let Some(proxy) = proxy {
+      builder = builder.proxy(&proxy.url()).ok()?;
+      if proxy.kind == ProxyKind::Socks5 {
+         builder = builder.ip_version(IpVersion::V4);
+      }
+   }
+   let client = builder.build().ok()?;
+   let response = client.get("https://x.com/").await.ok()?;
+   let protocol = response.version;
+   client.shutdown().await;
+   Some(protocol)
 }
 
 #[cfg(test)]
@@ -389,16 +402,16 @@ mod tests {
 
    #[test]
    fn fallback_is_second_newest() {
-      assert_eq!(fallback_profile(Engine::Chrome), Impersonate::ChromeV152);
-      assert_eq!(fallback_profile(Engine::Safari), Impersonate::SafariV26_3);
+      assert_eq!(fallback_profile(Engine::Chrome), ProfileVersion::Chrome(157));
+      assert_eq!(
+         fallback_profile(Engine::Safari),
+         ProfileVersion::Safari("26.6")
+      );
    }
 
-   /// Whether a second connection to the same host offers a session ticket.
-   /// `pre_shared_key` only exists when there is a ticket to resume, so a
-   /// single request can never show it.
-   #[test]
-   #[ignore = "reaches tls.peet.ws through the first proxy exit"]
-   fn chrome_resumption_on_the_wire() {
+   #[tokio::test]
+   #[ignore = "reaches x.com and quic.browserleaks.com through the first proxy exit"]
+   async fn chrome_http3_and_tls_fingerprint_over_proxy() {
       let proxies = std::fs::read_to_string("proxies.txt").expect("proxies.txt");
       let line = proxies
          .lines()
@@ -409,50 +422,80 @@ mod tests {
          "socks5h://{}:{}@{}:{}",
          parts[2], parts[3], parts[0], parts[1]
       );
-      let identity = Identity {
-         engine: Engine::Chrome,
-         os:     ImpersonateOS::Windows,
+      let report = koon_core::verify::verify("chrome157-windows", Some(&url))
+         .await
+         .expect("verify");
+      assert_eq!(report.outcome, koon_core::verify::Outcome::Match, "{report:?}");
+
+      let client = Client::builder(
+         Identity {
+            engine: Engine::Chrome,
+            os:     Os::Windows,
+         }
+         .profile(),
+      )
+      .proxy(&url)
+      .expect("proxy")
+      .ip_version(IpVersion::V4)
+      .alt_svc_h3("x.com", 443, 443)
+      .alt_svc_h3("api.x.com", 443, 443)
+      .timeout(Duration::from_secs(15))
+      .build()
+      .expect("client");
+
+      let resp = client.get("https://x.com/").await.expect("x.com");
+      assert_eq!(resp.version, "h3", "expected HTTP/3 to x.com");
+      let api_resp = client.get("https://api.x.com/").await.expect("api.x.com");
+      assert_eq!(api_resp.version, "h3", "expected HTTP/3 to api.x.com");
+      client.shutdown().await;
+
+      // Verify cold H2 -> H3 automatic background upgrade without pre-seeding Alt-Svc.
+      let cold = Client::builder(
+         Identity {
+            engine: Engine::Chrome,
+            os:     Os::Windows,
+         }
+         .profile(),
+      )
+      .proxy(&url)
+      .expect("proxy")
+      .ip_version(IpVersion::V4)
+      .timeout(Duration::from_secs(15))
+      .build()
+      .expect("cold client");
+      let first = cold.get("https://x.com/").await.expect("first x.com");
+      assert_eq!(first.version, "h2", "cold first call should start on h2");
+      tokio::time::sleep(Duration::from_millis(250)).await;
+      let second = cold.get("https://x.com/").await.expect("second x.com");
+      assert_eq!(
+         second.version, "h3",
+         "second call after Alt-Svc should upgrade to h3"
+      );
+      cold.shutdown().await;
+
+      // Verify all 5 engines (Chrome, Edge, Firefox, Safari, Opera) handshake on HTTP/3.
+      let proxy_cfg = ProxyConfig {
+         host:     parts[0].to_owned(),
+         port:     parts[1].parse().expect("port"),
+         kind:     ProxyKind::Socks5,
+         username: Some(parts[2].to_owned()),
+         password: Some(parts[3].to_owned()),
       };
-      let client = primp::Client::builder()
-         .impersonate(identity.profile())
-         .impersonate_os(identity.os)
-         .proxy(primp::Proxy::all(&url).expect("proxy"))
-         .timeout(Duration::from_secs(20))
-         // No reuse: every request is a new handshake, which is what asks the
-         // question.
-         .pool_max_idle_per_host(0)
-         .pool_idle_timeout(Duration::from_millis(1))
-         .build()
-         .expect("client");
-      let runtime = tokio::runtime::Runtime::new().expect("runtime");
-      for round in 1..=3 {
-         let body = runtime
-            .block_on(async {
-               let response = client.get("https://tls.peet.ws/api/all").send().await?;
-               response.text().await
-            })
-            .expect("peet");
-         let value: serde_json::Value = serde_json::from_str(&body).expect("json");
-         let ja4 = value["tls"]["ja4"].as_str().unwrap_or_default().to_owned();
-         println!("round {round}: ja4={ja4}");
-         // chrome_157_first_connect.json and chrome_157_second_connect.json:
-         // the first connection has no ticket to offer, every later one does.
-         let expected = if round == 1 {
-            "t13d1517h2_8daaf6152771_cb7bf5808d99"
-         } else {
-            "t13d1518h2_8daaf6152771_e2d80978ab2e"
-         };
+      for engine in Engine::ALL {
+         let (version, protocol) = newest_accepted(engine, Some(&proxy_cfg))
+            .await
+            .unwrap_or_else(|| panic!("{engine} failed to handshake with x.com"));
+         eprintln!("probe accepted: {engine}={version} via {protocol}");
          assert_eq!(
-            ja4, expected,
-            "round {round} drifted from the Chrome 157 capture"
+            protocol, "h3",
+            "expected {engine}={version} to negotiate HTTP/3 with x.com"
          );
       }
    }
-   /// Prints what a Chrome identity actually puts on the wire, to compare with
-   /// a capture from the browser the accounts were made in.
-   #[test]
-   #[ignore = "reaches tls.peet.ws through the first proxy exit"]
-   fn chrome_presentation_on_the_wire() {
+
+   #[tokio::test]
+   #[ignore = "measures QUIC 0-RTT resumption and ECH over the first proxy exit"]
+   async fn quic_0rtt_and_ech_over_socks5_proxy() {
       let proxies = std::fs::read_to_string("proxies.txt").expect("proxies.txt");
       let line = proxies
          .lines()
@@ -463,41 +506,86 @@ mod tests {
          "socks5h://{}:{}@{}:{}",
          parts[2], parts[3], parts[0], parts[1]
       );
-      let identity = Identity {
-         engine: Engine::Chrome,
-         os:     ImpersonateOS::Windows,
-      };
-      let builder = primp::Client::builder()
-         .impersonate(identity.profile())
-         .impersonate_os(identity.os)
-         .proxy(primp::Proxy::all(&url).expect("proxy"))
-         .timeout(Duration::from_secs(20));
-      let mut client = builder.build().expect("client");
-      for (name, value) in identity.version_headers().expect("chrome version headers") {
-         client.headers_mut().insert(
-            primp::header::HeaderName::from_static(name),
-            primp::header::HeaderValue::from_str(value).expect("header value"),
-         );
-      }
-      let body = tokio::runtime::Runtime::new()
-         .expect("runtime")
-         .block_on(async {
-            let response = client.get("https://tls.peet.ws/api/all").send().await?;
-            response.text().await
-         })
-         .expect("peet");
-      let value: serde_json::Value = serde_json::from_str(&body).expect("json");
-      println!("ja4: {}", value["tls"]["ja4"]);
-      println!("akamai: {}", value["http2"]["akamai_fingerprint"]);
-      // chrome_157_first_connect.json: what Chrome 157 sends on a new
-      // connection, and what this client must send.
-      assert_eq!(
-         value["tls"]["ja4"], "t13d1517h2_8daaf6152771_cb7bf5808d99",
-         "fresh-connection JA4 drifted from the Chrome 157 capture"
+
+      let client = Client::builder(
+         Identity {
+            engine: Engine::Chrome,
+            os:     Os::Windows,
+         }
+         .profile(),
+      )
+      .proxy(&url)
+      .expect("proxy")
+      .ip_version(IpVersion::V4)
+      .alt_svc_h3("quic.browserleaks.com", 443, 443)
+      .alt_svc_h3("x.com", 443, 443)
+      .alt_svc_h3("api.x.com", 443, 443)
+      .timeout(Duration::from_secs(15))
+      .build()
+      .expect("client");
+
+      // 1. quic.browserleaks.com: cold handshake -> close -> 0-RTT resumed handshake.
+      let t0 = std::time::Instant::now();
+      let r1 = client
+         .get("https://quic.browserleaks.com/?minify=1")
+         .await
+         .expect("cold quic.browserleaks");
+      let d1 = t0.elapsed();
+      let j1: serde_json::Value = serde_json::from_slice(&r1.body).expect("json1");
+      eprintln!(
+         "quic.browserleaks COLD: ver={} resumed={} ech={:?} 0-rtt={:?} ja4={} ({:?})",
+         r1.version,
+         r1.tls_resumed,
+         j1.pointer("/tls/ech_success"),
+         j1.pointer("/quic/0-rtt"),
+         j1["ja4"],
+         d1
       );
-      assert_eq!(
-         value["http2"]["akamai_fingerprint"], "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
-         "HTTP/2 fingerprint drifted from the Chrome 157 capture"
+      assert_eq!(r1.version, "h3");
+
+      // Drop the pooled QUIC connection; TLS ticket + QUIC token + H3 peer settings stay cached.
+      client.close();
+      let t1 = std::time::Instant::now();
+      let r2 = client
+         .get("https://quic.browserleaks.com/?minify=1")
+         .await
+         .expect("resumed quic.browserleaks");
+      let d2 = t1.elapsed();
+      let j2: serde_json::Value = serde_json::from_slice(&r2.body).expect("json2");
+      eprintln!(
+         "quic.browserleaks RESUMED: ver={} resumed={} ech={:?} 0-rtt={:?} ja4={} ({:?})",
+         r2.version,
+         r2.tls_resumed,
+         j2.pointer("/tls/ech_success"),
+         j2.pointer("/quic/0-rtt"),
+         j2["ja4"],
+         d2
       );
+      assert_eq!(r2.version, "h3");
+      assert!(r2.tls_resumed, "expected TLS PSK resumption on second H3 conn");
+
+      // 2. api.x.com: cold -> pooled -> close -> 0-RTT resumed.
+      let tx0 = std::time::Instant::now();
+      let x1 = client.get("https://api.x.com/").await.expect("cold api.x.com");
+      let dx1 = tx0.elapsed();
+      let txp = std::time::Instant::now();
+      let xp = client.get("https://api.x.com/").await.expect("pooled api.x.com");
+      let dxp = txp.elapsed();
+      client.close();
+      let tx2 = std::time::Instant::now();
+      let x2 = client.get("https://api.x.com/").await.expect("resumed api.x.com");
+      let dx2 = tx2.elapsed();
+      eprintln!(
+         "api.x.com: cold={} (resumed={}, {:?}), pooled={} (reused={}, {:?}), resumed={} (resumed={}, {:?})",
+         x1.version, x1.tls_resumed, dx1,
+         xp.version, xp.connection_reused, dxp,
+         x2.version, x2.tls_resumed, dx2,
+      );
+      assert_eq!(x1.version, "h3");
+      assert_eq!(xp.version, "h3");
+      assert!(xp.connection_reused);
+      assert_eq!(x2.version, "h3");
+      assert!(x2.tls_resumed, "expected TLS resumption on resumed api.x.com H3 conn");
+      client.shutdown().await;
    }
 }

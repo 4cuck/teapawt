@@ -23,19 +23,9 @@ http-body-util = "0.1.4"
 indexmap = "2.14.0"
 maud = { features = [ "axum" ], version = "0.27.0" }
 percent-encoding = "2.3.2"
-# Browser-impersonating client: each account presents a real browser's TLS
-# and HTTP/2 fingerprint. HTTP/3 is left out on purpose; X does not serve it.
-primp = {
-  default-features = false,
-  features = [
-    "gzip",
-    "brotli",
-    "zstd",
-    "deflate",
-    "stream",
-  ],
-  version = "2.0.0",
-}
+# Browser-impersonating client: each account presents a real browser's TLS,
+# HTTP/2, and HTTP/3 (QUIC) fingerprint, including HTTP/3 over SOCKS5 UDP ASSOCIATE.
+koon-core = { git = "https://github.com/4cuck/koon.git", branch = "master" }
 regex = "1.13.1"
 reqwest = { version = "0.12.23", default-features = false, features = [ "json", "rustls-tls" ] }
 ring = "0.17.14"
@@ -86,13 +76,13 @@ xitter-txid = "0.2.0"
 [dev-dependencies]
 tokio-test = "0.4.5"
 
-# primp-h2 0.4.19 counts the empty END_STREAM DATA frame that ends most of
-# X's responses against a lifetime limit of 100 and never gives it back, so
-# every connection is closed with ENHANCE_YOUR_CALM ("too_many_data_frames")
-# after about 100 answers. The copy here counts only frames that do not end
-# their stream, as h2 and primp-h2 0.4.18 do. Drop it once a release fixes it.
 [patch.crates-io]
-primp-h2 = { path = "vendor/primp-h2" }
+# koon-core's browser-fingerprinting QUIC/HTTP/3 forks.
+quinn = { git = "https://github.com/scrape-hub/quinn.git", tag = "koon-1.0.0" }
+quinn-proto = { git = "https://github.com/scrape-hub/quinn.git", tag = "koon-1.0.0" }
+quinn-udp = { git = "https://github.com/scrape-hub/quinn.git", tag = "koon-1.0.0" }
+h3 = { git = "https://github.com/scrape-hub/h3.git", tag = "koon-1.0.0" }
+h3-quinn = { git = "https://github.com/scrape-hub/h3.git", tag = "koon-1.0.0" }
 # xitter-txid 0.2.0 derives the animation key from the wrong key bytes, so the
 # transaction id it mints is one X refuses with a bodyless 404. Settings writes
 # are the calls that notice; see vendor/xitter-txid/README.md.
@@ -103,6 +93,9 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 2
+
+[profile.dev.package.btls-sys]
+opt-level = 3
 
 [profile.release]
 codegen-units = 1

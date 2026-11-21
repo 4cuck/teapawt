@@ -1,10 +1,11 @@
 //! Outbound HTTP, presented as a real browser.
 //!
-//! Every request goes out through a [`primp`] client that carries a browser's
-//! TLS and HTTP/2 fingerprint and headers. Requests made on behalf of an
-//! account use a client built for that account's [`Identity`] and pinned
-//! proxy, so one session always looks like one browser on one IP; anything
-//! else (media, bootstrap fetches) uses a shared default client.
+//! Every request goes out through a [`koon_core::Client`] that carries a
+//! browser's TLS, HTTP/2, and HTTP/3 (QUIC) fingerprint and headers. Requests
+//! made on behalf of an account use a client built for that account's
+//! [`Identity`] and pinned proxy, so one session always looks like one browser
+//! on one IP; anything else (media, bootstrap fetches) uses a shared default
+//! client.
 
 use std::{
    collections::{
@@ -61,8 +62,17 @@ use axum::http::{
    header,
 };
 use bytes::Bytes;
-use futures_core::Stream;
 use http_body::Frame;
+use koon_core::{
+   Body as KoonBody,
+   Chrome,
+   Client as KoonClient,
+   IpVersion,
+   Os,
+   Phase as KoonPhase,
+   RequestOptions,
+   StreamingResponse,
+};
 use time::{
    OffsetDateTime,
    format_description::well_known::Rfc3339,
@@ -93,21 +103,6 @@ const DEFAULT_BODY_CAPACITY: usize = 64 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// A media stream may run long; this is the cap on the whole transfer.
 const MEDIA_TIMEOUT: Duration = Duration::from_secs(60);
-/// Longest silence tolerated mid-body.
-const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
-/// Idle connections are kept this long. A session's connection to X is
-/// multiplexed HTTP/2 and pinged, so a dead one is noticed rather than hung on.
-/// Matching X's 15-minute window keeps active accounts' connections warm
-/// across an entire window instead of paying a cold TLS/SOCKS handshake after
-/// five minutes.
-const POOL_IDLE: Duration = Duration::from_secs(900);
-/// A few idle sockets per account. Hundreds of them, times every account on
-/// one exit, fills the proxy and every later call waits on headers.
-const POOL_PER_HOST: usize = 8;
-/// Short-lived HTTP/1.1 idle pool for CDN media fetches so `/pic/` and `/video/`
-/// reuse warm TLS+SOCKS handshakes without stalling on long-idle sockets.
-const MEDIA_POOL_IDLE: Duration = Duration::from_secs(15);
-const MEDIA_POOL_PER_HOST: usize = 16;
 /// Shards for per-session browser clients, eliminating global lock contention.
 const SESSION_CLIENT_SHARDS: usize = 64;
 /// CDN media normally answers in tens of milliseconds. A pooled connection the
@@ -115,16 +110,10 @@ const SESSION_CLIENT_SHARDS: usize = 64;
 /// then delivers, which is the video that "loads" after a long pause. Give up
 /// on headers by then and open another connection.
 const MEDIA_HEADER_DEADLINE: Duration = Duration::from_secs(2);
-/// X answers a healthy GraphQL call in well under a second. A pooled HTTP/2
-/// connection the proxy has already dropped sits until the gateway gives up
-/// (about five seconds) and then returns 503 "remote refused stream reset".
-/// Abandon headers by now and open another connection.
+/// X answers a healthy GraphQL call in well under a second. A pooled connection
+/// the proxy has already dropped sits until the gateway gives up (about five
+/// seconds). Abandon headers by now and open another connection.
 const API_HEADER_DEADLINE: Duration = Duration::from_millis(1500);
-/// `scrape-socks.py` reaps a tunnel after a quiet minute. Pings have to land
-/// well inside that window. A 45s ping left every idle session's socket
-/// already closed, and the next visitor waited out the header deadline on it.
-const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
-const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// After an HTML 429, skip the direct address this long and send every
 /// request through the fallback exits.
 const DIRECT_BLOCK_FOR: Duration = Duration::from_secs(5 * 60);
@@ -746,7 +735,7 @@ impl PrimaryPool {
    }
 }
 
-type SessionClientShard = RwLock<HashMap<(i64, u64), primp::Client>>;
+type SessionClientShard = RwLock<HashMap<(i64, u64), Arc<KoonClient>>>;
 
 fn session_client_shard(key: (i64, u64)) -> usize {
    let mixed = key
@@ -774,7 +763,7 @@ struct RequestSpec<'a> {
 )]
 pub struct HttpClient {
    purpose:              Purpose,
-   default:              primp::Client,
+   default:              Arc<KoonClient>,
    default_proxy:        Option<ProxyConfig>,
    /// Used only after the direct exit returns an HTML 429, or while that
    /// block is still fresh.
@@ -801,7 +790,9 @@ pub struct HttpClient {
 
 /// Response wrapper providing convenience methods.
 pub struct Response {
-   inner: primp::Response,
+   status:  StatusCode,
+   headers: HeaderMap,
+   inner:   StreamingResponse,
 }
 
 impl HttpClient {
@@ -816,16 +807,18 @@ impl HttpClient {
          default_proxy.as_ref(),
          purpose,
          &extra_headers,
-         POOL_PER_HOST,
+         true,
       )
       .unwrap_or_else(|err| {
          tracing::error!("browser client for the default identity failed to build: {err}");
-         // Without impersonation the client is still a working HTTP client.
-         primp::Client::builder()
-            .redirect(primp::redirect::Policy::none())
-            .timeout(purpose.timeout())
-            .build()
-            .expect("plain HTTP client builds without I/O")
+         Arc::new(
+            KoonClient::builder(Chrome::latest())
+               .follow_redirects(false)
+               .cookie_jar(false)
+               .timeout(purpose.timeout())
+               .build()
+               .expect("plain HTTP client builds without I/O"),
+         )
       });
       Self {
          purpose,
@@ -1018,7 +1011,7 @@ impl HttpClient {
          self.default_proxy.as_ref(),
          self.purpose,
          &self.extra_headers,
-         POOL_PER_HOST,
+         true,
       ) {
          Ok(client) => self.default = client,
          Err(err) => {
@@ -1054,19 +1047,21 @@ impl HttpClient {
    }
 
    /// Drop the pooled connection for this account so the next call dials a
-   /// new one. A wedged HTTP/2 session otherwise accepts the next stream and
-   /// stalls it until the proxy resets it.
+   /// new one. A wedged session otherwise accepts the next stream and stalls it
+   /// until the proxy resets it.
    pub(crate) fn retire(&self, via: Option<&Egress>) {
       let Some(egress) = via else {
          return;
       };
       let key = self.client_key(egress);
-      if let Ok(mut clients) = self.session_shard(key).write() {
-         clients.remove(&key);
+      if let Ok(mut clients) = self.session_shard(key).write()
+         && let Some(old) = clients.remove(&key)
+      {
+         old.close();
       }
    }
 
-   fn client_for(&self, via: Option<&Egress>) -> Result<primp::Client> {
+   fn client_for(&self, via: Option<&Egress>) -> Result<Arc<KoonClient>> {
       let Some(egress) = via else {
          return self.unowned_client();
       };
@@ -1079,23 +1074,19 @@ impl HttpClient {
       {
          return Ok(client);
       }
-      let idle = if self.is_fallback(egress.proxy.as_ref()) {
-         // A new connection asks the residential proxy for a new exit IP.
-         0
-      } else {
-         POOL_PER_HOST
-      };
+      // A new connection asks the rotating fallback proxy for a new exit IP.
+      let pooled = !self.is_fallback(egress.proxy.as_ref());
       let identity = browser::identity_for(egress.session);
       let client = build_client(
          identity,
          egress.proxy.as_ref(),
          self.purpose,
          &self.extra_headers,
-         idle,
+         pooled,
       )?;
       tracing::debug!(session_id = egress.session, %identity, "browser client built");
       if let Ok(mut clients) = shard.write() {
-         clients.entry(key).or_insert_with(|| client.clone());
+         clients.entry(key).or_insert_with(|| Arc::clone(&client));
       }
       Ok(client)
    }
@@ -1114,9 +1105,9 @@ impl HttpClient {
    /// proxy so no fetch is ever made from this host's own address. Media
    /// fetches round-robin across healthy exits; other unowned calls stay
    /// deterministic on the first non-blocked exit.
-   fn unowned_client(&self) -> Result<primp::Client> {
+   fn unowned_client(&self) -> Result<Arc<KoonClient>> {
       let Some(pool) = self.primary_pool.as_ref() else {
-         return Ok(self.default.clone());
+         return Ok(Arc::clone(&self.default));
       };
       let proxy = self.select_unowned_proxy(pool);
       let tag = proxy_tag(proxy.as_ref());
@@ -1142,10 +1133,10 @@ impl HttpClient {
          proxy.as_ref(),
          self.purpose,
          &self.extra_headers,
-         POOL_PER_HOST,
+         true,
       )?;
       if let Ok(mut clients) = shard.write() {
-         clients.entry(key).or_insert_with(|| client.clone());
+         clients.entry(key).or_insert_with(|| Arc::clone(&client));
       }
       Ok(client)
    }
@@ -1433,13 +1424,9 @@ impl HttpClient {
       }
       let send = || {
          async {
-            let mut request = client
-               .request(spec.method.clone(), spec.uri)
-               .headers(headers.clone());
-            if !spec.body.is_empty() {
-               request = request.body(spec.body.clone());
-            }
-            let result = request.send().await;
+            let result = send_koon(&client, spec, &headers)
+               .await
+               .map(Response::from_streaming);
             if let (Some(jar), Some(egress), Ok(response)) = (self.cookies.as_ref(), via, &result) {
                jar.absorb(egress.session, response.headers()).await;
             }
@@ -1447,12 +1434,12 @@ impl HttpClient {
          }
       };
       if self.purpose == Purpose::Media && is_idempotent(spec.method) {
-         let inner = match tokio::time::timeout(MEDIA_HEADER_DEADLINE, send()).await {
-            Ok(Ok(inner)) => inner,
-            Ok(Err(err)) if is_transport_blip(&err) || err.is_connect() => {
+         let response = match tokio::time::timeout(MEDIA_HEADER_DEADLINE, send()).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(err)) if is_transport_blip(&err) || is_connect_error(&err) => {
                tracing::warn!(
                   uri = loggable(spec.uri),
-                  error = %describe(err.without_url()),
+                  error = %describe(err),
                   "media fetch failed, retrying"
                );
                send().await.map_err(describe)?
@@ -1467,23 +1454,23 @@ impl HttpClient {
             },
             Ok(Err(err)) => return Err(describe(err)),
          };
-         return Ok(Response { inner });
+         return Ok(response);
       }
 
       if self.purpose == Purpose::Api && is_idempotent(spec.method) {
          let deadline = header_deadline.unwrap_or(API_HEADER_DEADLINE);
          let probe = ExitProbe::start(self, via);
          let mut first = pin!(send());
-         let inner = match tokio::time::timeout(deadline, first.as_mut()).await {
-            Ok(Ok(inner)) => {
+         let response = match tokio::time::timeout(deadline, first.as_mut()).await {
+            Ok(Ok(response)) => {
                probe.answered();
-               inner
+               response
             },
-            Ok(Err(err)) if is_transport_blip(&err) || err.is_connect() => {
+            Ok(Err(err)) if is_transport_blip(&err) || is_connect_error(&err) => {
                probe.failed();
                tracing::warn!(
                   uri = loggable(spec.uri),
-                  error = %describe(err.without_url()),
+                  error = %describe(err),
                   "API connection failed, opening another"
                );
                self.fresh_headers(spec, via).await?
@@ -1504,11 +1491,11 @@ impl HttpClient {
                return Err(describe(err));
             },
          };
-         return Ok(Response { inner });
+         return Ok(response);
       }
 
-      let inner = match send().await {
-         Ok(inner) => inner,
+      let response = match send().await {
+         Ok(response) => response,
          // A pooled connection the far end closed a moment ago fails on the
          // first write ("broken pipe", "connection reset") rather than with a
          // GOAWAY the client would retry itself. Safe to repeat for requests
@@ -1523,7 +1510,7 @@ impl HttpClient {
          },
          Err(err) => return Err(describe(err)),
       };
-      Ok(Response { inner })
+      Ok(response)
    }
 
    /// One more attempt on a connection that is not the one that just failed.
@@ -1534,7 +1521,7 @@ impl HttpClient {
       &self,
       spec: RequestSpec<'_>,
       via: Option<&Egress>,
-   ) -> Result<primp::Response> {
+   ) -> Result<Response> {
       self.retire(via);
       let alternate = via.and_then(|egress| self.alternate_primary(egress));
       self.send_fresh(spec, alternate.as_ref().or(via)).await
@@ -1550,9 +1537,9 @@ impl HttpClient {
       spec: RequestSpec<'_>,
       via: Option<&Egress>,
       header_deadline: Duration,
-   ) -> Result<primp::Response>
+   ) -> Result<Response>
    where
-      F: Future<Output = primp::Result<primp::Response>>,
+      F: Future<Output = StdResult<Response, koon_core::Error>>,
    {
       let alternate = via.and_then(|egress| self.alternate_primary(egress));
       if alternate.is_none() {
@@ -1565,7 +1552,7 @@ impl HttpClient {
          let (mut first_done, mut fresh_done) = (false, false);
          // A 5xx or an error is held in case the other side does no better.
          // A 5xx goes back up as a response, which callers retry elsewhere.
-         let mut fallback: Option<Result<primp::Response>> = None;
+         let mut fallback: Option<Result<Response>> = None;
          while !(first_done && fresh_done) {
             tokio::select! {
                late = first.as_mut(), if !first_done => {
@@ -1626,26 +1613,23 @@ impl HttpClient {
       &self,
       spec: RequestSpec<'_>,
       retry_via: Option<&Egress>,
-   ) -> Result<primp::Response> {
+   ) -> Result<Response> {
       let client = self.client_for(retry_via)?;
       let mut headers = spec.extra_headers.clone();
       if let (Some(jar), Some(egress)) = (self.cookies.as_ref(), retry_via) {
          jar.merge_into(egress.session, &mut headers).await;
       }
-      let mut request = client
-         .request(spec.method.clone(), spec.uri)
-         .headers(headers);
-      if !spec.body.is_empty() {
-         request = request.body(spec.body.clone());
-      }
       let probe = ExitProbe::start(self, retry_via);
-      match request.send().await {
-         Ok(inner) => {
+      match send_koon(&client, spec, &headers)
+         .await
+         .map(Response::from_streaming)
+      {
+         Ok(response) => {
             probe.answered();
             if let (Some(jar), Some(egress)) = (self.cookies.as_ref(), retry_via) {
-               jar.absorb(egress.session, inner.headers()).await;
+               jar.absorb(egress.session, response.headers()).await;
             }
-            Ok(inner)
+            Ok(response)
          },
          Err(err) => {
             probe.failed();
@@ -1700,98 +1684,42 @@ impl Drop for ExitProbe<'_> {
 }
 
 /// The browser presented when no account is involved.
-fn default_identity() -> Identity {
+const fn default_identity() -> Identity {
    Identity {
       engine: Engine::Chrome,
-      os:     primp::ImpersonateOS::Windows,
+      os:     Os::Windows,
    }
 }
 
-/// Header order from logged-in Chrome 152 sessions on x.com.
-///
-/// Names that a given request does not send are skipped, so a GraphQL GET
-/// stays in the order of those calls and an image or video fetch stays in
-/// the order of the CDN calls. A SearchTimeline GET sends this API order and
-/// does not send `x-twitter-polling` or `origin`; those names stay in the
-/// list for the calls that do.
-fn wire_header_order(purpose: Purpose) -> Vec<HeaderName> {
-   let names: &[&str] = match purpose {
-      Purpose::Api => {
-         &[
-            "sec-gpc",
-            "sec-ch-ua-platform",
-            "authorization",
-            "x-csrf-token",
-            "sec-ch-ua",
-            "x-twitter-client-language",
-            "sec-ch-ua-mobile",
-            "x-twitter-active-user",
-            "x-client-transaction-id",
-            "x-twitter-auth-type",
-            "user-agent",
-            "dnt",
-            "x-twitter-polling",
-            "content-type",
-            "accept",
-            "origin",
-            "sec-fetch-site",
-            "sec-fetch-mode",
-            "sec-fetch-dest",
-            "referer",
-            "accept-encoding",
-            "accept-language",
-            "cookie",
-            "priority",
-         ]
-      },
-      Purpose::Media => {
-         &[
-            "sec-gpc",
-            "sec-ch-ua-platform",
-            "user-agent",
-            "sec-ch-ua",
-            "dnt",
-            "sec-ch-ua-mobile",
-            "accept",
-            "origin",
-            "sec-fetch-site",
-            "sec-fetch-mode",
-            "sec-fetch-dest",
-            "sec-fetch-storage-access",
-            "referer",
-            "accept-encoding",
-            "accept-language",
-            "range",
-            "if-range",
-            "cookie",
-            "priority",
-         ]
-      },
-      Purpose::Script => {
-         &[
-            "sec-gpc",
-            "origin",
-            "sec-ch-ua-platform",
-            "user-agent",
-            "sec-ch-ua",
-            "dnt",
-            "sec-ch-ua-mobile",
-            "accept",
-            "sec-fetch-site",
-            "sec-fetch-mode",
-            "sec-fetch-dest",
-            "referer",
-            "accept-encoding",
-            "accept-language",
-            "cookie",
-            "priority",
-         ]
-      },
-   };
-   names
+fn header_map_to_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
+   headers
       .iter()
-      .map(|name| HeaderName::from_static(name))
+      .filter_map(|(name, value)| {
+         value
+            .to_str()
+            .ok()
+            .map(|val| (name.as_str().to_owned(), val.to_owned()))
+      })
       .collect()
+}
+
+async fn send_koon(
+   client: &KoonClient,
+   spec: RequestSpec<'_>,
+   headers: &HeaderMap,
+) -> StdResult<StreamingResponse, koon_core::Error> {
+   let body = if spec.body.is_empty() {
+      KoonBody::empty()
+   } else {
+      KoonBody::from(spec.body.clone())
+   };
+   let options = RequestOptions {
+      headers: header_map_to_pairs(headers),
+      ..RequestOptions::default()
+   };
+   client
+      .send_streaming(spec.method.clone(), spec.uri, body, options)
+      .await
 }
 
 fn build_client(
@@ -1799,130 +1727,111 @@ fn build_client(
    proxy: Option<&ProxyConfig>,
    purpose: Purpose,
    extra_headers: &HeaderMap,
-   idle_per_host: usize,
-) -> Result<primp::Client> {
-   // Images and video use HTTP/1.1 with a short-lived idle pool: one shared
-   // HTTP/2 session to video.twimg.com stalls later fetches once the CDN drops
-   // it, while a small HTTP/1.1 pool reuses warm TLS+SOCKS handshakes.
-   let media = purpose == Purpose::Media;
-   let mut builder = primp::Client::builder()
-      .impersonate(identity.profile())
-      .impersonate_os(identity.os)
-      // Redirects are the caller's business: t.co resolution reads them.
-      .redirect(primp::redirect::Policy::none())
-      .timeout(purpose.timeout())
-      .read_timeout(BODY_IDLE_TIMEOUT)
-      .pool_idle_timeout(if media { MEDIA_POOL_IDLE } else { POOL_IDLE })
-      .pool_max_idle_per_host(if media {
-         MEDIA_POOL_PER_HOST
-      } else {
-         idle_per_host
-      })
-      .http2_keep_alive_interval(KEEP_ALIVE_INTERVAL)
-      .http2_keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
-      .http2_keep_alive_while_idle(true)
-      .tcp_keepalive(Duration::from_secs(10))
-      .tcp_nodelay(true)
-      // Impersonation installs a document-navigation order. x.com's own calls
-      // use a different order, captured from Chrome 152, and headers missing
-      // from that list are appended after `priority`.
-      .http2_headers_order(wire_header_order(purpose));
-   if media {
-      builder = builder.http1_only().connect_timeout(Duration::from_secs(3));
+   pooled: bool,
+) -> Result<Arc<KoonClient>> {
+   let mut profile = identity.profile();
+   let has_fetch_metadata = profile
+      .headers
+      .iter()
+      .any(|(name, _)| name.eq_ignore_ascii_case("sec-fetch-mode"));
+
+   if purpose == Purpose::Media {
+      // Images and video use HTTP/1.1: Fastly does not serve HTTP/3 and a
+      // shared HTTP/2 session to video.twimg.com stalls once the CDN drops it.
+      profile.quic = None;
+      profile.tls.alpn = vec![koon_core::tls::AlpnProtocol::Http11];
    }
-   builder = match proxy {
-      Some(proxy) => {
-         builder.proxy(primp::Proxy::all(proxy.url()).map_err(|err| {
-            Error::Internal(format!("proxy {}:{}: {err}", proxy.host, proxy.port))
-         })?)
-      },
-      None => builder.no_proxy(),
-   };
-   let mut client = builder
+
+   let default_headers = purpose_headers(purpose, has_fetch_metadata, extra_headers);
+
+   let mut builder = KoonClient::builder(profile)
+      // Redirects are the caller's business: t.co resolution reads them.
+      .follow_redirects(false)
+      // Account cookies live in teapot's own Postgres-backed Jar.
+      .cookie_jar(false)
+      .connection_pool(pooled)
+      .timeout(purpose.timeout())
+      .headers(default_headers);
+
+   if purpose == Purpose::Api {
+      // Both x.com and api.x.com advertise `alt-svc: h3=":443"; ma=86400`.
+      // Pre-seeding lets accounts race HTTP/3 (QUIC) from the first request
+      // (including over SOCKS5 UDP ASSOCIATE), with automatic TCP/HTTP/2
+      // fallback if UDP is unavailable on a proxy.
+      builder = builder
+         .alt_svc_h3("x.com", 443, 443)
+         .alt_svc_h3("api.x.com", 443, 443);
+   }
+
+   if let Some(proxy) = proxy {
+      builder = builder
+         .proxy(&proxy.url())
+         .map_err(|err| Error::Internal(format!("proxy {}:{}: {err}", proxy.host, proxy.port)))?;
+      if proxy.kind == ProxyKind::Socks5 {
+         builder = builder.ip_version(IpVersion::V4);
+      }
+   }
+
+   let client = builder
       .build()
       .map_err(|err| Error::Internal(format!("browser client for {identity}: {err}")))?;
-   shape_headers(client.headers_mut(), purpose, extra_headers);
-   present_version(client.headers_mut(), identity);
-   Ok(client)
+   Ok(Arc::new(client))
 }
 
-/// Write the browser version this identity presents into the headers primp
-/// built from its profile. primp's newest Chrome profile is 153; every version
-/// from 150 up sends the same ClientHello, so the version only exists here.
-fn present_version(headers: &mut HeaderMap, identity: Identity) {
-   let Some(pairs) = identity.version_headers() else {
-      return;
-   };
-   for (name, value) in pairs {
-      if let Ok(value) = HeaderValue::from_str(value) {
-         headers.insert(header::HeaderName::from_static(name), value);
-      }
-   }
-}
-
-/// Turn the profile's page-navigation headers into the set a browser sends
-/// with the kind of request this client makes.
+/// Request-context headers for `purpose`, combined with any caller-configured
+/// `extra` headers.
 ///
-/// The profile ships the headers of a top-level page load. An XHR to the API
-/// or an image fetch carries the same identity headers (`user-agent`,
-/// `sec-ch-ua*`, `accept-language`, `accept-encoding`) but a different fetch
-/// context, and never `upgrade-insecure-requests` or `sec-fetch-user`. Keys
-/// are only rewritten where the profile sent them, so Safari, which sends no
-/// `sec-fetch-*` at all, stays Safari.
-fn shape_headers(headers: &mut HeaderMap, purpose: Purpose, extra: &HeaderMap) {
-   headers.remove("upgrade-insecure-requests");
-   headers.remove("sec-fetch-user");
-   // A navigation asks for a prefetch with this; an XHR and a chunk load do
-   // not, and X's web app never sends it on either.
-   headers.remove("sec-purpose");
-
-   let (accept, dest, mode, site, priority) = match purpose {
-      Purpose::Api => ("*/*", "empty", "cors", "same-origin", Some("u=1, i")),
-      Purpose::Media => {
-         (
-            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-            "image",
-            "no-cors",
-            "cross-site",
-            Some("u=1, i"),
-         )
-      },
-      // A chunk webpack loads on demand carries no priority.
-      Purpose::Script => ("*/*", "script", "cors", "cross-site", None),
-   };
-   for (name, value) in [
-      (header::ACCEPT, accept),
-      (header::HeaderName::from_static("sec-fetch-dest"), dest),
-      (header::HeaderName::from_static("sec-fetch-mode"), mode),
-      (header::HeaderName::from_static("sec-fetch-site"), site),
-   ] {
-      if headers.contains_key(&name) {
-         headers.insert(name, HeaderValue::from_static(value));
-      }
-   }
-   let priority_name = header::HeaderName::from_static("priority");
-   match priority {
-      Some(value) if headers.contains_key(&priority_name) => {
-         headers.insert(priority_name, HeaderValue::from_static(value));
-      },
-      Some(_) => {},
-      None => {
-         headers.remove(&priority_name);
-      },
-   }
-   match purpose {
+/// `koon-core` derives the browser's exact wire header order (Blink's
+/// `HTTPHeaderMap` for Chromium CORS/fetch calls, Firefox's `FIREFOX_CORS`,
+/// Safari's Sonoma/Tahoe H3/H2 order), strips `upgrade-insecure-requests` and
+/// `sec-fetch-user` in CORS mode, computes `sec-fetch-site` from `referer` and
+/// the request URL, and only emits `sec-fetch-*` when the profile itself sends
+/// fetch metadata.
+fn purpose_headers(
+   purpose: Purpose,
+   has_fetch_metadata: bool,
+   extra: &HeaderMap,
+) -> Vec<(String, String)> {
+   let mut headers: Vec<(String, String)> = match purpose {
       Purpose::Api => {
-         headers.insert(header::REFERER, HeaderValue::from_static("https://x.com/"));
+         let mut out = vec![
+            ("accept".to_owned(), "*/*".to_owned()),
+            ("referer".to_owned(), "https://x.com/".to_owned()),
+         ];
+         if has_fetch_metadata {
+            out.push(("sec-fetch-dest".to_owned(), "empty".to_owned()));
+            out.push(("sec-fetch-mode".to_owned(), "cors".to_owned()));
+         }
+         out
+      },
+      Purpose::Media => {
+         let mut out = vec![(
+            "accept".to_owned(),
+            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8".to_owned(),
+         )];
+         if has_fetch_metadata {
+            out.push(("sec-fetch-dest".to_owned(), "image".to_owned()));
+            out.push(("sec-fetch-mode".to_owned(), "no-cors".to_owned()));
+            out.push(("sec-fetch-site".to_owned(), "cross-site".to_owned()));
+         }
+         out
       },
       Purpose::Script => {
-         headers.insert(header::ORIGIN, HeaderValue::from_static("https://x.com"));
-         headers.insert(header::REFERER, HeaderValue::from_static("https://x.com/"));
+         let mut out = vec![
+            ("accept".to_owned(), "*/*".to_owned()),
+            ("origin".to_owned(), "https://x.com".to_owned()),
+            ("referer".to_owned(), "https://x.com/".to_owned()),
+         ];
+         if has_fetch_metadata {
+            out.push(("sec-fetch-dest".to_owned(), "script".to_owned()));
+            out.push(("sec-fetch-mode".to_owned(), "cors".to_owned()));
+            out.push(("sec-fetch-site".to_owned(), "cross-site".to_owned()));
+         }
+         out
       },
-      Purpose::Media => {},
-   }
-   for (name, value) in extra {
-      headers.insert(name.clone(), value.clone());
-   }
+   };
+   headers.extend(header_map_to_pairs(extra));
+   headers
 }
 
 const fn is_idempotent(method: &Method) -> bool {
@@ -2130,20 +2039,39 @@ fn loggable(uri: &str) -> &str {
    uri.find("&features=").map_or(uri, |at| &uri[..at])
 }
 
-/// A failure to send at all, as opposed to a timeout, a connect failure or a
-/// bad response: the far end dropped a connection we thought was open.
-fn is_transport_blip(err: &primp::Error) -> bool {
-   err.is_request() && !err.is_timeout() && !err.is_connect() && !err.is_body() && !err.is_decode()
+/// A failure to send at all, as opposed to a timeout or body-read failure: the
+/// far end dropped a connection we thought was open.
+fn is_transport_blip(err: &koon_core::Error) -> bool {
+   if err.is_timeout() || err.phase() == Some(KoonPhase::Body) {
+      return false;
+   }
+   matches!(
+      err.kind(),
+      koon_core::Error::Io(_)
+         | koon_core::Error::Http2(_)
+         | koon_core::Error::Quic(..)
+         | koon_core::Error::Http3(..)
+         | koon_core::Error::Protocol(..)
+         | koon_core::Error::Tls(_)
+         | koon_core::Error::Proxy(..)
+   )
 }
 
-/// Error text that keeps the cause, since the client's own `Display` stops at
-/// "error sending request".
-fn describe(err: primp::Error) -> Error {
+fn is_connect_error(err: &koon_core::Error) -> bool {
+   err.is_connection_error()
+      || err.is_proxy_error()
+      || err.is_tls_error()
+      || err.phase() == Some(KoonPhase::Connect)
+}
+
+/// Error text that keeps the cause, since top-level errors often hide the
+/// underlying transport failure.
+fn describe(err: koon_core::Error) -> Error {
    if err.is_timeout() {
       return Error::Internal("HTTP request timed out".into());
    }
-   let mut text = if err.is_connect() {
-      String::from("connect failed")
+   let mut text = if err.is_connection_error() {
+      format!("connect failed: {err}")
    } else {
       err.to_string()
    };
@@ -2190,18 +2118,46 @@ fn parse_proxy(url: &str, auth: &str) -> ProxyConfig {
 }
 
 impl Response {
-   pub fn status(&self) -> StatusCode {
-      self.inner.status()
+   fn from_streaming(inner: StreamingResponse) -> Self {
+      let status = StatusCode::from_u16(inner.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+      let mut headers = HeaderMap::with_capacity(inner.headers.len());
+      for (name, value) in &inner.headers {
+         if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_bytes(value.as_bytes()),
+         ) {
+            headers.append(name, value);
+         }
+      }
+      Self {
+         status,
+         headers,
+         inner,
+      }
    }
 
-   pub fn headers(&self) -> &HeaderMap {
-      self.inner.headers()
+   #[must_use]
+   pub const fn status(&self) -> StatusCode {
+      self.status
+   }
+
+   #[must_use]
+   pub const fn headers(&self) -> &HeaderMap {
+      &self.headers
+   }
+
+   /// Wire protocol negotiated for this response (e.g. `"h3"`, `"h2"`, `"HTTP/1.1"`).
+   #[must_use]
+   pub fn version(&self) -> &str {
+      &self.inner.version
    }
 
    /// The body as a stream, for media that is relayed rather than read.
-   pub fn into_body(self) -> StreamingBody {
+   #[must_use]
+   pub fn into_body(mut self) -> StreamingBody {
+      let _ = self.inner.decode_content();
       StreamingBody {
-         inner: Box::pin(self.inner.bytes_stream()),
+         state: StreamState::Idle(Box::new(self.inner)),
       }
    }
 
@@ -2212,7 +2168,20 @@ impl Response {
 
    /// Collect the response body as bytes, rejecting oversized bodies.
    pub async fn bytes_limited(mut self, max_bytes: usize) -> Result<Bytes> {
-      let initial_capacity = if let Some(declared) = self.inner.content_length() {
+      let encoded = self
+         .headers
+         .get(header::CONTENT_ENCODING)
+         .and_then(|value| value.to_str().ok())
+         .is_some_and(|value| !value.trim().eq_ignore_ascii_case("identity"));
+      let declared_len = (!encoded)
+         .then(|| {
+            self.headers
+               .get(header::CONTENT_LENGTH)
+               .and_then(|value| value.to_str().ok())
+               .and_then(|value| value.trim().parse::<u64>().ok())
+         })
+         .flatten();
+      let initial_capacity = if let Some(declared) = declared_len {
          let Ok(declared) = usize::try_from(declared) else {
             return Err(Error::Internal(format!(
                "response body exceeded {max_bytes} bytes"
@@ -2227,8 +2196,10 @@ impl Response {
       } else {
          DEFAULT_BODY_CAPACITY.min(max_bytes)
       };
+      let _ = self.inner.decode_content();
       let mut collected = Vec::with_capacity(initial_capacity);
-      while let Some(chunk) = self.inner.chunk().await.map_err(describe)? {
+      while let Some(chunk) = self.inner.next_chunk().await {
+         let chunk = chunk.map_err(describe)?;
          if collected.len().saturating_add(chunk.len()) > max_bytes {
             return Err(Error::Internal(format!(
                "response body exceeded {max_bytes} bytes"
@@ -2246,9 +2217,26 @@ impl Response {
    }
 }
 
+type ChunkFuture = Pin<
+   Box<
+      dyn Future<
+            Output = (
+               Box<StreamingResponse>,
+               Option<StdResult<Vec<u8>, koon_core::Error>>,
+            ),
+         > + Send,
+   >,
+>;
+
+enum StreamState {
+   Idle(Box<StreamingResponse>),
+   Reading(ChunkFuture),
+   Done,
+}
+
 /// A response body relayed chunk by chunk.
 pub struct StreamingBody {
-   inner: Pin<Box<dyn Stream<Item = primp::Result<Bytes>> + Send>>,
+   state: StreamState,
 }
 
 impl http_body::Body for StreamingBody {
@@ -2259,11 +2247,35 @@ impl http_body::Body for StreamingBody {
       mut self: Pin<&mut Self>,
       cx: &mut Context<'_>,
    ) -> Poll<Option<StdResult<Frame<Self::Data>, Self::Error>>> {
-      match self.inner.as_mut().poll_next(cx) {
-         Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(Ok(Frame::data(chunk)))),
-         Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(std::io::Error::other(err)))),
-         Poll::Ready(None) => Poll::Ready(None),
-         Poll::Pending => Poll::Pending,
+      loop {
+         match std::mem::replace(&mut self.state, StreamState::Done) {
+            StreamState::Idle(mut resp) => {
+               let fut = Box::pin(async move {
+                  let next = resp.next_chunk().await;
+                  (resp, next)
+               });
+               self.state = StreamState::Reading(fut);
+            },
+            StreamState::Reading(mut fut) => {
+               match fut.as_mut().poll(cx) {
+                  Poll::Pending => {
+                     self.state = StreamState::Reading(fut);
+                     return Poll::Pending;
+                  },
+                  Poll::Ready((resp, Some(Ok(chunk)))) => {
+                     self.state = StreamState::Idle(resp);
+                     return Poll::Ready(Some(Ok(Frame::data(Bytes::from(chunk)))));
+                  },
+                  Poll::Ready((_, Some(Err(err)))) => {
+                     return Poll::Ready(Some(Err(std::io::Error::other(err))));
+                  },
+                  Poll::Ready((_, None)) => {
+                     return Poll::Ready(None);
+                  },
+               }
+            },
+            StreamState::Done => return Poll::Ready(None),
+         }
       }
    }
 }
@@ -2664,108 +2676,33 @@ mod tests {
       assert_eq!(bare.url(), "http://squid.local:8080");
    }
 
-   #[test]
-   fn api_header_order_matches_the_chrome_capture() {
-      let order = wire_header_order(Purpose::Api);
-      let mut headers = HeaderMap::new();
-      // Inserted backwards on purpose: the wire order is the capture, not
-      // insertion order.
-      for name in [
-         "priority",
-         "cookie",
-         "accept-language",
-         "accept-encoding",
-         "referer",
-         "sec-fetch-dest",
-         "sec-fetch-mode",
-         "sec-fetch-site",
-         "accept",
-         "content-type",
-         "user-agent",
-         "x-twitter-auth-type",
-         "x-client-transaction-id",
-         "x-twitter-active-user",
-         "sec-ch-ua-mobile",
-         "x-twitter-client-language",
-         "sec-ch-ua",
-         "x-csrf-token",
-         "authorization",
-         "sec-ch-ua-platform",
-      ] {
-         headers.insert(HeaderName::from_static(name), HeaderValue::from_static("x"));
-      }
-      let positions: std::collections::HashMap<&HeaderName, usize> = order
+   fn find_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+      headers
          .iter()
-         .enumerate()
-         .map(|(index, name)| (name, index))
-         .collect();
-      let mut names: Vec<HeaderName> = headers.keys().cloned().collect();
-      names.sort_by_key(|name| positions.get(name).copied().unwrap_or(order.len()));
-      let joined: Vec<&str> = names.iter().map(HeaderName::as_str).collect();
-      assert_eq!(joined, vec![
-         "sec-ch-ua-platform",
-         "authorization",
-         "x-csrf-token",
-         "sec-ch-ua",
-         "x-twitter-client-language",
-         "sec-ch-ua-mobile",
-         "x-twitter-active-user",
-         "x-client-transaction-id",
-         "x-twitter-auth-type",
-         "user-agent",
-         "content-type",
-         "accept",
-         "sec-fetch-site",
-         "sec-fetch-mode",
-         "sec-fetch-dest",
-         "referer",
-         "accept-encoding",
-         "accept-language",
-         "cookie",
-         "priority",
-      ]);
+         .find(|(k, _)| k.eq_ignore_ascii_case(name))
+         .map(|(_, v)| v.as_str())
    }
 
    #[test]
    fn api_headers_look_like_an_xhr() {
-      let mut headers = HeaderMap::new();
-      headers.insert(header::ACCEPT, HeaderValue::from_static("text/html"));
-      headers.insert("upgrade-insecure-requests", HeaderValue::from_static("1"));
-      headers.insert("sec-fetch-user", HeaderValue::from_static("?1"));
-      headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
-      headers.insert(
-         "sec-ch-ua",
-         HeaderValue::from_static("\"Chromium\";v=\"151\""),
-      );
-      shape_headers(&mut headers, Purpose::Api, &HeaderMap::new());
-      assert_eq!(headers.get(header::ACCEPT).unwrap(), "*/*");
-      assert_eq!(headers.get("sec-fetch-mode").unwrap(), "cors");
-      assert!(headers.get("upgrade-insecure-requests").is_none());
-      assert!(headers.get("sec-fetch-user").is_none());
-      assert_eq!(headers.get("sec-ch-ua").unwrap(), "\"Chromium\";v=\"151\"");
-      assert_eq!(headers.get(header::REFERER).unwrap(), "https://x.com/");
+      let headers = purpose_headers(Purpose::Api, true, &HeaderMap::new());
+      assert_eq!(find_header(&headers, "accept"), Some("*/*"));
+      assert_eq!(find_header(&headers, "sec-fetch-mode"), Some("cors"));
+      assert_eq!(find_header(&headers, "sec-fetch-dest"), Some("empty"));
+      assert_eq!(find_header(&headers, "referer"), Some("https://x.com/"));
+      assert!(find_header(&headers, "upgrade-insecure-requests").is_none());
+      assert!(find_header(&headers, "sec-fetch-user").is_none());
    }
 
    #[test]
    fn script_headers_match_a_chrome_chunk_load() {
-      let mut headers = HeaderMap::new();
-      headers.insert(header::ACCEPT, HeaderValue::from_static("text/html"));
-      headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
-      headers.insert("sec-fetch-dest", HeaderValue::from_static("document"));
-      headers.insert("sec-fetch-site", HeaderValue::from_static("none"));
-      headers.insert("priority", HeaderValue::from_static("u=0, i"));
-      shape_headers(&mut headers, Purpose::Script, &HeaderMap::new());
-      assert_eq!(headers.get(header::ACCEPT).unwrap(), "*/*");
-      assert_eq!(headers.get("sec-fetch-mode").unwrap(), "cors");
-      assert_eq!(headers.get("sec-fetch-dest").unwrap(), "script");
-      assert_eq!(headers.get("sec-fetch-site").unwrap(), "cross-site");
-      assert_eq!(headers.get(header::ORIGIN).unwrap(), "https://x.com");
-      assert_eq!(headers.get(header::REFERER).unwrap(), "https://x.com/");
-      assert!(headers.get("priority").is_none());
-
-      let order = wire_header_order(Purpose::Script);
-      let names: Vec<&str> = order.iter().map(HeaderName::as_str).collect();
-      assert_eq!(&names[..3], &["sec-gpc", "origin", "sec-ch-ua-platform"]);
+      let headers = purpose_headers(Purpose::Script, true, &HeaderMap::new());
+      assert_eq!(find_header(&headers, "accept"), Some("*/*"));
+      assert_eq!(find_header(&headers, "sec-fetch-mode"), Some("cors"));
+      assert_eq!(find_header(&headers, "sec-fetch-dest"), Some("script"));
+      assert_eq!(find_header(&headers, "sec-fetch-site"), Some("cross-site"));
+      assert_eq!(find_header(&headers, "origin"), Some("https://x.com"));
+      assert_eq!(find_header(&headers, "referer"), Some("https://x.com/"));
    }
 
    /// HTTP/1.1 on localhost whose n-th request waits `delays[n]` before
@@ -2900,11 +2837,80 @@ mod tests {
 
    #[test]
    fn safari_gets_no_fetch_metadata_it_never_sends() {
-      let mut headers = HeaderMap::new();
-      headers.insert(header::ACCEPT, HeaderValue::from_static("text/html"));
-      shape_headers(&mut headers, Purpose::Api, &HeaderMap::new());
-      assert!(headers.get("sec-fetch-mode").is_none());
-      assert!(headers.get("sec-fetch-dest").is_none());
+      let headers = purpose_headers(Purpose::Api, false, &HeaderMap::new());
+      assert!(find_header(&headers, "sec-fetch-mode").is_none());
+      assert!(find_header(&headers, "sec-fetch-dest").is_none());
+   }
+
+   #[tokio::test]
+   async fn streaming_body_yields_all_chunks() {
+      use http_body_util::BodyExt as _;
+
+      let uri = delayed_server(vec![Duration::ZERO]).await;
+      let client = HttpClient::new("", "", Purpose::Media);
+      let response = client.get(&uri).await.unwrap();
+      let collected = response.into_body().collect().await.unwrap().to_bytes();
+      assert_eq!(collected.as_ref(), b"0");
+   }
+
+   #[tokio::test]
+   #[ignore = "reaches x.com and api.x.com over HTTP/3 via proxies.txt"]
+   async fn http_client_uses_http3_through_socks5_exits() {
+      let content = fs::read_to_string("proxies.txt").expect("proxies.txt");
+      let mut exits = Vec::new();
+      for line in content.lines() {
+         let line = line.trim();
+         if line.is_empty() || line.starts_with('#') {
+            continue;
+         }
+         let mut parts = line.splitn(4, ':');
+         let host = parts.next().unwrap().to_owned();
+         let port: u16 = parts.next().unwrap().parse().unwrap();
+         let user = parts.next().unwrap().to_owned();
+         let pass = parts.next().unwrap().to_owned();
+         exits.push(ProxyConfig {
+            host,
+            port,
+            kind: ProxyKind::Socks5,
+            username: Some(user),
+            password: Some(pass),
+         });
+      }
+      let direct = exits.iter().find(|p| p.port == 1081).unwrap().clone();
+      let via = exits.iter().find(|p| p.port == 1086).unwrap().clone();
+      let client = HttpClient::new("", "", Purpose::Api).with_primary_proxies(exits);
+
+      for (session, proxy) in [(101, direct), (102, via)] {
+         let egress = Egress {
+            session,
+            proxy: Some(proxy.clone()),
+         };
+         let resp = client
+            .get_on("https://x.com/", &HeaderMap::new(), Some(&egress))
+            .await
+            .unwrap();
+         assert_eq!(
+            resp.version(),
+            "h3",
+            "expected HTTP/3 on port {} to x.com",
+            proxy.port
+         );
+         assert!(
+            resp.headers().get_all(header::SET_COOKIE).iter().count() >= 2,
+            "expected multiple Set-Cookie headers preserved on port {}",
+            proxy.port
+         );
+         let api_resp = client
+            .get_on("https://api.x.com/", &HeaderMap::new(), Some(&egress))
+            .await
+            .unwrap();
+         assert_eq!(
+            api_resp.version(),
+            "h3",
+            "expected HTTP/3 on port {} to api.x.com",
+            proxy.port
+         );
+      }
    }
 
    #[test]

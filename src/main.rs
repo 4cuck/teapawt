@@ -343,9 +343,9 @@ async fn main() -> eyre::Result<()> {
         .layer(middleware::from_fn(routes::negotiate))
         // Cloudflare compresses for visitors, but it reaches this process
         // through a tunnel, and a page sent as-is crosses that at full size.
-        // Only gzip is built in. primp turns on tower-http's brotli and zstd
-        // decoders, and with those the layer picks `br` from Cloudflare's
-        // `gzip, br` and then sends the page uncompressed.
+        // Only gzip is built in. Keeping brotli, zstd, and deflate disabled
+        // ensures the layer never negotiates an uncompiled codec from
+        // Cloudflare's `Accept-Encoding` and sends the page uncompressed.
         .layer(
             CompressionLayer::new()
                 .no_br()
