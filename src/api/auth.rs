@@ -250,8 +250,12 @@ pub struct SessionPool {
    /// Calls parked until an account frees up, for the minute report.
    waiting:         Arc<AtomicUsize>,
    /// Time each call spent getting an account, reported every minute.
-   queue:           Arc<AccountQueue>,
-   telemetry:       Option<crate::stats::StatsStore>,
+   queue:                Arc<AccountQueue>,
+   telemetry:            Option<crate::stats::StatsStore>,
+   /// Unix timestamp (seconds) of the latest successful non-empty tweet
+   /// search across the pool, used to tell a broken account apart from a
+   /// global X search outage.
+   last_tweet_search_ok: Arc<AtomicU64>,
 }
 
 type SessionSlots = Arc<[Arc<SessionSlot>]>;
@@ -373,8 +377,9 @@ impl Miss {
 /// [`SLOW_EXIT_FAST_FLOOR`] calls rank ahead of slow exits (which are also
 /// discounted by [`SLOW_EXIT_DISCOUNT`]). Among quick exits, warm HTTP/2
 /// connections with at least [`WARM_HEADROOM_FLOOR`] calls rank ahead of cold
-/// connections; otherwise higher remaining wins, breaking ties on verified
-/// status and warmth.
+/// connections on view endpoints; `SearchTimeline` instead spreads across the
+/// fullest idle accounts so a small search pool is not hammered into
+/// suspension.
 #[derive(Clone, Copy)]
 struct Candidate {
    index:     usize,
@@ -382,6 +387,53 @@ struct Candidate {
    verified:  bool,
    warm:      bool,
    slow_exit: bool,
+   idle:      bool,
+}
+
+/// Default budget assumed for a verified `SearchTimeline` account whose
+/// 15-minute window has already expired (or has not been observed yet).
+const SEARCH_DEFAULT_LIMIT: i32 = 187;
+
+/// Short cooldown after an uncorroborated `SearchTimeline` `"Internal server
+/// error"` (every tried account failed the query, or immediately on failure
+/// before the retry loop finishes).
+pub(crate) const SEARCH_UNCORROBORATED_FAIL_REST_SECS: i64 = 45;
+/// Cooldown after a corroborated `SearchTimeline` `"Internal server error"`
+/// (another account answered the exact same query). Keeps a newly suspended
+/// account out of rotation immediately while giving a transient blip one
+/// second chance on a different query before demoting.
+const SEARCH_CORROBORATED_FAIL_REST_SECS: i64 = 120;
+/// Minimum seconds between strike 1 and strike 2 on corroborated failures so
+/// two concurrent requests hitting a brief connection blip cannot demote a
+/// healthy account.
+const SEARCH_CORROBORATED_MIN_GAP_SECS: u64 = 10;
+/// Distinct corroborated failing queries in a row (separated by at least
+/// [`SEARCH_CORROBORATED_MIN_GAP_SECS`]) before demoting to the view pool.
+const SEARCH_CORROBORATED_DEMOTE_THRESHOLD: u32 = 2;
+/// Distinct uncorroborated failing queries in a row while the pool is healthy
+/// before running one background `"news"` canary check on the account.
+const SEARCH_CANARY_TRIGGER_THRESHOLD: u32 = 3;
+/// How recently some account must have answered a non-empty tweet search for
+/// X search to be considered globally healthy (not in an outage).
+const TWEET_SEARCH_HEALTHY_WINDOW_SECS: u64 = 300;
+
+/// What [`SessionPool::record_search_timeline_failure`] decided to do with a
+/// search account after `"Internal server error"` on `search_timeline.timeline`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchFailureAction {
+   Rested,
+   Demoted,
+   NeedsCanary,
+}
+
+#[derive(Default)]
+struct SearchFailureState {
+   corroborated_streak:   u32,
+   corroborated_query:    u64,
+   corroborated_at:       u64,
+   uncorroborated_streak: u32,
+   uncorroborated_query:  u64,
+   canary_in_flight:      bool,
 }
 
 /// Where the accounts for one call stood, for the minute report.
@@ -432,7 +484,11 @@ impl<'a> ApiSpec<'a> {
    }
 }
 
-const fn candidate_rank(candidate: Candidate, prefer_warm: bool) -> (bool, bool, i32, bool, bool) {
+const fn candidate_rank(
+   candidate: Candidate,
+   prefer_warm: bool,
+   is_search: bool,
+) -> (bool, bool, i32, bool, bool) {
    if prefer_warm {
       (
          !candidate.slow_exit,
@@ -440,6 +496,15 @@ const fn candidate_rank(candidate: Candidate, prefer_warm: bool) -> (bool, bool,
          candidate.remaining,
          candidate.verified,
          false,
+      )
+   } else if is_search {
+      let fast_healthy = !candidate.slow_exit && candidate.remaining >= SLOW_EXIT_FAST_FLOOR;
+      (
+         fast_healthy,
+         false,
+         candidate.remaining,
+         candidate.idle,
+         candidate.warm,
       )
    } else {
       let fast_healthy = !candidate.slow_exit && candidate.remaining >= SLOW_EXIT_FAST_FLOOR;
@@ -455,18 +520,24 @@ const fn candidate_rank(candidate: Candidate, prefer_warm: bool) -> (bool, bool,
    }
 }
 
-fn better_candidate(candidate: Candidate, chosen: Candidate, prefer_warm: bool) -> bool {
-   candidate_rank(candidate, prefer_warm) > candidate_rank(chosen, prefer_warm)
+fn better_candidate(
+   candidate: Candidate,
+   chosen: Candidate,
+   prefer_warm: bool,
+   is_search: bool,
+) -> bool {
+   candidate_rank(candidate, prefer_warm, is_search)
+      > candidate_rank(chosen, prefer_warm, is_search)
 }
 
 fn can_stop_early(best: &[Candidate]) -> bool {
    best.len() >= SCAN_TOP_K && best.iter().all(|chosen| !chosen.slow_exit)
 }
 
-fn insert_best(best: &mut Vec<Candidate>, candidate: Candidate, prefer_warm: bool) {
+fn insert_best(best: &mut Vec<Candidate>, candidate: Candidate, prefer_warm: bool, is_search: bool) {
    let pos = best
       .iter()
-      .position(|&existing| better_candidate(candidate, existing, prefer_warm))
+      .position(|&existing| better_candidate(candidate, existing, prefer_warm, is_search))
       .unwrap_or(best.len());
    if pos < SCAN_TOP_K {
       best.insert(pos, candidate);
@@ -525,6 +596,10 @@ struct SessionSlot {
    search_rate_limited_total: AtomicU64,
    /// Unix timestamp (seconds) of the latest empty `SearchTimeline` answer.
    last_search_empty:         AtomicU64,
+   /// Fast-path flag indicating non-zero streaks inside `search_failures`.
+   has_search_failures:       AtomicBool,
+   /// Consecutive tweet-search `"Internal server error"` failure streaks.
+   search_failures:           std::sync::Mutex<SearchFailureState>,
 }
 
 impl SessionSlot {
@@ -550,6 +625,8 @@ impl SessionSlot {
          search_non_empty_total: AtomicU64::new(0),
          search_rate_limited_total: AtomicU64::new(0),
          last_search_empty: AtomicU64::new(0),
+         has_search_failures: AtomicBool::new(false),
+         search_failures: std::sync::Mutex::new(SearchFailureState::default()),
       }
    }
 
@@ -757,9 +834,10 @@ impl SessionPool {
          #[cfg(test)]
          source_write:    Arc::default(),
          writes:          Arc::default(),
-         waiting:         Arc::default(),
-         queue:           Arc::default(),
-         telemetry:       None,
+         waiting:              Arc::default(),
+         queue:                Arc::default(),
+         telemetry:            None,
+         last_tweet_search_ok: Arc::new(AtomicU64::new(0)),
       }
    }
 
@@ -1456,6 +1534,7 @@ impl SessionPool {
 
             probed += 1;
             let slow_exit = slot.slow_exit.load(Ordering::Relaxed);
+            let slot_idle = slot.permits.available_permits() == slot.max_concurrency;
             match headroom {
                Headroom::Blocked => {},
                Headroom::Safe(remaining) => {
@@ -1476,23 +1555,68 @@ impl SessionPool {
                      verified: true,
                      warm,
                      slow_exit,
+                     idle: slot_idle,
                   };
                   if best.len() < SCAN_TOP_K
-                     || better_candidate(optimistic, best[SCAN_TOP_K - 1], prefer_warm)
+                     || better_candidate(
+                        optimistic,
+                        best[SCAN_TOP_K - 1],
+                        prefer_warm,
+                        spec.is_search,
+                     )
                   {
-                     let verified = lim.verified_op(spec.op_name);
+                     let verified = spec.is_search || lim.verified_op(spec.op_name);
                      let candidate = Candidate {
                         index,
                         remaining,
                         verified,
                         warm,
                         slow_exit,
+                        idle: slot_idle,
                      };
                      if best.len() < SCAN_TOP_K
-                        || better_candidate(candidate, best[SCAN_TOP_K - 1], prefer_warm)
+                        || better_candidate(
+                           candidate,
+                           best[SCAN_TOP_K - 1],
+                           prefer_warm,
+                           spec.is_search,
+                        )
                      {
-                        insert_best(&mut best, candidate, prefer_warm);
+                        insert_best(&mut best, candidate, prefer_warm, spec.is_search);
                      }
+                  }
+               },
+               Headroom::Unknown if spec.is_search => {
+                  // A verified search account whose 15-minute window has reset
+                  // (or has not been observed yet) has a full window ready.
+                  // Rank it in `best` instead of `fallback` so search load
+                  // spreads across the whole search pool rather than hammering
+                  // a handful of already-active accounts.
+                  let raw_remaining = lim
+                     .apis
+                     .get(spec.api)
+                     .filter(|rate| rate.limit > 0)
+                     .map_or(SEARCH_DEFAULT_LIMIT, |rate| rate.limit);
+                  let remaining = if slow_exit {
+                     raw_remaining / SLOW_EXIT_DISCOUNT
+                  } else {
+                     raw_remaining
+                  };
+                  let last_active = slot.last_active.load(Ordering::Relaxed);
+                  let warm =
+                     last_active > 0 && now_u64.saturating_sub(last_active) < WARM_CONNECTION_SECS;
+                  let candidate = Candidate {
+                     index,
+                     remaining,
+                     verified: true,
+                     warm,
+                     slow_exit,
+                     idle: slot_idle,
+                  };
+                  if best.len() < SCAN_TOP_K
+                     || better_candidate(candidate, best[SCAN_TOP_K - 1], prefer_warm, true)
+                  {
+                     insert_best(&mut best, candidate, prefer_warm, true);
                   }
                },
                Headroom::Unknown => {
@@ -1983,10 +2107,16 @@ impl SessionPool {
          lim.filters_retry_at = 0;
          lim.refused_ops.remove("SearchTimeline");
          lim.search_404_at = None;
+         lim.resting.clear();
          Some(search_account)
       }) else {
          return false;
       };
+      slot.has_search_failures.store(false, Ordering::Release);
+      *slot
+         .search_failures
+         .lock()
+         .unwrap_or_else(std::sync::PoisonError::into_inner) = SearchFailureState::default();
       self.persist_soon(session_id);
       if search_account {
          self.writes.cancel_demotion(session_id);
@@ -2078,6 +2208,7 @@ impl SessionPool {
             lim.retired = false;
             lim.refused_ops.remove("SearchTimeline");
             lim.search_404_at = None;
+            lim.resting.clear();
             changed
          } else {
             let changed = lim.search_only || lim.demoted_from_search;
@@ -2086,6 +2217,13 @@ impl SessionPool {
             changed
          }
       });
+      if to_search {
+         slot.has_search_failures.store(false, Ordering::Release);
+         *slot
+            .search_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = SearchFailureState::default();
+      }
       if changed {
          self.persist_soon(session_id);
          self.record_restriction(
@@ -2348,6 +2486,200 @@ impl SessionPool {
          .filter(|slot| slot.search_empty_streak.load(Ordering::Relaxed) >= min_streak)
          .map(|slot| slot.credentials.id)
          .collect()
+   }
+
+   /// Record that a search account answered a tweet search (`Latest`/`Top`/
+   /// `Media`) without a `search_timeline.timeline` backend failure.
+   ///
+   /// Clears any failure streak on this account and, when the page had results,
+   /// marks tweet search as globally healthy across the pool.
+   pub(crate) fn record_tweet_search_ok(&self, session_id: i64, non_empty: bool) {
+      let now = u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap_or(0);
+      self.record_tweet_search_ok_at(session_id, non_empty, now);
+   }
+
+   fn record_tweet_search_ok_at(&self, session_id: i64, non_empty: bool, now: u64) {
+      if non_empty {
+         self.last_tweet_search_ok.store(now, Ordering::Relaxed);
+      }
+      let Some(slot) = self.slot(session_id) else {
+         return;
+      };
+      if slot.has_search_failures.swap(false, Ordering::AcqRel) {
+         let mut state = slot
+            .search_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+         state.corroborated_streak = 0;
+         state.corroborated_query = 0;
+         state.corroborated_at = 0;
+         state.uncorroborated_streak = 0;
+         state.uncorroborated_query = 0;
+      }
+   }
+
+   /// True when some account in the pool answered a non-empty tweet search
+   /// recently, distinguishing broken individual accounts from a global X
+   /// search outage.
+   pub(crate) fn tweet_search_healthy(&self) -> bool {
+      let now = u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap_or(0);
+      self.tweet_search_healthy_at(now)
+   }
+
+   fn tweet_search_healthy_at(&self, now: u64) -> bool {
+      let last = self.last_tweet_search_ok.load(Ordering::Relaxed);
+      last > 0 && now.saturating_sub(last) <= TWEET_SEARCH_HEALTHY_WINDOW_SECS
+   }
+
+   /// Immediately rest an account after `SearchTimeline` returned an upstream
+   /// `"Internal server error"` on `search_timeline.timeline`, and drop its
+   /// warm-connection preference so concurrent requests pick other accounts.
+   pub(crate) fn rest_search_failure(&self, session_id: i64, endpoint: &str, secs: i64) {
+      let Some(slot) = self.slot(session_id) else {
+         return;
+      };
+      slot.last_active.store(0, Ordering::Relaxed);
+      slot.write_limits(|lim| lim.rest_for(endpoint, secs));
+   }
+
+   /// Record a tweet-search `"Internal server error"` on `session_id` after the
+   /// request's retry loop finishes.
+   ///
+   /// * **`corroborated == true`**: another account answered the exact same
+   ///   query with HTTP 200. Strike 1 rests the account for 2 minutes; strike 2
+   ///   (on a different query at least 10 seconds later, with no tweet-search
+   ///   success in between) moves the account to the view pool with
+   ///   `demoted_from_search = true`.
+   /// * **`corroborated == false`**: every tried account failed this query.
+   ///   Never demotes directly (protecting healthy accounts from a bad query or
+   ///   a global X outage); after 3 distinct failing queries while other
+   ///   accounts are healthy, returns [`SearchFailureAction::NeedsCanary`] so
+   ///   one background `"news"` check decides whether the account is suspended.
+   pub(crate) async fn record_search_timeline_failure(
+      &self,
+      session_id: i64,
+      endpoint: &str,
+      query_hash: u64,
+      corroborated: bool,
+   ) -> SearchFailureAction {
+      let now = u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap_or(0);
+      self
+         .record_search_timeline_failure_at(session_id, endpoint, query_hash, corroborated, now)
+         .await
+   }
+
+   async fn record_search_timeline_failure_at(
+      &self,
+      session_id: i64,
+      endpoint: &str,
+      query_hash: u64,
+      corroborated: bool,
+      now: u64,
+   ) -> SearchFailureAction {
+      let Some(slot) = self.slot(session_id) else {
+         return SearchFailureAction::Rested;
+      };
+      slot.last_active.store(0, Ordering::Relaxed);
+      let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
+
+      if corroborated {
+         let should_demote = {
+            let mut state = slot
+               .search_failures
+               .lock()
+               .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.corroborated_streak == 0 {
+               state.corroborated_streak = 1;
+               state.corroborated_query = query_hash;
+               state.corroborated_at = now;
+            } else if query_hash != state.corroborated_query
+               && now.saturating_sub(state.corroborated_at) >= SEARCH_CORROBORATED_MIN_GAP_SECS
+            {
+               state.corroborated_streak = state.corroborated_streak.saturating_add(1);
+               state.corroborated_query = query_hash;
+               state.corroborated_at = now;
+            }
+            let demote = state.corroborated_streak >= SEARCH_CORROBORATED_DEMOTE_THRESHOLD;
+            if demote {
+               *state = SearchFailureState::default();
+               slot.has_search_failures.store(false, Ordering::Release);
+            } else {
+               slot.has_search_failures.store(true, Ordering::Release);
+            }
+            demote
+         };
+
+         if should_demote {
+            tracing::info!(
+               session_id,
+               session_user = %slot.credentials.username,
+               "search account repeatedly failed with Internal server error while other accounts \
+                succeeded; moving to view pool"
+            );
+            self
+               .demote_to_view(
+                  session_id,
+                  Some(crate::stats::Restriction::SearchBanned),
+                  "SearchTimeline repeatedly failed with Internal server error while other \
+                   accounts succeeded",
+               )
+               .await;
+            return SearchFailureAction::Demoted;
+         }
+
+         slot.write_limits(|lim| {
+            lim.rest_for_at(endpoint, SEARCH_CORROBORATED_FAIL_REST_SECS, now_i64);
+         });
+         return SearchFailureAction::Rested;
+      }
+
+      slot.write_limits(|lim| {
+         lim.rest_for_at(endpoint, SEARCH_UNCORROBORATED_FAIL_REST_SECS, now_i64);
+      });
+      if !self.tweet_search_healthy_at(now) {
+         return SearchFailureAction::Rested;
+      }
+
+      let needs_canary = {
+         let mut state = slot
+            .search_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+         if state.uncorroborated_streak == 0 || query_hash != state.uncorroborated_query {
+            state.uncorroborated_streak = state.uncorroborated_streak.saturating_add(1);
+            state.uncorroborated_query = query_hash;
+            slot.has_search_failures.store(true, Ordering::Release);
+         }
+         if state.uncorroborated_streak >= SEARCH_CANARY_TRIGGER_THRESHOLD
+            && !state.canary_in_flight
+         {
+            state.canary_in_flight = true;
+            state.uncorroborated_streak = 0;
+            state.uncorroborated_query = 0;
+            true
+         } else {
+            false
+         }
+      };
+
+      if needs_canary {
+         SearchFailureAction::NeedsCanary
+      } else {
+         SearchFailureAction::Rested
+      }
+   }
+
+   /// Release the per-account canary guard after a background `"news"` check
+   /// completes.
+   pub(crate) fn finish_search_canary(&self, session_id: i64) {
+      let Some(slot) = self.slot(session_id) else {
+         return;
+      };
+      slot
+         .search_failures
+         .lock()
+         .unwrap_or_else(std::sync::PoisonError::into_inner)
+         .canary_in_flight = false;
    }
 
    /// Record one upstream `SearchTimeline` outcome for an account, updating
@@ -2986,6 +3318,7 @@ mod tests {
    use super::{
       MAX_PARK,
       QUEUE_PER_SLOT,
+      SearchFailureAction,
       SessionKind,
       SessionPool,
       SuspensionProbe,
@@ -4436,5 +4769,252 @@ mod tests {
       );
       // Even in debug/dev opt-level=1, each acquire must stay well below 100 ms.
       assert!(p99 < 100_000, "p99 acquire latency too high: {p99} us");
+   }
+
+   #[tokio::test]
+   async fn search_spreads_across_expired_and_warm_accounts_instead_of_pinning_warm() {
+      let pool = SessionPool::empty(2);
+      let api = "ph2f/SearchTimeline";
+      let now = time::OffsetDateTime::now_utc().unix_timestamp();
+      let sessions = (1..=3_i64)
+         .map(|id| {
+            crate::types::Session {
+               id,
+               username: format!("s{id}"),
+               kind: SessionKind::Cookie,
+               auth_token: "tok".to_owned(),
+               ct0: "ct0".to_owned(),
+               pool: "search".to_owned(),
+               ..crate::types::Session::default()
+            }
+         })
+         .collect();
+      assert_eq!(pool.append_sessions(sessions).await, 3);
+      for id in 1..=3 {
+         pool.mark_verified(id, api).await;
+      }
+
+      // Account 1 is active and warm with 160 remaining.
+      pool.update_session_limit(1, api, 187, 160, now + 900).await;
+      // Account 2 has an expired window (full 187 ready) and is cold.
+      pool.update_session_limit(2, api, 187, 0, now - 10).await;
+      pool.slots()[1]
+         .last_active
+         .store(0, super::Ordering::Relaxed);
+      // Account 3 has no recorded window yet and is cold.
+      pool.slots()[2]
+         .last_active
+         .store(0, super::Ordering::Relaxed);
+
+      // Expired/fresh accounts (187) must be chosen before hammering warm account 1 (160).
+      let first = pool.acquire(api, Some(SessionKind::Cookie)).await.unwrap();
+      assert_ne!(
+         first.id, 1,
+         "expired/unknown full search account must beat warm account with 160 left"
+      );
+      let second = pool.acquire(api, Some(SessionKind::Cookie)).await.unwrap();
+      assert_ne!(second.id, 1);
+      assert_ne!(
+         second.id, first.id,
+         "concurrent searches should fan out to idle full accounts"
+      );
+      drop((first, second));
+   }
+
+   #[tokio::test]
+   async fn corroborated_search_failures_rest_first_then_demote_on_distinct_later_query() {
+      let pool = SessionPool::empty(2);
+      let api = "ph2f/SearchTimeline";
+      let sessions = vec![
+         crate::types::Session {
+            id: 1,
+            username: "suspended_s1".to_owned(),
+            kind: SessionKind::Cookie,
+            auth_token: "a".to_owned(),
+            ct0: "c".to_owned(),
+            pool: "search".to_owned(),
+            ..crate::types::Session::default()
+         },
+         crate::types::Session {
+            id: 2,
+            username: "healthy_s2".to_owned(),
+            kind: SessionKind::Cookie,
+            auth_token: "b".to_owned(),
+            ct0: "d".to_owned(),
+            pool: "search".to_owned(),
+            ..crate::types::Session::default()
+         },
+      ];
+      assert_eq!(pool.append_sessions(sessions).await, 2);
+      pool.mark_verified(1, api).await;
+      pool.mark_verified(2, api).await;
+
+      let now = u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap();
+      // Strike 1 on query A rests account 1 without demoting it or stripping verified_ops.
+      assert_eq!(
+         pool
+            .record_search_timeline_failure_at(1, api, 111, true, now)
+            .await,
+         SearchFailureAction::Rested
+      );
+      let s1 = pool.account_state(1).await.unwrap();
+      assert_eq!(s1.pool, "search");
+      assert!(!s1.search_banned);
+      assert!(s1.verified_operations.contains_key("SearchTimeline"));
+      // While resting, acquires route exclusively to healthy account 2.
+      let lease = pool.acquire(api, Some(SessionKind::Cookie)).await.unwrap();
+      assert_eq!(lease.id, 2);
+      drop(lease);
+
+      // Repeating the SAME query after the min gap does NOT double-strike.
+      assert_eq!(
+         pool
+            .record_search_timeline_failure_at(1, api, 111, true, now + 20)
+            .await,
+         SearchFailureAction::Rested
+      );
+      // A different query too soon (< 10s after strike 1) does NOT double-strike either.
+      assert_eq!(
+         pool
+            .record_search_timeline_failure_at(1, api, 222, true, now + 3)
+            .await,
+         SearchFailureAction::Rested
+      );
+      assert_eq!(pool.account_state(1).await.unwrap().pool, "search");
+
+      // A different query after the min gap demotes the broken account to view.
+      assert_eq!(
+         pool
+            .record_search_timeline_failure_at(1, api, 222, true, now + 15)
+            .await,
+         SearchFailureAction::Demoted
+      );
+      let demoted = pool.account_state(1).await.unwrap();
+      assert_eq!(demoted.pool, "view");
+      assert!(demoted.demoted_from_search);
+      assert!(demoted.search_banned);
+
+      // Reinstating clears rest and failure state so it can search again.
+      assert!(pool.reinstate(1).await);
+      pool.mark_verified(1, api).await;
+      assert_eq!(pool.account_state(1).await.unwrap().pool, "search");
+      assert!(pool.acquire_id(1, api).await.is_ok());
+   }
+
+   #[tokio::test]
+   async fn tweet_search_success_resets_corroborated_failure_streak() {
+      let pool = SessionPool::empty(2);
+      let api = "ph2f/SearchTimeline";
+      let sessions = vec![crate::types::Session {
+         id: 1,
+         username: "healthy_s1".to_owned(),
+         kind: SessionKind::Cookie,
+         auth_token: "a".to_owned(),
+         ct0: "c".to_owned(),
+         pool: "search".to_owned(),
+         ..crate::types::Session::default()
+      }];
+      assert_eq!(pool.append_sessions(sessions).await, 1);
+      pool.mark_verified(1, api).await;
+
+      let now = u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap();
+      assert_eq!(
+         pool
+            .record_search_timeline_failure_at(1, api, 111, true, now)
+            .await,
+         SearchFailureAction::Rested
+      );
+      // Answering a tweet search clears the streak.
+      pool.record_tweet_search_ok_at(1, true, now + 130);
+      // A later corroborated failure starts fresh at strike 1, not demotion.
+      assert_eq!(
+         pool
+            .record_search_timeline_failure_at(1, api, 222, true, now + 150)
+            .await,
+         SearchFailureAction::Rested
+      );
+      assert_eq!(pool.account_state(1).await.unwrap().pool, "search");
+   }
+
+   #[tokio::test]
+   async fn uncorroborated_failures_never_demote_directly_and_canary_only_when_pool_healthy() {
+      let pool = SessionPool::empty(2);
+      let api = "ph2f/SearchTimeline";
+      let sessions = vec![
+         crate::types::Session {
+            id: 1,
+            username: "s1".to_owned(),
+            kind: SessionKind::Cookie,
+            auth_token: "a".to_owned(),
+            ct0: "c".to_owned(),
+            pool: "search".to_owned(),
+            ..crate::types::Session::default()
+         },
+         crate::types::Session {
+            id: 2,
+            username: "s2".to_owned(),
+            kind: SessionKind::Cookie,
+            auth_token: "b".to_owned(),
+            ct0: "d".to_owned(),
+            pool: "search".to_owned(),
+            ..crate::types::Session::default()
+         },
+      ];
+      assert_eq!(pool.append_sessions(sessions).await, 2);
+      pool.mark_verified(1, api).await;
+      pool.mark_verified(2, api).await;
+
+      let now = u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap();
+      // With no recent pool-wide tweet search success (e.g. global outage),
+      // uncorroborated failures never trigger a canary or demotion.
+      for q in 1..=5_u64 {
+         assert_eq!(
+            pool
+               .record_search_timeline_failure_at(1, api, q, false, now + q)
+               .await,
+            SearchFailureAction::Rested
+         );
+      }
+      assert_eq!(pool.account_state(1).await.unwrap().pool, "search");
+
+      // Once another account proves tweet search is healthy, 3 distinct
+      // uncorroborated failures trigger exactly one background canary.
+      pool.record_tweet_search_ok_at(2, true, now + 10);
+      assert_eq!(
+         pool
+            .record_search_timeline_failure_at(1, api, 10, false, now + 11)
+            .await,
+         SearchFailureAction::Rested
+      );
+      // Repeating the same bad query does not advance the count.
+      assert_eq!(
+         pool
+            .record_search_timeline_failure_at(1, api, 10, false, now + 12)
+            .await,
+         SearchFailureAction::Rested
+      );
+      assert_eq!(
+         pool
+            .record_search_timeline_failure_at(1, api, 20, false, now + 13)
+            .await,
+         SearchFailureAction::Rested
+      );
+      assert_eq!(
+         pool
+            .record_search_timeline_failure_at(1, api, 30, false, now + 14)
+            .await,
+         SearchFailureAction::NeedsCanary
+      );
+      // While the canary is in flight, no duplicate canary is spawned.
+      for q in [40_u64, 50, 60] {
+         assert_eq!(
+            pool
+               .record_search_timeline_failure_at(1, api, q, false, now + 15)
+               .await,
+            SearchFailureAction::Rested
+         );
+      }
+      pool.finish_search_canary(1);
+      assert_eq!(pool.account_state(1).await.unwrap().pool, "search");
    }
 }

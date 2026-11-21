@@ -46,18 +46,30 @@ impl ApiClient {
          return;
       }
       tracing::info!(count = ids.len(), "checking which accounts X lets search");
-      let (mut allowed, mut unknown) = (0_usize, 0_usize);
+      let (mut allowed, mut demoted, mut unknown) = (0_usize, 0_usize, 0_usize);
       for id in ids {
          match timeout(CHECK_TIMEOUT, self.search_as(id)).await {
             Ok(Ok(true)) => {
                self.sessions.mark_verified(id, api).await;
+               self.sessions.record_tweet_search_ok(id, true);
                allowed += 1;
+            },
+            Ok(Err(Error::SearchTimelineFailed)) if self.sessions.tweet_search_healthy() => {
+               self
+                  .sessions
+                  .demote_to_view(
+                     id,
+                     Some(crate::stats::Restriction::SearchBanned),
+                     "Search audit failed with Internal server error",
+                  )
+                  .await;
+               demoted += 1;
             },
             _ => unknown += 1,
          }
          sleep(CHECK_GAP).await;
       }
-      tracing::info!(allowed, unknown, "search check done");
+      tracing::info!(allowed, demoted, unknown, "search check done");
    }
 
    async fn recover_demoted_search_accounts(&self) {
@@ -74,6 +86,7 @@ impl ApiClient {
                   .sessions
                   .mark_verified(id, endpoints::GRAPH_SEARCH_TIMELINE)
                   .await;
+               self.sessions.record_tweet_search_ok(id, true);
                reinstated += 1;
             },
             Ok(Err(Error::SessionRejected(_))) => {

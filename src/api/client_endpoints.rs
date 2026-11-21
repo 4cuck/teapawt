@@ -1350,10 +1350,10 @@ impl ApiClient {
    /// Search tweets.
    ///
    /// A query X has already rejected is rewritten before the request. A new
-   /// rejection is saved and retried once with that rewrite. A bodyless 404
-   /// stays an error: it is also what a retired query id and a refused
-   /// account get, and showing it as an empty page invites a refresh that
-   /// spends the search again.
+   /// rejection is saved and retried once with that rewrite. Upstream failures
+   /// (bodyless 404s, search backend `"Internal server error"` responses, pool
+   /// shedding) stay errors instead of turning into false empty pages that
+   /// would also poison the search cache.
    pub async fn search(
       &self,
       query: &str,
@@ -1388,38 +1388,26 @@ impl ApiClient {
       product: &str,
    ) -> Result<Timeline> {
       let vars = endpoints::search_vars(query, cursor, product);
-      match self
+      let data = self
          .graphql_request::<SearchTimelineData>(
             endpoints::GRAPH_SEARCH_TIMELINE,
             &vars,
             endpoints::SEARCH_FEATURES,
             None,
          )
-         .await
+         .await?;
+      let mut timeline = parser::parse_search_timeline(&data);
+      // The same cursor cannot advance. Do not stop merely because a page
+      // is duplicates of one viral post: X still supplies a new cursor
+      // after those pages, and its own client skips the duplicates and
+      // continues.
+      if let Some(after) = cursor
+         && timeline.bottom.as_deref() == Some(after)
       {
-         Ok(data) => {
-            let mut timeline = parser::parse_search_timeline(&data);
-            // The same cursor cannot advance. Do not stop merely because a page
-            // is duplicates of one viral post: X still supplies a new cursor
-            // after those pages, and its own client skips the duplicates and
-            // continues.
-            if let Some(after) = cursor
-               && timeline.bottom.as_deref() == Some(after)
-            {
-               timeline.content.clear();
-               timeline.bottom = None;
-            }
-            Ok(timeline)
-         },
-         Err(err) => {
-            if matches!(err, Error::TransientUpstream) {
-               let shown: String = query.chars().take(120).collect();
-               tracing::info!(query = %shown, product, "search came back empty");
-               return Ok(Timeline::default());
-            }
-            Err(err)
-         },
+         timeline.content.clear();
+         timeline.bottom = None;
       }
+      Ok(timeline)
    }
 
    /// Search users. A denylisted string is remembered and rewritten the same

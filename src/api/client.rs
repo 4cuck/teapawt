@@ -183,6 +183,39 @@ fn search_query_of(variables: &str) -> String {
       .unwrap_or_default()
 }
 
+/// True when a `SearchTimeline` request asks for a tweet search (`Latest`,
+/// `Top`, or `Media`) rather than `People` or `Lists`.
+///
+/// Suspended accounts still answer `People` and `Lists` with HTTP 200 and
+/// results, while answering every tweet search with `"Internal server error"`
+/// on `search_by_raw_query.search_timeline.timeline`.
+fn is_tweet_search_variables(variables: &str) -> bool {
+   #[derive(Deserialize)]
+   struct ProductOnly<'a> {
+      #[serde(borrow)]
+      product: Option<Cow<'a, str>>,
+   }
+   serde_json::from_str::<ProductOnly<'_>>(variables)
+      .ok()
+      .and_then(|parsed| parsed.product)
+      .is_none_or(|product| !matches!(product.as_ref(), "People" | "Lists"))
+}
+
+/// Stable non-zero hash of the normalized `rawQuery` inside `SearchTimeline`
+/// variables, ignoring case, surrounding whitespace, tab, and pagination
+/// cursor so repeating one bad query across tabs or pages never counts as two
+/// distinct failing queries.
+fn search_query_hash(variables: &str) -> u64 {
+   let raw = search_query_of(variables);
+   let normalized = raw.trim();
+   let mut hash = 0xCBF2_9CE4_8422_2325_u64;
+   for byte in normalized.bytes() {
+      hash ^= u64::from(byte.to_ascii_lowercase());
+      hash = hash.wrapping_mul(0x100_0000_01B3);
+   }
+   hash.max(1)
+}
+
 enum WireStr<'a> {
    Borrowed(&'a str),
    Shared(Arc<str>),
@@ -1493,7 +1526,7 @@ impl ApiClient {
    /// through a cookie session would still send the OAuth endpoint.
    async fn graphql_request_with_session<T>(
       &self,
-      mut session: SessionLease,
+      session: SessionLease,
       endpoint: &str,
       variables: &str,
       features: &str,
@@ -1503,8 +1536,11 @@ impl ApiClient {
    where
       T: DeserializeOwned,
    {
+      let is_search = endpoint.ends_with("/SearchTimeline");
+      let is_tweet_search = is_search && is_tweet_search_variables(variables);
       let mut tried_ids = vec![session.id];
       let mut bad_ports = Vec::new();
+      let mut failed_search_sessions = Vec::new();
       let (answered_on, mut last) = self
          .hedged_attempt(
             session,
@@ -1515,17 +1551,28 @@ impl ApiClient {
             retry_kind,
          )
          .await;
-      session = answered_on;
+      let mut session = Some(answered_on);
 
-      // Quota failures and ambiguous search 404s may walk up to
-      // RATE_LIMIT_REPLACEMENTS distinct fallback accounts. Other errors
-      // keep their smaller limits inside the match.
+      // Quota failures, ambiguous search 404s, and SearchTimeline backend
+      // failures may walk up to RATE_LIMIT_REPLACEMENTS distinct fallback
+      // accounts. Other errors keep their smaller limits inside the match.
       for replacement in 0..RATE_LIMIT_REPLACEMENTS {
-         let session_id = session.id;
+         let (session_id, session_kind) = {
+            let current = session.as_ref().expect("active lease during retry loop");
+            (current.id, current.kind)
+         };
          if !tried_ids.contains(&session_id) {
             tried_ids.push(session_id);
          }
-         let empty = matches!(last, Err(Error::TransientUpstream | Error::SearchRefused));
+         if matches!(last, Err(Error::SearchTimelineFailed))
+            && !failed_search_sessions.contains(&session_id)
+         {
+            failed_search_sessions.push(session_id);
+         }
+         let empty = matches!(
+            last,
+            Err(Error::TransientUpstream | Error::SearchRefused | Error::SearchTimelineFailed)
+         );
          let exit_fault = matches!(&last, Err(Error::IpThrottled))
             || matches!(&last, Err(Error::TwitterApi(message)) if is_gateway_blip(message))
             || matches!(&last, Err(Error::Internal(message)) if message == "API headers stalled");
@@ -1537,9 +1584,16 @@ impl ApiClient {
          }
          let retry = match &last {
             Err(Error::SessionRejected(_)) if replacement < GRAPHQL_REPLACEMENTS => true,
-            Err(Error::SearchRefused) => session.kind == SessionKind::Cookie,
+            Err(Error::SearchRefused) => session_kind == SessionKind::Cookie,
+            Err(Error::SearchTimelineFailed) => {
+               session_kind == SessionKind::Cookie
+                  && self
+                     .sessions
+                     .has_unlimited_excluding(endpoint, retry_kind, &tried_ids)
+                     .await
+            },
             Err(Error::TransientUpstream) => {
-               replacement == 0 && session.kind == SessionKind::Cookie
+               replacement == 0 && session_kind == SessionKind::Cookie
             },
             // A 502/503/504 is the edge dropping the stream, not this account's
             // quota. Try one other session. Do not mark the first as refused:
@@ -1575,7 +1629,7 @@ impl ApiClient {
                "session unusable, retrying on another"
             );
          }
-         drop(session);
+         drop(session.take());
          self.charge(endpoint).await?;
          let next_session = if bad_ports.is_empty() {
             self
@@ -1603,14 +1657,17 @@ impl ApiClient {
                Err(err) => Err(err),
             }
          };
-         session = match next_session {
+         let next = match next_session {
             Ok(next) => next,
             Err(_) if matches!(last, Err(Error::SearchRefused)) => {
                self.refund(endpoint).await;
                return Err(Error::SearchRefused);
             },
-            // Never degrade an upstream rate limit into `TransientUpstream`,
-            // which `fetch_search` would turn into a false empty page.
+            Err(_) if matches!(last, Err(Error::SearchTimelineFailed)) => {
+               self.refund(endpoint).await;
+               break;
+            },
+            // Never degrade an upstream rate limit into `TransientUpstream`.
             Err(Error::NoSessions | Error::TransientUpstream | Error::RateLimited)
                if matches!(last, Err(Error::RateLimited)) =>
             {
@@ -1624,7 +1681,7 @@ impl ApiClient {
          };
          let (answered_on, next_last) = self
             .hedged_attempt(
-               session,
+               next,
                endpoint,
                variables,
                features,
@@ -1632,42 +1689,109 @@ impl ApiClient {
                retry_kind,
             )
             .await;
-         session = answered_on;
+         session = Some(answered_on);
          last = next_last;
+      }
+
+      if matches!(last, Err(Error::SearchTimelineFailed))
+         && let Some(ref current) = session
+         && !failed_search_sessions.contains(&current.id)
+      {
+         failed_search_sessions.push(current.id);
+      }
+
+      if is_tweet_search && !failed_search_sessions.is_empty() {
+         let corroborated = last.is_ok();
+         let query_hash = search_query_hash(variables);
+         for failed_id in failed_search_sessions {
+            let action = self
+               .sessions
+               .record_search_timeline_failure(failed_id, endpoint, query_hash, corroborated)
+               .await;
+            if action == super::auth::SearchFailureAction::NeedsCanary {
+               self.spawn_search_failure_canary(failed_id);
+            }
+         }
       }
 
       // An ambiguous search 404 quarantines its account. Only generic
       // transient failures can retry after refreshing the operation ID.
-      if session.kind == SessionKind::Cookie && matches!(last, Err(Error::TransientUpstream)) {
-         let before = self
-            .wire_operation(&session, endpoint, features)
-            .path
-            .as_str()
-            .to_owned();
-         self.tid.recheck_operations().await;
-         let after = self
-            .wire_operation(&session, endpoint, features)
-            .path
-            .as_str()
-            .to_owned();
-         if after != before {
-            tracing::info!(
-               from = %before,
-               to = %after,
-               "X answered nothing for a retired query id; sending under the new one"
-            );
-            last = self
-               .graphql_request_inner(&session, endpoint, variables, features, field_toggles)
-               .await;
+      if let Some(ref current) = session {
+         if current.kind == SessionKind::Cookie && matches!(last, Err(Error::TransientUpstream)) {
+            let before = self
+               .wire_operation(current, endpoint, features)
+               .path
+               .as_str()
+               .to_owned();
+            self.tid.recheck_operations().await;
+            let after = self
+               .wire_operation(current, endpoint, features)
+               .path
+               .as_str()
+               .to_owned();
+            if after != before {
+               tracing::info!(
+                  from = %before,
+                  to = %after,
+                  "X answered nothing for a retired query id; sending under the new one"
+               );
+               last = self
+                  .graphql_request_inner(current, endpoint, variables, features, field_toggles)
+                  .await;
+            }
+         }
+
+         if let Ok((_, ref bytes)) = last {
+            if is_search {
+               if is_tweet_search {
+                  let non_empty = !search_answer_is_empty(bytes);
+                  self.sessions.record_tweet_search_ok(current.id, non_empty);
+                  if non_empty {
+                     self.sessions.mark_verified(current.id, endpoint).await;
+                  }
+               }
+            } else {
+               self.sessions.mark_verified(current.id, endpoint).await;
+            }
          }
       }
-
-      if last.as_ref().is_ok_and(|(_, bytes)| {
-         !endpoint.ends_with("/SearchTimeline") || !search_answer_is_empty(bytes)
-      }) {
-         self.sessions.mark_verified(session.id, endpoint).await;
-      }
       last
+   }
+
+   /// Run one background `"news"` tweet search after an account hit repeated
+   /// uncorroborated `"Internal server error"` failures while other accounts
+   /// were healthy. A healthy account answers `"news"` and resets its streak; a
+   /// suspended account fails it and is moved to the view pool.
+   fn spawn_search_failure_canary(&self, session_id: i64) {
+      let api = self.clone();
+      tokio::spawn(async move {
+         let outcome =
+            timeout(Duration::from_secs(25), api.probe_search_capable(session_id)).await;
+         match outcome {
+            Ok(Ok(true)) => {
+               api.sessions.record_tweet_search_ok(session_id, true);
+            },
+            Ok(Err(Error::SearchTimelineFailed)) if api.sessions.tweet_search_healthy() => {
+               tracing::info!(
+                  session_id,
+                  "search account failed canary query with Internal server error; moving to view \
+                   pool"
+               );
+               api.sessions
+                  .demote_to_view(
+                     session_id,
+                     Some(crate::stats::Restriction::SearchBanned),
+                     "SearchTimeline failed canary query with Internal server error",
+                  )
+                  .await;
+            },
+            Ok(Err(Error::SessionRejected(_))) => {
+               api.sessions.mark_rejected(session_id).await;
+            },
+            _ => {},
+         }
+         api.sessions.finish_search_canary(session_id);
+      });
    }
 
    /// The first attempt of a call, plus a second copy on another account and
@@ -1999,6 +2123,7 @@ impl ApiClient {
 
       // X's edge rejects GET on SearchTimeline for cookie sessions; POST works.
       let use_post = session.kind == SessionKind::Cookie && endpoint.ends_with("/SearchTimeline");
+      let method = if use_post { "POST" } else { "GET" };
 
       let (url, body) = if use_post {
          (
@@ -2020,6 +2145,7 @@ impl ApiClient {
       let headers = self
          .graphql_headers(
             session,
+            method,
             base_url,
             path,
             variables,
@@ -2117,20 +2243,31 @@ impl ApiClient {
          },
       };
 
-      // X failed the search itself. The account keeps its pool and its
-      // standing; the caller asks one other account, and the query is logged
-      // so the ones X cannot run can be told from a bad minute.
-      if use_post && let Some(message) = search_timeline_failure(&bytes, &resp.errors) {
+      // X failed `SearchTimeline` on its `timeline` field (typically "Internal
+      // server error"). Suspended accounts answer every tweet search this way
+      // while X also occasionally fails an individual query this way. Rest the
+      // account immediately so concurrent requests pick another account, and
+      // return a dedicated error so the caller does not waste a second TID-less
+      // retry on the same account or degrade the failure into a false empty
+      // page; corroboration and canary checks decide whether to demote it.
+      if endpoint.ends_with("/SearchTimeline")
+         && let Some(message) = search_timeline_failure(&bytes, &resp.errors)
+      {
          tracing::info!(
             session_id = session.id,
             session_user = %session.username,
             proxy_port = self.pinned_port(session.id).unwrap_or(0),
             query = search_query_of(variables),
             error = message,
-            "X failed this search on its side; the account is not blamed"
+            "X failed this search on its side"
          );
          log_events::note(Event::SearchFailed);
-         return Err(Error::TransientUpstream);
+         self.sessions.rest_search_failure(
+            session.id,
+            endpoint,
+            super::auth::SEARCH_UNCORROBORATED_FAIL_REST_SECS,
+         );
+         return Err(Error::SearchTimelineFailed);
       }
 
       let serious = request_errors(&resp.errors, resp.data.is_some());
@@ -2602,6 +2739,7 @@ impl ApiClient {
    async fn graphql_headers(
       &self,
       session: &SessionLease,
+      method: &str,
       base_url: &str,
       endpoint: &str,
       variables: &str,
@@ -2619,7 +2757,7 @@ impl ApiClient {
                oauth_params.push(("fieldToggles", toggles));
             }
             let auth = super::oauth1_sign(
-               "GET",
+               method,
                &auth_url,
                &oauth_params,
                &session.oauth_token,
@@ -2635,7 +2773,7 @@ impl ApiClient {
          SessionKind::Cookie => {
             let api_path = format!("/i/api/graphql/{endpoint}");
             let (bearer, tid) = if with_tid {
-               self.bearer_and_tid(&api_path).await
+               self.bearer_and_tid_for(method, &api_path).await
             } else {
                (endpoints::BEARER_TOKEN_NO_TID, None)
             };
@@ -2664,8 +2802,13 @@ impl ApiClient {
                   .parse()
                   .map_err(|_| Error::Internal("invalid cookie header value".into()))?,
             );
-            // A same-origin GraphQL GET does not send Origin. Account settings
-            // and form posts do, and those builders add it themselves.
+            // A same-origin GraphQL GET does not send Origin; POST requests do.
+            if method == "POST" {
+               headers.insert(
+                  header::ORIGIN,
+                  header::HeaderValue::from_static("https://x.com"),
+               );
+            }
             headers.insert(
                header::CONTENT_TYPE,
                header::HeaderValue::from_static("application/json"),
@@ -3217,5 +3360,37 @@ mod tests {
       let payload = follower.borrow_and_update().clone().unwrap();
       let parsed: serde_json::Value = ApiClient::parse_coalesced(&payload).unwrap();
       assert_eq!(parsed["ok"], true);
+   }
+
+   #[test]
+   fn tweet_search_detection_excludes_people_and_lists() {
+      assert!(is_tweet_search_variables(&endpoints::search_vars(
+         "news", None, "Latest"
+      )));
+      assert!(is_tweet_search_variables(&endpoints::search_vars(
+         "news", None, "Top"
+      )));
+      assert!(is_tweet_search_variables(&endpoints::search_vars(
+         "news", None, "Media"
+      )));
+      assert!(!is_tweet_search_variables(&endpoints::search_vars(
+         "news", None, "People"
+      )));
+      assert!(!is_tweet_search_variables(&endpoints::search_list_vars(
+         "news", None
+      )));
+   }
+
+   #[test]
+   fn search_query_hash_normalizes_case_whitespace_tab_and_cursor() {
+      let latest = endpoints::search_vars("News", None, "Latest");
+      let top_paged = endpoints::search_vars("  news  ", Some("CURSOR"), "Top");
+      let other = endpoints::search_vars("cats", None, "Latest");
+      let h1 = search_query_hash(&latest);
+      let h2 = search_query_hash(&top_paged);
+      let h3 = search_query_hash(&other);
+      assert_ne!(h1, 0);
+      assert_eq!(h1, h2);
+      assert_ne!(h1, h3);
    }
 }

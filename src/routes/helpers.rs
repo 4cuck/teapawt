@@ -796,7 +796,10 @@ pub fn api_error(config: &Config, err: &Error) -> Response {
 pub fn api_error_titled(config: &Config, err: &Error, generic: &str) -> Response {
    let (status, title, message) = classify_error(err, generic);
 
-   if matches!(err, Error::TransientUpstream | Error::SearchRefused) {
+   if matches!(
+      err,
+      Error::TransientUpstream | Error::SearchRefused | Error::SearchTimelineFailed
+   ) {
       tracing::trace!(error = ?err, "upstream empty");
    } else if status.is_server_error() {
       tracing::error!(error = ?err, "request failed");

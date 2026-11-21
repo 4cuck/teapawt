@@ -124,6 +124,14 @@ pub enum Error {
    #[error("Search refused this account")]
    SearchRefused,
 
+   /// X answered `SearchTimeline` with HTTP 200, an empty `search_timeline`,
+   /// and an error on `search_by_raw_query.search_timeline.timeline` (typically
+   /// `"Internal server error"`). Suspended accounts return this on every tweet
+   /// search (`Latest`/`Top`/`Media`), and X occasionally fails an individual
+   /// query the same way.
+   #[error("X search backend failed this query")]
+   SearchTimelineFailed,
+
    #[error("X account settings returned 404 (code 34)")]
    AccountSettingsNotFound,
 
@@ -231,6 +239,11 @@ impl Error {
             "Search temporarily unavailable",
             "X did not return a search page. Try again later.",
          ),
+         Self::SearchTimelineFailed => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Search temporarily unavailable",
+            "X did not return a search page. Try again in a moment.",
+         ),
          // Out of sessions is an operator problem, not an upstream quota one.
          Self::NoSessions | Self::SessionRejected(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -250,7 +263,10 @@ impl IntoResponse for Error {
    fn into_response(self) -> Response {
       let (status, _, msg) = self.presentation();
 
-      if matches!(self, Error::TransientUpstream | Error::SearchRefused) {
+      if matches!(
+         self,
+         Error::TransientUpstream | Error::SearchRefused | Error::SearchTimelineFailed
+      ) {
          tracing::trace!(error = ?self, "upstream empty");
       } else if matches!(self, Error::ClientBudgetExhausted) {
          // A visitor over their own budget being told to slow down is the

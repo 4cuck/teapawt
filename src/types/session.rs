@@ -309,6 +309,22 @@ impl SessionLimits {
       self.rest_at(api, now)
    }
 
+   /// Temporarily sit this account out of `api` for `secs` seconds without
+   /// touching its recorded rate-limit window, `verified_ops`, or bare-429
+   /// relapse counter.
+   pub fn rest_for(&mut self, api: &str, secs: i64) {
+      let now = time::OffsetDateTime::now_utc().unix_timestamp();
+      self.rest_for_at(api, secs, now);
+   }
+
+   pub(crate) fn rest_for_at(&mut self, api: &str, secs: i64, now: i64) {
+      let until = now + secs;
+      let entry = self.resting.entry(api.to_owned()).or_default();
+      if until > entry.until {
+         entry.until = until;
+      }
+   }
+
    fn rest_at(&mut self, api: &str, now: i64) -> i64 {
       let remembered = |rest: &Rest| rest.until + BARE_429_MEMORY_SECS > now;
       let relapses = self
@@ -809,5 +825,33 @@ mod tests {
       assert_eq!(operation_name("account/settings/"), "settings");
       assert_eq!(operation_name(""), "rest");
       assert_eq!(operation_name("/"), "rest");
+   }
+
+   #[test]
+   fn rest_for_sits_out_api_without_clearing_verified_or_window() {
+      let mut limits = SessionLimits::default();
+      let api = "ph2f/SearchTimeline";
+      let now = 1_000_000;
+      limits.reserve_for_search();
+      limits.verify(api);
+      limits.update_limit(api, 187, 150, now + 900);
+
+      limits.rest_for_at(api, 120, now);
+      assert!(limits.resting_at(api, now));
+      assert!(limits.verified(api));
+      assert_eq!(limits.apis[api].remaining, 150);
+      assert_eq!(
+         limits.headroom_at(api, "SearchTimeline", now),
+         Headroom::Blocked
+      );
+
+      // A shorter rest does not shorten a longer active cooldown.
+      limits.rest_for_at(api, 45, now);
+      assert!(limits.resting_at(api, now + 100));
+      assert!(!limits.resting_at(api, now + 120));
+      assert_eq!(
+         limits.headroom_at(api, "SearchTimeline", now + 120),
+         Headroom::Safe(150)
+      );
    }
 }
