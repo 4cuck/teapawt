@@ -560,9 +560,11 @@ mod tests {
          (!self.failed).then(|| {
             Snapshot {
                stats:   Stats {
-                  total:  21,
-                  search: 8,
-                  view:   13,
+                  total:    21,
+                  search:   8,
+                  view:     13,
+                  ct0_dead: 0,
+                  rejected: 0,
                },
                batches: Some(vec![view::Batch {
                   timestamp: 1_700_000_000,

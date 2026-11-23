@@ -168,6 +168,8 @@ async fn pool_counts(State(state): State<AppState>) -> impl IntoResponse {
             Json(serde_json::json!({
                "search": stats.search,
                "view": stats.view,
+               "ct0_dead": stats.ct0_dead,
+               "rejected": stats.rejected,
                "total": stats.total,
             })),
          )

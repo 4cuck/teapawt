@@ -84,7 +84,12 @@ pub struct AccountState {
    pub id:                        i64,
    pub username:                  String,
    pub kind:                      SessionKind,
+   /// Effective runtime pool: `"search"`, `"view"`, `"ct0_dead"`, or
+   /// `"rejected"`.
    pub pool:                      &'static str,
+   /// Underlying active pool (`"search"` or `"view"`) that the account returns
+   /// to if a stale `ct0` is replaced or an operator reinstates it.
+   pub home_pool:                 &'static str,
    /// Reserved for search once, in the view pool now. A health check that
    /// finds the account alive puts it back.
    pub demoted_from_search:       bool,
@@ -213,6 +218,7 @@ pub struct OutAccountEntry {
    pub username:            String,
    pub kind:                SessionKind,
    pub pool:                &'static str,
+   pub home_pool:           &'static str,
    pub demoted_from_search: bool,
    pub has_auth_token:      bool,
    pub ct0_present:         bool,
@@ -242,7 +248,8 @@ pub struct OutBreakdown {
    pub globally_limited:     usize,
 }
 
-/// Live out / unverified counts across every tracked operation tab.
+/// Live out / unverified counts across every tracked operation and quarantine
+/// pool tab.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct OutOperationCounts {
    pub all_out:             usize,
@@ -251,6 +258,8 @@ pub struct OutOperationCounts {
    pub user_by_screen_name: usize,
    pub tweet_detail:        usize,
    pub demoted_from_search: usize,
+   pub ct0_dead_pool:       usize,
+   pub rejected_pool:       usize,
 }
 
 /// One paginated slice of Out / unverified accounts from the live pool.
@@ -271,11 +280,20 @@ pub struct OutAccountsSnapshot {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct PoolCensus {
    pub total:                usize,
-   /// Reserved for search.
+   /// Active accounts reserved for search (excludes `ct0_dead` and `rejected`
+   /// pools).
    pub search:               usize,
-   /// Everything else: profile and post reads.
+   /// Active accounts for profile and post reads (excludes `ct0_dead` and
+   /// `rejected` pools).
    pub view:                 usize,
-   /// In the view pool, but reserved for search before a verdict moved them.
+   /// Accounts quarantined in the `ct0_dead` pool until a fresh CSRF token is
+   /// supplied.
+   pub ct0_dead_pool:        usize,
+   /// Permanently dead accounts quarantined in the `rejected` pool (locked,
+   /// credentials rejected, or retired).
+   pub rejected_pool:        usize,
+   /// In the active view pool, but reserved for search before a verdict moved
+   /// them.
    pub demoted_from_search:  usize,
    /// Out of every call until an operator acts: credentials rejected, a
    /// stale `ct0`, or retired.
@@ -1453,6 +1471,24 @@ impl SessionPool {
       *state += 1;
    }
 
+   /// Effective pool membership for reporting and slot utilization.
+   ///
+   /// Permanently dead/locked accounts (`rejected` / `retired`) live in the
+   /// `rejected` pool and stale-CSRF accounts (`ct0_dead`) live in the
+   /// `ct0_dead` pool, so neither pollutes active `search` or `view` slot
+   /// counts.
+   const fn effective_pool(lim: &SessionLimits) -> &'static str {
+      if lim.rejected || lim.retired {
+         "rejected"
+      } else if lim.ct0_dead {
+         "ct0_dead"
+      } else if lim.search_only {
+         "search"
+      } else {
+         "view"
+      }
+   }
+
    /// Every account's marks, and where each pool stands for the calls that
    /// carry most of its traffic, read in one pass for the dashboard.
    pub async fn census(&self) -> PoolCensus {
@@ -1474,14 +1510,15 @@ impl SessionPool {
       let mut sizes = [0_usize; OPERATIONS.len()];
       for slot in slots.iter() {
          let lim = slot.read_limits();
-         let in_search = lim.search_only;
-         if in_search {
-            census.search += 1;
-         } else {
-            census.view += 1;
+         let pool = Self::effective_pool(&lim);
+         match pool {
+            "search" => census.search += 1,
+            "view" => census.view += 1,
+            "ct0_dead" => census.ct0_dead_pool += 1,
+            _ => census.rejected_pool += 1,
          }
-         census.demoted_from_search += usize::from(lim.demoted_from_search && !in_search);
-         census.out_of_rotation += usize::from(lim.rejected || lim.ct0_dead || lim.retired);
+         census.demoted_from_search += usize::from(pool == "view" && lim.demoted_from_search);
+         census.out_of_rotation += usize::from(pool == "rejected" || pool == "ct0_dead");
          census.credentials_rejected += usize::from(lim.rejected);
          census.ct0_dead += usize::from(lim.ct0_dead);
          census.retired += usize::from(lim.retired);
@@ -1491,12 +1528,16 @@ impl SessionPool {
          census.settings_refused += usize::from(lim.filters_failed);
          census.filters_cleared += usize::from(lim.filters_cleared);
          census.globally_limited += usize::from(lim.is_globally_limited_at(now));
-         // Each call is counted against the pool that owns it, so the search
-         // row is not swamped by every view account being "out" of search.
-         for (index, &spec) in specs.iter().enumerate() {
-            if in_search == spec.is_search {
-               sizes[index] += 1;
-               Self::count_slot(&mut counts[index], slot, &lim, spec, now);
+         // Only active `search` and `view` pool accounts are counted in the
+         // GraphQL slot utilization rows; `rejected` and `ct0_dead` stay in
+         // their own pools so active capacity reflects real rotation.
+         if matches!(pool, "search" | "view") {
+            let in_search = pool == "search";
+            for (index, &spec) in specs.iter().enumerate() {
+               if in_search == spec.is_search {
+                  sizes[index] += 1;
+                  Self::count_slot(&mut counts[index], slot, &lim, spec, now);
+               }
             }
          }
       }
@@ -1579,63 +1620,96 @@ impl SessionPool {
 
       for slot in slots.iter() {
          let lim = slot.read_limits();
-         let in_search = lim.search_only;
+         let slot_pool = Self::effective_pool(&lim);
+         let home_pool = if lim.search_only { "search" } else { "view" };
 
-         let (search_reasons, ut_reasons, ub_reasons, td_reasons, view_reasons) = if in_search {
-            let sr = Self::out_reasons_for_spec(&lim, search_timeline, now);
-            if sr.any() {
-               counts.search_timeline += 1;
-               counts.all_out += 1;
-            }
-            (
-               sr,
-               OutReasons::default(),
-               OutReasons::default(),
-               OutReasons::default(),
-               OutReasons::default(),
-            )
-         } else {
-            if lim.demoted_from_search {
-               counts.demoted_from_search += 1;
-            }
-            let ut = Self::out_reasons_for_spec(&lim, user_tweets, now);
-            let ub = Self::out_reasons_for_spec(&lim, user_by_screen_name, now);
-            let td = Self::out_reasons_for_spec(&lim, tweet_detail, now);
-            if ut.any() {
-               counts.user_tweets += 1;
-            }
-            if ub.any() {
-               counts.user_by_screen_name += 1;
-            }
-            if td.any() {
-               counts.tweet_detail += 1;
-            }
-            let mut combined = ut.clone();
-            combined.merge(ub.clone());
-            combined.merge(td.clone());
-            if combined.any() {
-               counts.all_out += 1;
-            }
-            (OutReasons::default(), ut, ub, td, combined)
-         };
-
-         let scoped_reasons = match op {
-            Some("SearchTimeline") => (in_search && search_reasons.any()).then_some(search_reasons),
-            Some("UserTweets") => (!in_search && ut_reasons.any()).then_some(ut_reasons),
-            Some("UserByScreenName") => (!in_search && ub_reasons.any()).then_some(ub_reasons),
-            Some("TweetDetail") => (!in_search && td_reasons.any()).then_some(td_reasons),
-            _ => {
-               match pool {
-                  Some("demoted") => {
-                     (!in_search && lim.demoted_from_search).then_some(view_reasons)
+         let scoped_reasons = match slot_pool {
+            "rejected" => {
+               counts.rejected_pool += 1;
+               let reasons = OutReasons {
+                  ct0_dead:             lim.ct0_dead,
+                  credentials_rejected: lim.rejected,
+                  retired:              lim.retired,
+                  unverified_search:    lim.search_only && !lim.verified_op("SearchTimeline"),
+                  search_banned:        lim.search_banned,
+                  search_404_cooldown:  lim.search_404_cooling_at(now),
+                  profile_banned:       lim.profile_banned,
+                  globally_limited:     lim.is_globally_limited_at(now),
+                  refused_operations:   Vec::new(),
+               };
+               let matches_scope = op.is_none()
+                  && (pool == Some("rejected")
+                     || (pool.is_none()
+                        && matches!(reason, Some("credentials_rejected" | "retired"))));
+               matches_scope.then_some(reasons)
+            },
+            "ct0_dead" => {
+               counts.ct0_dead_pool += 1;
+               let reasons = OutReasons {
+                  ct0_dead:             true,
+                  credentials_rejected: false,
+                  retired:              false,
+                  unverified_search:    lim.search_only && !lim.verified_op("SearchTimeline"),
+                  search_banned:        lim.search_only && lim.search_banned,
+                  search_404_cooldown:  lim.search_only && lim.search_404_cooling_at(now),
+                  profile_banned:       !lim.search_only && lim.profile_banned,
+                  globally_limited:     lim.is_globally_limited_at(now),
+                  refused_operations:   Vec::new(),
+               };
+               let matches_scope = op.is_none()
+                  && (pool == Some("ct0_dead")
+                     || (pool.is_none() && reason == Some("ct0_dead")));
+               matches_scope.then_some(reasons)
+            },
+            "search" => {
+               let sr = Self::out_reasons_for_spec(&lim, search_timeline, now);
+               if sr.any() {
+                  counts.search_timeline += 1;
+                  counts.all_out += 1;
+               }
+               match op {
+                  Some("SearchTimeline") => sr.any().then_some(sr),
+                  Some(_) => None,
+                  None => {
+                     match pool {
+                        Some("search") | None => sr.any().then_some(sr),
+                        _ => None,
+                     }
                   },
-                  Some("search") => (in_search && search_reasons.any()).then_some(search_reasons),
-                  Some("view") => (!in_search && view_reasons.any()).then_some(view_reasons),
-                  _ => {
-                     if in_search {
-                        search_reasons.any().then_some(search_reasons)
-                     } else {
-                        view_reasons.any().then_some(view_reasons)
+               }
+            },
+            _ => {
+               if lim.demoted_from_search {
+                  counts.demoted_from_search += 1;
+               }
+               let ut = Self::out_reasons_for_spec(&lim, user_tweets, now);
+               let ub = Self::out_reasons_for_spec(&lim, user_by_screen_name, now);
+               let td = Self::out_reasons_for_spec(&lim, tweet_detail, now);
+               if ut.any() {
+                  counts.user_tweets += 1;
+               }
+               if ub.any() {
+                  counts.user_by_screen_name += 1;
+               }
+               if td.any() {
+                  counts.tweet_detail += 1;
+               }
+               let mut combined = ut.clone();
+               combined.merge(ub.clone());
+               combined.merge(td.clone());
+               if combined.any() {
+                  counts.all_out += 1;
+               }
+               match op {
+                  Some("UserTweets") => ut.any().then_some(ut),
+                  Some("UserByScreenName") => ub.any().then_some(ub),
+                  Some("TweetDetail") => td.any().then_some(td),
+                  Some(_) => None,
+                  None => {
+                     match pool {
+                        Some("demoted") => lim.demoted_from_search.then_some(combined),
+                        Some("view") | None => combined.any().then_some(combined),
+                        _ => None,
                      }
                   },
                }
@@ -1682,7 +1756,8 @@ impl SessionPool {
             id: slot.credentials.id,
             username: slot.credentials.username.clone(),
             kind: slot.credentials.kind,
-            pool: if in_search { "search" } else { "view" },
+            pool: slot_pool,
+            home_pool,
             demoted_from_search: lim.demoted_from_search,
             has_auth_token: !slot.credentials.auth_token.is_empty(),
             ct0_present: !ct0.is_empty(),
@@ -2843,7 +2918,8 @@ impl SessionPool {
          id:                        slot.credentials.id,
          username:                  slot.credentials.username.clone(),
          kind:                      slot.credentials.kind,
-         pool:                      if lim.search_only { "search" } else { "view" },
+         pool:                      Self::effective_pool(lim),
+         home_pool:                 if lim.search_only { "search" } else { "view" },
          demoted_from_search:       lim.demoted_from_search,
          available:                 !(lim.rejected || lim.ct0_dead || lim.retired),
          has_auth_token:            !slot.credentials.auth_token.is_empty(),
@@ -5554,6 +5630,13 @@ mod tests {
       pool.demote_to_view(6, None, "search refused").await;
 
       let census = pool.census().await;
+      // 7 accounts partition cleanly into active search (#1,#2), active view
+      // (#4,#6,#7), ct0_dead (#3), and rejected (#5).
+      assert_eq!(census.total, 7);
+      assert_eq!(census.search, 2);
+      assert_eq!(census.view, 3);
+      assert_eq!(census.ct0_dead_pool, 1);
+      assert_eq!(census.rejected_pool, 1);
       let search_op = census
          .operations
          .iter()
@@ -5564,34 +5647,50 @@ mod tests {
          .iter()
          .find(|op| op.operation == "UserTweets")
          .unwrap();
+      // Quarantined ct0_dead (#3) and rejected (#5) accounts are excluded from
+      // active operation slot counts.
+      assert_eq!(search_op.accounts, 2);
+      assert_eq!(search_op.out, 1);
+      assert_eq!(tweets_op.accounts, 3);
+      assert_eq!(tweets_op.out, 0);
 
       let search_snap =
          pool.out_accounts_snapshot(Some("SearchTimeline"), None, None, None, "priority", 1, 50);
       assert_eq!(search_snap.counts.search_timeline, search_op.out);
       assert_eq!(search_snap.total_filtered, search_op.out);
-      // Priority places stale ct0 (#3) ahead of unverified (#2).
+      assert_eq!(search_snap.counts.ct0_dead_pool, 1);
+      assert_eq!(search_snap.counts.rejected_pool, 1);
+      // Only active unverified search account (#2) is in SearchTimeline out.
       assert_eq!(
          search_snap
             .accounts
             .iter()
             .map(|a| a.id)
             .collect::<Vec<_>>(),
-         vec![3, 2]
+         vec![2]
       );
-      assert_eq!(search_snap.breakdown.ct0_dead, 1);
       assert_eq!(search_snap.breakdown.unverified_search, 1);
 
       let tweets_snap =
          pool.out_accounts_snapshot(Some("UserTweets"), None, None, None, "priority", 1, 50);
       assert_eq!(tweets_snap.counts.user_tweets, tweets_op.out);
-      assert_eq!(
-         tweets_snap
-            .accounts
-            .iter()
-            .map(|a| a.id)
-            .collect::<Vec<_>>(),
-         vec![5]
-      );
+      assert!(tweets_snap.accounts.is_empty());
+
+      // Stale ct0 (#3) lives in the ct0_dead pool and remembers home_pool=search.
+      let ct0_snap =
+         pool.out_accounts_snapshot(None, Some("ct0_dead"), None, None, "priority", 1, 50);
+      assert_eq!(ct0_snap.accounts.len(), 1);
+      assert_eq!(ct0_snap.accounts[0].id, 3);
+      assert_eq!(ct0_snap.accounts[0].pool, "ct0_dead");
+      assert_eq!(ct0_snap.accounts[0].home_pool, "search");
+
+      // Rejected credentials (#5) live in the rejected pool.
+      let rejected_snap =
+         pool.out_accounts_snapshot(None, Some("rejected"), None, None, "priority", 1, 50);
+      assert_eq!(rejected_snap.accounts.len(), 1);
+      assert_eq!(rejected_snap.accounts[0].id, 5);
+      assert_eq!(rejected_snap.accounts[0].pool, "rejected");
+      assert_eq!(rejected_snap.accounts[0].home_pool, "view");
 
       let demoted_snap =
          pool.out_accounts_snapshot(None, Some("demoted"), None, None, "priority", 1, 50);
@@ -5605,7 +5704,8 @@ mod tests {
          vec![6]
       );
 
-      // Updating ct0 replaces the token and clears ct0_dead immediately.
+      // Updating ct0 replaces the token, clears ct0_dead, and returns #3 to the
+      // active search pool immediately.
       assert!(
          pool
             .set_ct0(3, "fresh_operator_ct0".to_owned())
@@ -5616,9 +5716,15 @@ mod tests {
       let after = pool.account_state(3).await.unwrap();
       assert!(!after.ct0_dead);
       assert!(after.available);
+      assert_eq!(after.pool, "search");
       assert_eq!(after.ct0_len, "fresh_operator_ct0".len());
 
-      // Account #3 is no longer out for SearchTimeline.
+      let census_after = pool.census().await;
+      assert_eq!(census_after.search, 3);
+      assert_eq!(census_after.ct0_dead_pool, 0);
+      assert_eq!(census_after.rejected_pool, 1);
+
+      // Account #3 is active in SearchTimeline and #2 remains unverified.
       let search_snap_after =
          pool.out_accounts_snapshot(Some("SearchTimeline"), None, None, None, "priority", 1, 50);
       assert_eq!(
@@ -5629,6 +5735,7 @@ mod tests {
             .collect::<Vec<_>>(),
          vec![2]
       );
+      assert_eq!(search_snap_after.counts.ct0_dead_pool, 0);
 
       // OAuth sessions cannot receive a ct0 override.
       assert!(matches!(
@@ -5641,11 +5748,13 @@ mod tests {
          Err(Error::NotFound(_))
       ));
 
-      // Reinstating a rejected account clears credentials_rejected as well.
+      // Reinstating a rejected account clears credentials_rejected and returns
+      // it to its home pool.
       assert!(pool.reinstate(5).await);
       let s5 = pool.account_state(5).await.unwrap();
       assert!(!s5.credentials_rejected);
       assert!(s5.available);
+      assert_eq!(s5.pool, "view");
    }
 
    #[tokio::test]
@@ -5688,12 +5797,16 @@ mod tests {
       let s10 = pool.account_state(10).await.unwrap();
       assert!(s10.credentials_rejected);
       assert!(!s10.available);
+      assert_eq!(s10.pool, "rejected");
+      assert_eq!(s10.home_pool, "search");
       assert!(s10.filters_failed);
       assert_eq!(s10.filters_retry_at, i64::MAX);
 
       let s11 = pool.account_state(11).await.unwrap();
       assert!(s11.credentials_rejected);
       assert!(!s11.available);
+      assert_eq!(s11.pool, "rejected");
+      assert_eq!(s11.home_pool, "view");
       assert!(s11.filters_failed);
       assert_eq!(s11.filters_retry_at, i64::MAX);
 

@@ -95,9 +95,11 @@ type CachedStats = Option<(Instant, Stats)>;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Stats {
-   pub total:  i64,
-   pub search: i64,
-   pub view:   i64,
+   pub total:    i64,
+   pub search:   i64,
+   pub view:     i64,
+   pub ct0_dead: i64,
+   pub rejected: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -578,20 +580,67 @@ impl AccountStore {
       }
       let client = self.client.lock().await;
       require_migration(&*client).await?;
-      let row = client
-         .query_one(
-            "SELECT count(*), count(*) FILTER (WHERE lower(body->>'pool') = 'search') FROM \
-             account_sessions",
-            &[],
-         )
+      let has_limits: bool = client
+         .query_one("SELECT to_regclass('session_limits') IS NOT NULL", &[])
          .await
+         .map_err(db_error)?
+         .try_get(0)
          .map_err(db_error)?;
-      let total = row.try_get(0).map_err(db_error)?;
-      let search = row.try_get(1).map_err(db_error)?;
-      let stats = Stats {
-         total,
-         search,
-         view: total - search,
+      let stats = if has_limits {
+         let row = client
+            .query_one(
+               "SELECT
+                   count(*),
+                   count(*) FILTER (
+                      WHERE COALESCE((l.body->>'rejected')::boolean, false)
+                         OR COALESCE((l.body->>'retired')::boolean, false)
+                   ),
+                   count(*) FILTER (
+                      WHERE NOT COALESCE((l.body->>'rejected')::boolean, false)
+                         AND NOT COALESCE((l.body->>'retired')::boolean, false)
+                         AND COALESCE((l.body->>'ct0_dead')::boolean, false)
+                   ),
+                   count(*) FILTER (
+                      WHERE NOT COALESCE((l.body->>'rejected')::boolean, false)
+                         AND NOT COALESCE((l.body->>'retired')::boolean, false)
+                         AND NOT COALESCE((l.body->>'ct0_dead')::boolean, false)
+                         AND lower(COALESCE(s.body->>'pool', '')) = 'search'
+                   )
+                FROM account_sessions s
+                LEFT JOIN session_limits l ON l.id = s.id",
+               &[],
+            )
+            .await
+            .map_err(db_error)?;
+         let total: i64 = row.try_get(0).map_err(db_error)?;
+         let rejected: i64 = row.try_get(1).map_err(db_error)?;
+         let ct0_dead: i64 = row.try_get(2).map_err(db_error)?;
+         let search: i64 = row.try_get(3).map_err(db_error)?;
+         Stats {
+            total,
+            search,
+            view: total - rejected - ct0_dead - search,
+            ct0_dead,
+            rejected,
+         }
+      } else {
+         let row = client
+            .query_one(
+               "SELECT count(*), count(*) FILTER (WHERE lower(body->>'pool') = 'search') FROM \
+                account_sessions",
+               &[],
+            )
+            .await
+            .map_err(db_error)?;
+         let total = row.try_get(0).map_err(db_error)?;
+         let search = row.try_get(1).map_err(db_error)?;
+         Stats {
+            total,
+            search,
+            view: total - search,
+            ct0_dead: 0,
+            rejected: 0,
+         }
       };
       *self
          .stats_cache

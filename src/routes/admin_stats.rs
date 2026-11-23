@@ -309,7 +309,9 @@ impl OutAccountsQuery {
             },
             "pool" => {
                parsed.pool = match trimmed {
-                  "search" | "view" | "demoted" => Some(trimmed.to_owned()),
+                  "search" | "view" | "demoted" | "ct0_dead" | "rejected" => {
+                     Some(trimmed.to_owned())
+                  },
                   _ => None,
                };
             },
@@ -826,7 +828,7 @@ async fn investigation(state: &AppState, query: &InvestigationQuery) -> Option<I
    let pool = query
       .pool
       .as_deref()
-      .filter(|pool| matches!(*pool, "search" | "view"));
+      .filter(|pool| matches!(*pool, "search" | "view" | "ct0_dead" | "rejected"));
    let status = query
       .status
       .as_deref()
@@ -1711,6 +1713,7 @@ mod tests {
          username:                  "alice".to_owned(),
          kind:                      SessionKind::Cookie,
          pool:                      "view",
+         home_pool:                 "view",
          demoted_from_search:       false,
          available:                 true,
          has_auth_token:            true,

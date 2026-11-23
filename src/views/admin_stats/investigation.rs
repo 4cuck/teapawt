@@ -7,6 +7,7 @@ use super::{
    frame,
    kind_label,
    minute_label,
+   pool_badge_class,
 };
 use crate::{
    routes::{
@@ -145,6 +146,8 @@ pub(crate) fn restrictions(
                      option value="" { "All pools" }
                      option value="search" selected[query.pool.as_deref() == Some("search")] { "Search pool" }
                      option value="view" selected[query.pool.as_deref() == Some("view")] { "View pool" }
+                     option value="ct0_dead" selected[query.pool.as_deref() == Some("ct0_dead")] { "Stale ct0 pool" }
+                     option value="rejected" selected[query.pool.as_deref() == Some("rejected")] { "Rejected pool" }
                   }
                }
                div class="admin-filters-actions" {
@@ -228,7 +231,7 @@ pub(crate) fn rows(events: &[Observation]) -> Markup {
                }
             }
             td class="admin-nowrap" {
-               span class=(if pool == "search" { "admin-badge admin-badge--search" } else { "admin-badge admin-badge--view" }) {
+               span class=(pool_badge_class(pool)) {
                   (pool)
                }
                @if observation.demoted_from_search {

@@ -6,6 +6,7 @@ use maud::{
 use super::{
    frame,
    minute_label,
+   pool_badge_class,
 };
 use crate::{
    routes::AccountData,
@@ -41,8 +42,9 @@ pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Marku
       }
 
       @if let Some(acct) = runtime {
+         @let quarantined = matches!(acct.pool, "ct0_dead" | "rejected");
          @let in_search = acct.pool == "search";
-         @let in_clean_view = acct.pool != "search" && !acct.demoted_from_search;
+         @let in_clean_view = acct.pool == "view" && !acct.demoted_from_search;
          @let is_cookie = acct.kind == SessionKind::Cookie;
          section class="admin-stats-panel admin-actions-card" data-session=(id) {
             h2 { "Operator actions" }
@@ -74,7 +76,7 @@ pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Marku
                   type="button"
                   data-session=(id)
                   data-pool="search"
-                  disabled[in_search]
+                  disabled[in_search || quarantined]
                {
                   "Move to Search Pool"
                }
@@ -84,7 +86,7 @@ pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Marku
                   type="button"
                   data-session=(id)
                   data-pool="view"
-                  disabled[in_clean_view]
+                  disabled[in_clean_view || quarantined]
                {
                   "Move to View Pool"
                }
@@ -163,8 +165,15 @@ pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Marku
                div {
                   dt { "Assigned pool" }
                   dd {
-                     span class=(if in_search { "admin-badge admin-badge--search" } else { "admin-badge admin-badge--view" }) {
-                        (if acct.pool.is_empty() { "view" } else { acct.pool })
+                     @let display_pool = if acct.pool.is_empty() { "view" } else { acct.pool };
+                     span class=(pool_badge_class(display_pool)) {
+                        (display_pool)
+                     }
+                     @if quarantined {
+                        " "
+                        span class="admin-badge admin-badge--neutral" title="Active pool this account returns to if repaired or reinstated" {
+                           "home: " (acct.home_pool)
+                        }
                      }
                      @if acct.demoted_from_search {
                         " "
@@ -448,7 +457,8 @@ mod tests {
             id:                        77,
             username:                  "stale_acct".to_owned(),
             kind:                      SessionKind::Cookie,
-            pool:                      "search",
+            pool:                      "ct0_dead",
+            home_pool:                 "search",
             demoted_from_search:       false,
             available:                 false,
             has_auth_token:            true,

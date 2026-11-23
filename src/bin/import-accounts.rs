@@ -109,8 +109,8 @@ fn legacy_path(variable: &'static str, default: &str) -> Result<String> {
 
 fn print_stats(stats: Stats) {
    println!(
-      "total={} search={} view={}",
-      stats.total, stats.search, stats.view
+      "total={} search={} view={} ct0_dead={} rejected={}",
+      stats.total, stats.search, stats.view, stats.ct0_dead, stats.rejected
    );
 }
 

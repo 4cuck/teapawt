@@ -956,6 +956,15 @@ fn clearance_card(status: &ClearanceStatus) -> Markup {
    }
 }
 
+pub(super) fn pool_badge_class(pool: &str) -> &'static str {
+   match pool {
+      "search" => "admin-badge admin-badge--search",
+      "ct0_dead" => "admin-badge admin-badge--warn",
+      "rejected" => "admin-badge admin-badge--bad",
+      _ => "admin-badge admin-badge--view",
+   }
+}
+
 fn pools_section(
    census: &PoolCensus,
    stored_pool: Option<(i64, i64)>,
@@ -971,7 +980,7 @@ fn pools_section(
          div class="admin-section-heading" {
             div {
                h2 id="stats-pool-title" { "Live account pools & operation capacity" }
-               p { "Real-time slot states across the in-memory session pool. Trickle recovery checks demoted search accounts without Cloudflare bulk bursts." }
+               p { "Real-time slot states across active search and view pools. Permanently rejected/locked and stale-ct0 accounts are separated into their own pools so active utilization stays accurate." }
             }
             a class="admin-btn" href="/admin/import" { "Import accounts" }
          }
@@ -979,9 +988,16 @@ fn pools_section(
          dl class="admin-kpi-grid admin-stats-metrics" {
             (metric(
                "stats-pool",
-               "Search / view inventory",
+               "Active search / view",
                Some(pool_value),
-               &format!("{} total loaded ({} live search, {} live view)", census.total, census.search, census.view),
+               &format!(
+                  "{} loaded ({} search · {} view · {} ct0_dead · {} rejected)",
+                  census.total,
+                  census.search,
+                  census.view,
+                  census.ct0_dead_pool,
+                  census.rejected_pool
+               ),
                "",
             ))
             (metric(
@@ -991,6 +1007,41 @@ fn pools_section(
                "50 calls / 15m per verified search account",
                "",
             ))
+            div class=(if census.ct0_dead_pool > 0 { "admin-kpi admin-stats-metric admin-kpi--warn admin-stats-metric--warn" } else { "admin-kpi admin-stats-metric" }) {
+               dt { "Stale ct0 pool (ct0_dead)" }
+               dd id="stats-ct0-dead-pool" {
+                  @if census.ct0_dead_pool > 0 {
+                     a href="/admin/stats/out?pool=ct0_dead" { (census.ct0_dead_pool) }
+                  } @else {
+                     "0"
+                  }
+               }
+               dd class="admin-stats-note" { "Excluded from active slots · replace ct0 to restore" }
+            }
+            div class=(if census.rejected_pool > 0 { "admin-kpi admin-stats-metric admin-kpi--bad admin-stats-metric--bad" } else { "admin-kpi admin-stats-metric" }) {
+               dt { "Rejected / locked pool" }
+               dd id="stats-rejected-pool" {
+                  @if census.rejected_pool > 0 {
+                     a href="/admin/stats/out?pool=rejected" { (census.rejected_pool) }
+                  } @else {
+                     "0"
+                  }
+               }
+               dd class="admin-stats-note" {
+                  @if census.credentials_rejected > 0 {
+                     a href="/admin/stats/out?pool=rejected&reason=credentials_rejected" { (census.credentials_rejected) " bad auth" }
+                  } @else {
+                     (census.credentials_rejected) " bad auth"
+                  }
+                  " · "
+                  @if census.retired > 0 {
+                     a href="/admin/stats/out?pool=rejected&reason=retired" { (census.retired) " retired" }
+                  } @else {
+                     (census.retired) " retired"
+                  }
+                  " · never retried"
+               }
+            }
             div class=(if census.demoted_from_search > 0 { "admin-kpi admin-stats-metric admin-kpi--warn admin-stats-metric--warn" } else { "admin-kpi admin-stats-metric" }) {
                dt { "Demoted from search" }
                dd id="stats-demoted" {
@@ -1001,35 +1052,6 @@ fn pools_section(
                   }
                }
                dd class="admin-stats-note" { "Queued for trickle SearchTimeline recovery" }
-            }
-            div class=(if census.out_of_rotation > 0 { "admin-kpi admin-stats-metric admin-kpi--warn admin-stats-metric--warn" } else { "admin-kpi admin-stats-metric" }) {
-               dt { "Out of rotation" }
-               dd id="stats-out-rotation" {
-                  @if census.out_of_rotation > 0 {
-                     a href="/admin/stats/out" { (census.out_of_rotation) }
-                  } @else {
-                     "0"
-                  }
-               }
-               dd class="admin-stats-note" {
-                  @if census.ct0_dead > 0 {
-                     a href="/admin/stats/out?reason=ct0_dead" { (census.ct0_dead) " stale ct0" }
-                  } @else {
-                     (census.ct0_dead) " stale ct0"
-                  }
-                  " · "
-                  @if census.retired > 0 {
-                     a href="/admin/stats/out?reason=retired" { (census.retired) " retired" }
-                  } @else {
-                     (census.retired) " retired"
-                  }
-                  " · "
-                  @if census.credentials_rejected > 0 {
-                     a href="/admin/stats/out?reason=credentials_rejected" { (census.credentials_rejected) " bad auth" }
-                  } @else {
-                     (census.credentials_rejected) " bad auth"
-                  }
-               }
             }
             (metric(
                "stats-bans",
@@ -1045,22 +1067,15 @@ fn pools_section(
                "stats-filters",
                "NSFW filter sync",
                Some(format!("{} cleared", census.filters_cleared)),
-               &format!("{} settings-write refused (code 64 paced)", census.settings_refused),
+               &format!("{} settings-write refused", census.settings_refused),
                "",
             ))
             (metric(
                "stats-parked",
                "Parked calls / global 429",
                Some(format!("{} / {}", census.parked_calls, census.globally_limited)),
-               "In-flight requests waiting on quota / globally cooled accounts",
-               if census.parked_calls > 0 { "warn" } else { "" },
-            ))
-            (metric(
-               "stats-dropped",
-               "Dropped stat events",
-               Some(dropped_events.to_string()),
-               "Telemetry buffer drops since process start",
-               if dropped_events > 0 { "warn" } else { "" },
+               &format!("In-flight waits / cooled · {} dropped stat events", dropped_events),
+               if census.parked_calls > 0 || dropped_events > 0 { "warn" } else { "" },
             ))
          }
 
@@ -1287,7 +1302,7 @@ fn search_empty_accounts_section(rows: &[SearchAccountRow]) -> Markup {
                            }
                            td {
                               div class="admin-badge-row" {
-                                 span class=(if row.pool == "search" { "admin-badge admin-badge--search" } else { "admin-badge admin-badge--view" }) {
+                                 span class=(pool_badge_class(&row.pool)) {
                                     (row.pool)
                                  }
                                  @if row.verified_search {
@@ -1725,7 +1740,11 @@ mod tests {
       let mut census = PoolCensus {
          total: 5440,
          search: 536,
-         view: 4904,
+         view: 4600,
+         ct0_dead_pool: 204,
+         rejected_pool: 100,
+         credentials_rejected: 100,
+         ct0_dead: 204,
          demoted_from_search: 12,
          ..PoolCensus::default()
       };
@@ -1787,6 +1806,10 @@ mod tests {
       assert!(markup.contains("100.0%"));
       assert!(markup.contains("1 verified account ≥50% empty"));
       assert!(markup.contains("id=\"stats-pool\">536 / 4904</dd>"));
+      assert!(markup.contains("id=\"stats-ct0-dead-pool\""));
+      assert!(markup.contains("href=\"/admin/stats/out?pool=ct0_dead\""));
+      assert!(markup.contains("id=\"stats-rejected-pool\""));
+      assert!(markup.contains("href=\"/admin/stats/out?pool=rejected\""));
       assert!(markup.contains("data-series=\"[[0,"));
       assert!(markup.contains("data-window-start=\"-597600\""));
       assert!(markup.contains("data-window-end=\"7200\""));

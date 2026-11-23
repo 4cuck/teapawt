@@ -101,6 +101,12 @@ pub(crate) fn figures(snapshot: Option<&Snapshot>) -> Markup {
             div class="import-stat-card" { dt { "Total" } dd { (snapshot.stats.total) } }
             div class="import-stat-card" { dt { "Search" } dd { (snapshot.stats.search) } }
             div class="import-stat-card" { dt { "View" } dd { (snapshot.stats.view) } }
+            @if snapshot.stats.ct0_dead > 0 {
+               div class="import-stat-card" { dt { "Stale ct0" } dd { (snapshot.stats.ct0_dead) } }
+            }
+            @if snapshot.stats.rejected > 0 {
+               div class="import-stat-card" { dt { "Rejected" } dd { (snapshot.stats.rejected) } }
+            }
          }
          @if let Some(batches) = &snapshot.batches {
             @if !batches.is_empty() {

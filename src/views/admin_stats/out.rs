@@ -7,6 +7,7 @@ use super::{
    frame,
    kind_label,
    minute_label,
+   pool_badge_class,
 };
 use crate::{
    routes::{
@@ -80,26 +81,42 @@ fn scope_heading(query: &OutAccountsQuery) -> (&'static str, &'static str) {
                    probe, or reinstate them.",
                )
             },
+            Some("ct0_dead") => {
+               (
+                  "Stale ct0 pool (ct0_dead)",
+                  "Accounts held out of active search and view slot utilization because their CSRF \
+                   token (ct0) expired. Paste a fresh ct0 to return each account straight to its \
+                   home pool.",
+               )
+            },
+            Some("rejected") => {
+               (
+                  "Rejected / locked pool",
+                  "Accounts permanently out of rotation due to locked/rejected credentials (401 / \
+                   code 326) or retirement. Excluded from active search and view slot utilization \
+                   and never retried automatically.",
+               )
+            },
             Some("search") => {
                (
                   "Search pool — Out / unverified",
-                  "Search-pool accounts currently out of rotation or unverified for \
-                   SearchTimeline.",
+                  "Active search-pool accounts currently out of rotation or unverified for \
+                   SearchTimeline (excludes ct0_dead and rejected pools).",
                )
             },
             Some("view") => {
                (
                   "View pool — Out / unverified",
-                  "View-pool accounts currently out of rotation for UserTweets, UserByScreenName, \
-                   or TweetDetail.",
+                  "Active view-pool accounts currently out of rotation for UserTweets, \
+                   UserByScreenName, or TweetDetail (excludes ct0_dead and rejected pools).",
                )
             },
             _ => {
                (
-                  "Out / unverified accounts",
-                  "All live accounts currently counted as Out / unverified in their assigned \
-                   pool. Click any operation tab, export Cookie-Editor JSON into your browser, \
-                   paste a replacement ct0, and run a test probe.",
+                  "Active pools — Out / unverified",
+                  "Active search and view accounts currently counted in an operation's red Out / \
+                   unverified bar. Permanently rejected and stale-ct0 accounts live in their own \
+                   tabs.",
                )
             },
          }
@@ -182,8 +199,8 @@ pub(crate) fn out_accounts(
    let active_reason = query.reason.as_deref();
    let active_sort = query.sort.as_deref().unwrap_or("priority");
 
-   let tabs: [(&str, Option<&str>, Option<&str>, usize); 6] = [
-      ("All out", None, None, data.counts.all_out),
+   let tabs: [(&str, Option<&str>, Option<&str>, usize); 8] = [
+      ("Active out", None, None, data.counts.all_out),
       (
          "SearchTimeline",
          Some("SearchTimeline"),
@@ -213,6 +230,18 @@ pub(crate) fn out_accounts(
          None,
          Some("demoted"),
          data.counts.demoted_from_search,
+      ),
+      (
+         "Stale ct0 pool",
+         None,
+         Some("ct0_dead"),
+         data.counts.ct0_dead_pool,
+      ),
+      (
+         "Rejected pool",
+         None,
+         Some("rejected"),
+         data.counts.rejected_pool,
       ),
    ];
 
@@ -372,12 +401,13 @@ fn account_row(row: &OutAccountRow, search_mode_default: bool) -> Markup {
    let id = entry.id;
    let is_cookie = entry.kind == SessionKind::Cookie;
    let can_export = is_cookie && entry.has_auth_token;
-   let in_search = entry.pool == "search";
-   let quick_probe_mode = if search_mode_default || in_search {
-      "search"
-   } else {
-      "health"
-   };
+   let quarantined = matches!(entry.pool, "ct0_dead" | "rejected");
+   let quick_probe_mode =
+      if search_mode_default || entry.home_pool == "search" || entry.demoted_from_search {
+         "search"
+      } else {
+         "health"
+      };
    let quick_probe_label = if quick_probe_mode == "search" {
       "Search Probe"
    } else {
@@ -401,8 +431,13 @@ fn account_row(row: &OutAccountRow, search_mode_default: bool) -> Markup {
          }
          td class="admin-nowrap" {
             div class="admin-badge-row" {
-               span class=(if in_search { "admin-badge admin-badge--search" } else { "admin-badge admin-badge--view" }) {
+               span class=(pool_badge_class(entry.pool)) {
                   (entry.pool)
+               }
+               @if quarantined {
+                  span class="admin-badge admin-badge--neutral" title="Active pool this account returns to if repaired or reinstated" {
+                     "home: " (entry.home_pool)
+                  }
                }
                @if entry.demoted_from_search {
                   span class="admin-badge admin-badge--warn" title="Originally in search pool; demoted to view" {
@@ -641,6 +676,8 @@ mod tests {
             user_by_screen_name: 12,
             tweet_detail:        12,
             demoted_from_search: 2,
+            ct0_dead_pool:       4,
+            rejected_pool:       5,
          },
          breakdown:      OutBreakdown {
             total:                3,
@@ -664,6 +701,7 @@ mod tests {
                username:            "cookie_user".to_owned(),
                kind:                SessionKind::Cookie,
                pool:                "search",
+               home_pool:           "search",
                demoted_from_search: false,
                has_auth_token:      true,
                ct0_present:         true,
