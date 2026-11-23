@@ -1,12 +1,27 @@
-use std::{collections::HashSet, fmt::Write as _};
+use std::{
+   collections::HashSet,
+   fmt::Write as _,
+};
 
 use crate::{
    config::Config,
-   types::{List, Tweet, Tweets, User},
-   utils::{escape_tags, formatters, html_escape},
+   types::{
+      List,
+      Tweet,
+      Tweets,
+      User,
+   },
+   utils::{
+      escape_tags,
+      formatters,
+      html_escape,
+   },
    views::{
       layout::strip_html,
-      renderutils::{community_note_to_html, tweet_link},
+      renderutils::{
+         community_note_to_html,
+         tweet_link,
+      },
    },
 };
 
@@ -95,8 +110,7 @@ pub fn render_user_rss_with_pinned(
    let avatar = formatters::join_base(url_prefix, &get_pic_url(&user.user_pic, config, proxy));
    let image_block = format!(
       "    <image>\n      <title>{title}</title>\n      <link>{link}</link>\n      \
-       <url>{avatar}</url>\n      <width>128</width>\n      <height>128</height>\n    \
-       </image>\n"
+       <url>{avatar}</url>\n      <width>128</width>\n      <height>128</height>\n    </image>\n"
    );
 
    let items = render_tweet_items_with_pinned(tweets, config, pinned, Some(&user.id), proxy);

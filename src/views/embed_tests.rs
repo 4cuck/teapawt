@@ -1,61 +1,75 @@
 use super::*;
 use crate::{
    api::schema::CommunityNote,
-   config::{AppConfig, CacheConfig, GifTranscodingConfig, PreferencesConfig, ServerConfig},
-   types::{Card, Photo, Poll, User, VideoType, VideoVariant},
+   config::{
+      AppConfig,
+      CacheConfig,
+      GifTranscodingConfig,
+      PreferencesConfig,
+      ServerConfig,
+   },
+   types::{
+      Card,
+      Photo,
+      Poll,
+      User,
+      VideoType,
+      VideoVariant,
+   },
 };
 
 fn test_config() -> Config {
    Config {
-      server: ServerConfig {
-         hostname: "teapot.test".to_owned(),
-         title: "teapot".to_owned(),
-         address: "127.0.0.1".to_owned(),
-         port: 443,
-         public_port: None,
-         https: true,
+      server:          ServerConfig {
+         hostname:             "teapot.test".to_owned(),
+         title:                "teapot".to_owned(),
+         address:              "127.0.0.1".to_owned(),
+         port:                 443,
+         public_port:          None,
+         https:                true,
          http_max_connections: 100,
-         static_dir: "./public".to_owned(),
+         static_dir:           "./public".to_owned(),
       },
-      cache: CacheConfig {
+      cache:           CacheConfig {
          list_minutes: 120,
-         rss_minutes: 10,
-         max_entries: 50_000,
+         rss_minutes:  10,
+         max_entries:  50_000,
       },
-      config: AppConfig {
-         hmac_key: "0123456789abcdef0123456789abcdef".to_owned(),
-         indexnow_key: String::new(),
-         base64_media: true,
-         enable_rss: true,
-         client_budget: false,
-         trusted_proxies: Vec::new(),
-         client_budget_message: Vec::new(),
-         rate_limited_message: Vec::new(),
-         internal_error_message: Vec::new(),
-         enable_debug: false,
-         debug_token: String::new(),
-         proxy: String::new(),
-         proxy_auth: String::new(),
-         api_proxy: String::new(),
-         socks_proxies_file: String::new(),
-         fallback_proxies_file: String::new(),
-         session_proxies_file: String::new(),
-         disable_tid: false,
+      config:          AppConfig {
+         hmac_key:                "0123456789abcdef0123456789abcdef".to_owned(),
+         indexnow_key:            String::new(),
+         base64_media:            true,
+         enable_rss:              true,
+         client_budget:           false,
+         trusted_proxies:         Vec::new(),
+         client_budget_message:   Vec::new(),
+         rate_limited_message:    Vec::new(),
+         internal_error_message:  Vec::new(),
+         enable_debug:            false,
+         debug_token:             String::new(),
+         proxy:                   String::new(),
+         proxy_auth:              String::new(),
+         api_proxy:               String::new(),
+         socks_proxies_file:      String::new(),
+         fallback_proxies_file:   String::new(),
+         session_proxies_file:    String::new(),
+         disable_tid:             false,
+         search_clearance:        false,
          x_posed_community_cache: false,
-         max_concurrent_reqs: 2,
-         paid_emoji: ":paid:".to_owned(),
-         ai_emoji: ":ai:".to_owned(),
-         kagi_token: String::new(),
-         kagi_token_file: String::new(),
+         max_concurrent_reqs:     2,
+         paid_emoji:              ":paid:".to_owned(),
+         ai_emoji:                ":ai:".to_owned(),
+         kagi_token:              String::new(),
+         kagi_token_file:         String::new(),
       },
-      preferences: PreferencesConfig::default(),
+      preferences:     PreferencesConfig::default(),
       gif_transcoding: GifTranscodingConfig::default(),
-      donations: crate::config::DonationsConfig::default(),
-      turnstile: crate::config::TurnstileConfig::default(),
-      pass: crate::config::PassConfig::default(),
-      anti_ddos: crate::config::AntiDdosConfig::default(),
-      contact: crate::config::ContactConfig::default(),
-      url_prefix: "https://teapot.test".to_owned(),
+      donations:       crate::config::DonationsConfig::default(),
+      turnstile:       crate::config::TurnstileConfig::default(),
+      pass:            crate::config::PassConfig::default(),
+      anti_ddos:       crate::config::AntiDdosConfig::default(),
+      contact:         crate::config::ContactConfig::default(),
+      url_prefix:      "https://teapot.test".to_owned(),
    }
 }
 
@@ -84,9 +98,10 @@ fn video() -> Video {
       thumb: "https://pbs.twimg.com/ext_tw_video_thumb/thumb.jpg".to_owned(),
       variants: vec![VideoVariant {
          content_type: VideoType::Mp4,
-         url: "https://video.twimg.com/ext_tw_video/1/pu/vid/720x1280/video.mp4?tag=12".to_owned(),
-         bitrate: 2_176_000,
-         resolution: 1280,
+         url:          "https://video.twimg.com/ext_tw_video/1/pu/vid/720x1280/video.mp4?tag=12"
+            .to_owned(),
+         bitrate:      2_176_000,
+         resolution:   1280,
       }],
       ..Video::default()
    }
@@ -209,7 +224,7 @@ fn activity_payload_includes_community_note_with_sources() {
    let note_text = "Germany did so in 2002. Source";
    let source_start = note_text.find("Source").unwrap();
    status.note = Some(CommunityNote {
-      text: note_text.to_owned(),
+      text:  note_text.to_owned(),
       links: vec![(
          source_start,
          source_start + "Source".chars().count(),
@@ -458,11 +473,11 @@ fn activity_payload_renders_poll_and_quote_blocks() {
 fn activity_payload_uses_image_attachment_for_transcoded_gif() {
    let mut tweet = tweet(407, "gif", "animated");
    tweet.gifs.push(Gif {
-      url: "https://video.twimg.com/tweet_video/animation.mp4".to_owned(),
-      thumb: "https://pbs.twimg.com/tweet_video_thumb/animation.jpg".to_owned(),
+      url:      "https://video.twimg.com/tweet_video/animation.mp4".to_owned(),
+      thumb:    "https://pbs.twimg.com/tweet_video_thumb/animation.jpg".to_owned(),
       alt_text: "animation alt text".to_owned(),
-      width: 400,
-      height: 400,
+      width:    400,
+      height:   400,
    });
    let mut config = test_config();
    config.gif_transcoding.mode = GifTranscodingMode::Local;
@@ -585,10 +600,10 @@ fn player_oembed_duplicates_engagement_in_provider() {
 fn activity_pub_photo_urls_are_encoded_and_keep_alt_text() {
    let mut tweet = tweet(300, "photos", "photo text");
    tweet.photos.push(Photo {
-      url: "https://pbs.twimg.com/media/photo.jpg?format=jpg&name=large".to_owned(),
+      url:      "https://pbs.twimg.com/media/photo.jpg?format=jpg&name=large".to_owned(),
       alt_text: "alt text".to_owned(),
-      width: 2048,
-      height: 1536,
+      width:    2048,
+      height:   1536,
    });
 
    let activity = build_activity_pub(&tweet, &test_config());

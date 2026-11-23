@@ -34,7 +34,10 @@ impl ApiClient {
          loop {
             client.check_search_accounts().await;
             client.recover_demoted_search_accounts().await;
-            sleep(CHECK_EVERY).await;
+            tokio::select! {
+               () = sleep(CHECK_EVERY) => {},
+               () = client.search_check_wakeup.notified() => {},
+            }
          }
       });
    }
@@ -46,7 +49,7 @@ impl ApiClient {
          return;
       }
       tracing::info!(count = ids.len(), "checking which accounts X lets search");
-      let (mut allowed, mut demoted, mut unknown) = (0_usize, 0_usize, 0_usize);
+      let (mut allowed, mut demoted, mut rejected, mut unknown) = (0_usize, 0_usize, 0_usize, 0_usize);
       for id in ids {
          match timeout(CHECK_TIMEOUT, self.search_as(id)).await {
             Ok(Ok(true)) => {
@@ -65,11 +68,15 @@ impl ApiClient {
                   .await;
                demoted += 1;
             },
+            Ok(Err(Error::SessionRejected(_))) => {
+               self.sessions.mark_rejected(id).await;
+               rejected += 1;
+            },
             _ => unknown += 1,
          }
          sleep(CHECK_GAP).await;
       }
-      tracing::info!(allowed, demoted, unknown, "search check done");
+      tracing::info!(allowed, demoted, rejected, unknown, "search check done");
    }
 
    async fn recover_demoted_search_accounts(&self) {

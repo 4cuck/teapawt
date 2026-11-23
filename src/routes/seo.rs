@@ -630,9 +630,8 @@ async fn sitemap_index(State(state): State<AppState>, headers: HeaderMap) -> Res
    let body = format!(
       "\
 <?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<sitemapindex xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\
+<sitemapindex xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"><sitemap>\
        
-  <sitemap>
     <loc>{origin}/sitemap-static.xml</loc>
     <lastmod>{lastmod}</lastmod>
   </sitemap>

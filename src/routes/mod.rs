@@ -21,6 +21,7 @@ mod debug;
 mod donate;
 mod embed;
 mod explore;
+mod fingerprint;
 mod game;
 pub mod helpers;
 mod import;

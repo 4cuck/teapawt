@@ -1,18 +1,43 @@
-use maud::{Markup, PreEscaped, html};
+use maud::{
+   Markup,
+   PreEscaped,
+   html,
+};
 
 use super::timeline::{
-   PostsMenu, render_timeline_tabs, render_timeline_with_pinned_and_prefs, tab_to_kind,
+   PostsMenu,
+   render_timeline_tabs,
+   render_timeline_with_pinned_and_prefs,
+   tab_to_kind,
 };
 use crate::{
    config::Config,
-   types::{GalleryPhoto, Prefs, Profile, TimelineKind, User},
+   types::{
+      GalleryPhoto,
+      Prefs,
+      Profile,
+      TimelineKind,
+      User,
+   },
    utils::{
-      country::{display_name as country_display_name, flag as country_flag},
+      country::{
+         display_name as country_display_name,
+         flag as country_flag,
+      },
       formatters,
    },
    views::renderutils::{
-      gen_img, get_avatar_class, header_alt, icon, link_user, parse_location, person_label,
-      profile_picture_alt, render_bio_html, short_link, verified_icon,
+      gen_img,
+      get_avatar_class,
+      header_alt,
+      icon,
+      link_user,
+      parse_location,
+      person_label,
+      profile_picture_alt,
+      render_bio_html,
+      short_link,
+      verified_icon,
    },
 };
 

@@ -1,6 +1,12 @@
-use maud::{Markup, html};
+use maud::{
+   Markup,
+   html,
+};
 
-use crate::donations::{MonthProgress, format_usd};
+use crate::donations::{
+   MonthProgress,
+   format_usd,
+};
 
 pub fn donate_drive_banner(progress: &MonthProgress) -> Markup {
    html! {
@@ -75,7 +81,8 @@ pub fn render_donate_page(
 
 /// Landing page between the donate form and the provider. The form posts here
 /// and this page navigates on, so CSP `form-action` never sees the provider's
-/// redirect chain (Chromium/Brave block cross-origin form redirects to unlisted hosts).
+/// redirect chain (Chromium/Brave block cross-origin form redirects to unlisted
+/// hosts).
 pub fn render_checkout_handoff(checkout_url: &str) -> Markup {
    html! {
        div class="overlay-panel donate-page" {

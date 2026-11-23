@@ -208,6 +208,42 @@ pub fn identity_for(session_id: i64) -> Identity {
    Identity { engine, os }
 }
 
+/// `navigator.platform` for an OS, as a real browser reports it. The JSD
+/// payload carries this string, so it must match the session's headers.
+#[must_use]
+pub fn navigator_platform(os: Os) -> &'static str {
+   match os {
+      Os::MacOS => "MacIntel",
+      Os::Linux => "Linux x86_64",
+      // Windows (and anything else a desktop session presents as).
+      _ => "Win32",
+   }
+}
+
+/// `sec-ch-ua-platform` for an OS (the quoted low-entropy hint), a fallback for
+/// when a profile does not carry the header.
+#[must_use]
+pub fn sec_ch_ua_platform(os: Os) -> String {
+   match os {
+      Os::MacOS => "\"macOS\"".to_owned(),
+      Os::Linux => "\"Linux\"".to_owned(),
+      _ => "\"Windows\"".to_owned(),
+   }
+}
+
+/// A header value from a session's browser profile (`user-agent`, `sec-ch-ua`,
+/// `sec-ch-ua-platform`), matched case-insensitively. The JSD solver reads
+/// these so the token it mints names the same browser the requests present as.
+#[must_use]
+pub fn profile_header(session_id: i64, name: &str) -> Option<String> {
+   identity_for(session_id)
+      .profile()
+      .headers
+      .iter()
+      .find(|(key, _)| key.eq_ignore_ascii_case(name))
+      .map(|(_, value)| value.clone())
+}
+
 fn pick<T: Copy>(weights: &[(T, u64)], seed: &mut u64) -> T {
    let total: u64 = weights.iter().map(|&(_, weight)| weight).sum();
    *seed = splitmix64(*seed);
@@ -402,7 +438,10 @@ mod tests {
 
    #[test]
    fn fallback_is_second_newest() {
-      assert_eq!(fallback_profile(Engine::Chrome), ProfileVersion::Chrome(157));
+      assert_eq!(
+         fallback_profile(Engine::Chrome),
+         ProfileVersion::Chrome(157)
+      );
       assert_eq!(
          fallback_profile(Engine::Safari),
          ProfileVersion::Safari("26.6")
@@ -425,7 +464,11 @@ mod tests {
       let report = koon_core::verify::verify("chrome157-windows", Some(&url))
          .await
          .expect("verify");
-      assert_eq!(report.outcome, koon_core::verify::Outcome::Match, "{report:?}");
+      assert_eq!(
+         report.outcome,
+         koon_core::verify::Outcome::Match,
+         "{report:?}"
+      );
 
       let client = Client::builder(
          Identity {
@@ -449,7 +492,8 @@ mod tests {
       assert_eq!(api_resp.version, "h3", "expected HTTP/3 to api.x.com");
       client.shutdown().await;
 
-      // Verify cold H2 -> H3 automatic background upgrade without pre-seeding Alt-Svc.
+      // Verify cold H2 -> H3 automatic background upgrade without pre-seeding
+      // Alt-Svc.
       let cold = Client::builder(
          Identity {
             engine: Engine::Chrome,
@@ -473,7 +517,8 @@ mod tests {
       );
       cold.shutdown().await;
 
-      // Verify all 5 engines (Chrome, Edge, Firefox, Safari, Opera) handshake on HTTP/3.
+      // Verify all 5 engines (Chrome, Edge, Firefox, Safari, Opera) handshake on
+      // HTTP/3.
       let proxy_cfg = ProxyConfig {
          host:     parts[0].to_owned(),
          port:     parts[1].parse().expect("port"),
@@ -543,7 +588,8 @@ mod tests {
       );
       assert_eq!(r1.version, "h3");
 
-      // Drop the pooled QUIC connection; TLS ticket + QUIC token + H3 peer settings stay cached.
+      // Drop the pooled QUIC connection; TLS ticket + QUIC token + H3 peer settings
+      // stay cached.
       client.close();
       let t1 = std::time::Instant::now();
       let r2 = client
@@ -562,30 +608,52 @@ mod tests {
          d2
       );
       assert_eq!(r2.version, "h3");
-      assert!(r2.tls_resumed, "expected TLS PSK resumption on second H3 conn");
+      assert!(
+         r2.tls_resumed,
+         "expected TLS PSK resumption on second H3 conn"
+      );
 
       // 2. api.x.com: cold -> pooled -> close -> 0-RTT resumed.
       let tx0 = std::time::Instant::now();
-      let x1 = client.get("https://api.x.com/").await.expect("cold api.x.com");
+      let x1 = client
+         .get("https://api.x.com/")
+         .await
+         .expect("cold api.x.com");
       let dx1 = tx0.elapsed();
       let txp = std::time::Instant::now();
-      let xp = client.get("https://api.x.com/").await.expect("pooled api.x.com");
+      let xp = client
+         .get("https://api.x.com/")
+         .await
+         .expect("pooled api.x.com");
       let dxp = txp.elapsed();
       client.close();
       let tx2 = std::time::Instant::now();
-      let x2 = client.get("https://api.x.com/").await.expect("resumed api.x.com");
+      let x2 = client
+         .get("https://api.x.com/")
+         .await
+         .expect("resumed api.x.com");
       let dx2 = tx2.elapsed();
       eprintln!(
-         "api.x.com: cold={} (resumed={}, {:?}), pooled={} (reused={}, {:?}), resumed={} (resumed={}, {:?})",
-         x1.version, x1.tls_resumed, dx1,
-         xp.version, xp.connection_reused, dxp,
-         x2.version, x2.tls_resumed, dx2,
+         "api.x.com: cold={} (resumed={}, {:?}), pooled={} (reused={}, {:?}), resumed={} \
+          (resumed={}, {:?})",
+         x1.version,
+         x1.tls_resumed,
+         dx1,
+         xp.version,
+         xp.connection_reused,
+         dxp,
+         x2.version,
+         x2.tls_resumed,
+         dx2,
       );
       assert_eq!(x1.version, "h3");
       assert_eq!(xp.version, "h3");
       assert!(xp.connection_reused);
       assert_eq!(x2.version, "h3");
-      assert!(x2.tls_resumed, "expected TLS resumption on resumed api.x.com H3 conn");
+      assert!(
+         x2.tls_resumed,
+         "expected TLS resumption on resumed api.x.com H3 conn"
+      );
       client.shutdown().await;
    }
 }

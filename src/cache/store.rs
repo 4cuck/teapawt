@@ -2,14 +2,24 @@
 
 use std::{
    any::Any,
-   collections::{HashMap, HashSet},
-   sync::{Arc, Mutex, RwLock},
-   time::{Duration, Instant},
+   collections::{
+      HashMap,
+      HashSet,
+   },
+   sync::{
+      Arc,
+      Mutex,
+      RwLock,
+   },
+   time::{
+      Duration,
+      Instant,
+   },
 };
 
 /// Cache entry holding a type-erased value and its expiry.
 struct Entry {
-   value: Arc<dyn Any + Send + Sync>,
+   value:       Arc<dyn Any + Send + Sync>,
    fresh_until: Instant,
    stale_until: Instant,
 }
@@ -23,7 +33,7 @@ pub enum Hit<T> {
 /// Drops the in-flight refresh mark when the refresher finishes or panics.
 pub struct RefreshGuard {
    cache: Cache,
-   key: String,
+   key:   String,
 }
 
 impl Drop for RefreshGuard {
@@ -42,32 +52,32 @@ impl Drop for RefreshGuard {
 /// pages a few seconds old, and the TTL never applied while the site was busy.
 #[derive(Clone)]
 pub struct Cache {
-   inner: Arc<RwLock<HashMap<String, Entry>>>,
-   inflight: Arc<Mutex<HashSet<String>>>,
+   inner:       Arc<RwLock<HashMap<String, Entry>>>,
+   inflight:    Arc<Mutex<HashSet<String>>>,
    max_entries: usize,
    /// Off for the live process. Cloudflare caches the HTML; keeping another
    /// copy here served posts after they were already old and, once the map
    /// was full, every page waited on its lock.
-   enabled: bool,
+   enabled:     bool,
 }
 
 impl Cache {
    pub fn new(max_entries: usize) -> Self {
       Self {
-         inner: Arc::new(RwLock::new(HashMap::new())),
-         inflight: Arc::new(Mutex::new(HashSet::new())),
+         inner:       Arc::new(RwLock::new(HashMap::new())),
+         inflight:    Arc::new(Mutex::new(HashSet::new())),
          max_entries: max_entries.max(16),
-         enabled: true,
+         enabled:     true,
       }
    }
 
    /// No stored pages and no background refresh. Lookups miss.
    pub fn disabled() -> Self {
       Self {
-         inner: Arc::new(RwLock::new(HashMap::new())),
-         inflight: Arc::new(Mutex::new(HashSet::new())),
+         inner:       Arc::new(RwLock::new(HashMap::new())),
+         inflight:    Arc::new(Mutex::new(HashSet::new())),
          max_entries: 0,
-         enabled: false,
+         enabled:     false,
       }
    }
 
@@ -148,9 +158,11 @@ impl Cache {
          return None;
       }
       let inserted = self.inflight.lock().ok()?.insert(key.to_owned());
-      inserted.then(|| RefreshGuard {
-         cache: self.clone(),
-         key: key.to_owned(),
+      inserted.then(|| {
+         RefreshGuard {
+            cache: self.clone(),
+            key:   key.to_owned(),
+         }
       })
    }
 
@@ -262,7 +274,10 @@ mod tests {
       cache.set("p:nasa", &"profile".to_string(), 5 * 60);
       assert_eq!(cache.get::<String>("p:nasa").as_deref(), Some("profile"));
       let ids = cache.keys_with_prefix("uid:").len();
-      assert!(ids < 16, "id mappings were kept and the page was the victim");
+      assert!(
+         ids < 16,
+         "id mappings were kept and the page was the victim"
+      );
    }
 
    #[test]

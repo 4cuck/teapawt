@@ -88,7 +88,10 @@ pub fn user_hint(state: &AppState, username: &str) -> Option<User> {
       if let Some(Hit::Fresh(user) | Hit::Stale(user)) = state.cache.lookup(&key) {
          return Some(user);
       }
-      if let Some(id) = state.cache.get::<String>(&cache_keys::username_id(username)) {
+      if let Some(id) = state
+         .cache
+         .get::<String>(&cache_keys::username_id(username))
+      {
          return Some(User {
             id,
             username: username.to_owned(),

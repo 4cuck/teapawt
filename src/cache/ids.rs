@@ -18,22 +18,36 @@ use std::{
    collections::HashMap,
    env,
    future::poll_fn,
-   hash::{BuildHasher as _, Hasher as _, RandomState},
+   hash::{
+      BuildHasher as _,
+      Hasher as _,
+      RandomState,
+   },
    iter,
    pin::pin,
-   sync::{Arc, OnceLock, RwLock},
-   time::{Duration, Instant},
+   sync::{
+      Arc,
+      OnceLock,
+      RwLock,
+   },
+   time::{
+      Duration,
+      Instant,
+   },
 };
 
 use futures_core::Stream as _;
-use tokio::{sync::mpsc, time::timeout};
+use tokio::{
+   sync::mpsc,
+   time::timeout,
+};
 use tokio_postgres::NoTls;
 
 const DEFAULT_URL: &str = "host=/var/run/postgresql user=teapot dbname=teapot";
 
 const UPSERT: &str = "\
-INSERT INTO user_ids (username, id) VALUES ($1, $2) \
-ON CONFLICT (username) DO UPDATE SET id = EXCLUDED.id";
+INSERT INTO user_ids (username, id) VALUES ($1, $2) ON CONFLICT (username) DO UPDATE SET id = \
+                      EXCLUDED.id";
 
 const SELECT_ONE: &str = "SELECT id FROM user_ids WHERE username = $1";
 
@@ -51,14 +65,16 @@ type Ids = HashMap<u64, Box<str>>;
 
 struct Directory {
    by_name: Vec<RwLock<Names>>,
-   by_id: Vec<RwLock<Ids>>,
+   by_id:   Vec<RwLock<Ids>>,
 }
 
 fn directory() -> &'static Directory {
    static IDS: OnceLock<Directory> = OnceLock::new();
-   IDS.get_or_init(|| Directory {
-      by_name: iter::repeat_with(RwLock::default).take(SHARDS).collect(),
-      by_id: iter::repeat_with(RwLock::default).take(SHARDS).collect(),
+   IDS.get_or_init(|| {
+      Directory {
+         by_name: iter::repeat_with(RwLock::default).take(SHARDS).collect(),
+         by_id:   iter::repeat_with(RwLock::default).take(SHARDS).collect(),
+      }
    })
 }
 
@@ -111,10 +127,13 @@ pub fn username_for(id: &str) -> Option<String> {
 pub async fn from_table(username: &str) -> Option<String> {
    let reader = row_reader().read().ok()?.clone()?;
    let key = username.to_lowercase();
-   let row = timeout(ROW_PATIENCE, reader.client.query_opt(&reader.select, &[&key]))
-      .await
-      .ok()?
-      .ok()??;
+   let row = timeout(
+      ROW_PATIENCE,
+      reader.client.query_opt(&reader.select, &[&key]),
+   )
+   .await
+   .ok()?
+   .ok()??;
    let id = row.try_get::<_, &str>(0).ok()?.parse::<u64>().ok()?;
    file_row(&key, id);
    Some(id.to_string())
@@ -375,7 +394,16 @@ mod tests {
    use std::iter;
 
    use super::{
-      Ids, Names, SHARDS, adopt, file_row, from_table, get, id_shard, name_shard, remember,
+      Ids,
+      Names,
+      SHARDS,
+      adopt,
+      file_row,
+      from_table,
+      get,
+      id_shard,
+      name_shard,
+      remember,
       username_for,
    };
 
@@ -400,7 +428,9 @@ mod tests {
    #[test]
    fn rows_read_from_the_table_do_not_undo_a_name_learned_meanwhile() {
       remember("MovedHandle", "5001");
-      let mut names = iter::repeat_with(Names::new).take(SHARDS).collect::<Vec<_>>();
+      let mut names = iter::repeat_with(Names::new)
+         .take(SHARDS)
+         .collect::<Vec<_>>();
       let mut ids = iter::repeat_with(Ids::new).take(SHARDS).collect::<Vec<_>>();
       for (name, id) in [("movedhandle", 4000_u64), ("tableonly", 4001)] {
          names[name_shard(name)].insert(name.into(), id);

@@ -160,7 +160,8 @@ pub enum Restriction {
    SearchRested        = 10,
    /// A manual probe found the account alive, so a stored verdict was cleared.
    Reinstated          = 11,
-   /// A supposedly valid (verified) search account repeatedly answered with no results.
+   /// A supposedly valid (verified) search account repeatedly answered with no
+   /// results.
    SearchEmptyStreak   = 12,
 }
 
@@ -208,7 +209,8 @@ pub enum SearchAccountOutcome {
    RateLimited,
 }
 
-/// Aggregated upstream `SearchTimeline` outcomes for one account over a time window.
+/// Aggregated upstream `SearchTimeline` outcomes for one account over a time
+/// window.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct SearchAccountSummary {
    pub session_id:          i64,
@@ -435,8 +437,8 @@ impl StatsStore {
              WHERE minute_unix >= $1 AND minute_unix < $2
              GROUP BY session_id
              HAVING COALESCE(SUM(empty), 0) > 0 OR COALESCE(SUM(rate_limited), 0) > 0
-             ORDER BY COALESCE(SUM(empty), 0) DESC, COALESCE(SUM(rate_limited), 0) DESC, session_id \
-             ASC
+             ORDER BY COALESCE(SUM(empty), 0) DESC, COALESCE(SUM(rate_limited), 0) DESC, \
+             session_id ASC
              LIMIT $3",
             &[&start_unix, &end_unix, &limit],
          )
@@ -554,7 +556,7 @@ impl StatsStore {
           FROM unnest($1::bigint[]) AS s(id)
           CROSS JOIN LATERAL (
              SELECT id, session_id, kind, observed_unix, endpoint, http_status, upstream_code, \
-                    evidence
+             evidence
              FROM stats_account_events
              WHERE session_id = s.id
              ORDER BY observed_unix DESC, id DESC
@@ -1083,7 +1085,11 @@ mod tests {
       assert_eq!(summaries[0].last_empty_unix, Some(timestamp));
       assert_eq!(summaries[0].last_non_empty_unix, Some(timestamp + 5));
 
-      let single = store.account_search_summary(1235, 15).await.unwrap().unwrap();
+      let single = store
+         .account_search_summary(1235, 15)
+         .await
+         .unwrap()
+         .unwrap();
       assert_eq!(single, summaries[0]);
       assert_eq!(store.account_search_summary(9999, 15).await.unwrap(), None);
 
@@ -1132,7 +1138,10 @@ mod tests {
       assert_eq!(restricted_bucket_kind(Restriction::Reinstated), None);
       assert_eq!(restricted_bucket_kind(Restriction::RateLimited), None);
       assert_eq!(restricted_bucket_kind(Restriction::SearchEmptyStreak), None);
-      assert_eq!(Restriction::from_i16(12), Some(Restriction::SearchEmptyStreak));
+      assert_eq!(
+         Restriction::from_i16(12),
+         Some(Restriction::SearchEmptyStreak)
+      );
    }
 
    #[test]

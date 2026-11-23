@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{
+   Deserialize,
+   Serialize,
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RateLimit {
-   pub limit: i32,
+   pub limit:     i32,
    pub remaining: i32,
-   pub reset: i64,
+   pub reset:     i64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,69 +24,71 @@ pub enum SessionKind {
 /// Immutable session credentials, loaded once and `Arc`-shared.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionCredentials {
-   pub id: i64,
-   pub username: String,
-   pub kind: SessionKind,
-   pub oauth_token: String,
+   pub id:           i64,
+   pub username:     String,
+   pub kind:         SessionKind,
+   pub oauth_token:  String,
    pub oauth_secret: String,
-   pub auth_token: String,
-   pub ct0: String,
+   pub auth_token:   String,
+   pub ct0:          String,
 }
 
 /// Mutable rate-limit state, stored separately in the pool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionLimits {
-   pub limited: bool,
-   pub limited_at: i64,
-   /// The credentials themselves were refused, which no amount of waiting
-   /// fixes, so this is kept apart from the rate-limit state that expires.
-   #[serde(skip)]
-   pub rejected: bool,
+   pub limited:             bool,
+   pub limited_at:          i64,
+   /// The credentials themselves were refused (HTTP 401 or code 326 lock),
+   /// which no amount of waiting fixes. Persisted so a restart does not put
+   /// locked or dead-token accounts back into rotation; only an explicit
+   /// operator reinstate clears it.
+   #[serde(default)]
+   pub rejected:            bool,
    /// The settings that hide posts are already off for this session: sensitive
    /// media is shown, and search hides neither sensitive posts nor posts from
    /// blocked and muted accounts. A start does not spend the same writes again.
    #[serde(default)]
-   pub filters_cleared: bool,
+   pub filters_cleared:     bool,
    /// X refused the settings write itself, as it does for a suspended account
    /// ("not permitted to access this feature"). Waiting does not fix that, so
    /// the account is not asked again before `filters_retry_at`.
    #[serde(default)]
-   pub filters_failed: bool,
+   pub filters_failed:      bool,
    /// Unix seconds before which the write is not retried. Zero means the next
    /// pass may try. A refusal recorded before this was kept has no time, so it
    /// is retried instead of being trusted: the writer that recorded it minted
    /// transaction ids X refused, and that verdict said nothing about the
    /// account.
    #[serde(default)]
-   pub filters_retry_at: i64,
-   pub apis: HashMap<String, RateLimit>,
+   pub filters_retry_at:    i64,
+   pub apis:                HashMap<String, RateLimit>,
    /// Operations X answers with an empty 404 from this account while another
    /// account gets a result, by operation name, with when that was seen.
    #[serde(default)]
-   pub refused_ops: HashMap<String, i64>,
+   pub refused_ops:         HashMap<String, i64>,
    /// Operations this account has been seen getting results for, by
    /// operation name, with when.
    #[serde(default)]
-   pub verified_ops: HashMap<String, i64>,
+   pub verified_ops:        HashMap<String, i64>,
    /// 429s on profile reads. Two means the account is done viewing profiles.
    #[serde(default)]
-   pub profile_strikes: u32,
+   pub profile_strikes:     u32,
    /// Kept out of profile pages. Search is tracked separately in `refused_ops`.
    #[serde(default)]
-   pub profile_banned: bool,
+   pub profile_banned:      bool,
    /// Most recent ambiguous search 404. It warrants a rest, not a ban.
    #[serde(default)]
-   pub search_404_at: Option<i64>,
+   pub search_404_at:       Option<i64>,
    /// Reserved for search. Set when the account has returned search results,
    /// or when it was imported as a search account. View calls never take it,
    /// so a search suspension cannot spread through profile traffic.
    #[serde(default)]
-   pub search_only: bool,
+   pub search_only:         bool,
    /// X will not serve this account search, and waiting does not change it.
    /// It stays in the pool for profile reads and stops being tried for search.
    #[serde(default)]
-   pub search_banned: bool,
+   pub search_banned:       bool,
    /// This account was reserved for search and has been moved to the view
    /// pool. Remembered so that a verdict later shown to be wrong can be
    /// undone: without it nothing says which pool the account came from.
@@ -94,7 +99,7 @@ pub struct SessionLimits {
    /// and the view pool gets exactly one attempt to show it can still read
    /// profiles.
    #[serde(default)]
-   pub suspended: bool,
+   pub suspended:           bool,
    /// That one view attempt also came back suspended, so this account is done:
    /// no search, no view, no settings write, ever. Persisted, because a restart
    /// that forgot it would put the account straight back into rotation and
@@ -104,7 +109,7 @@ pub struct SessionLimits {
    /// side: the credentials are kept, and re-importing the account is how it
    /// gets another chance.
    #[serde(default)]
-   pub retired: bool,
+   pub retired:             bool,
    /// The `ct0` this account holds is no longer the one X accepts.
    ///
    /// Every call teapot makes is csrf-protected, so an account whose token has
@@ -114,17 +119,17 @@ pub struct SessionLimits {
    /// the tokens were worth. The credentials are kept so the account can be
    /// re-imported with a fresh token later.
    #[serde(default)]
-   pub ct0_dead: bool,
+   pub ct0_dead:            bool,
    /// Calls X refused this account with a bare 429, by endpoint. Kept apart
    /// from `apis`, which holds X's real window.
    #[serde(skip)]
-   pub resting: HashMap<String, Rest>,
+   pub resting:             HashMap<String, Rest>,
 }
 
 /// One endpoint an account sits out after a bare 429.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Rest {
-   pub until: i64,
+   pub until:    i64,
    /// Refusals in a row, each within [`BARE_429_MEMORY_SECS`] of the last rest
    /// ending.
    pub relapses: u32,
@@ -162,7 +167,8 @@ const REFUSED_OP_SECS: i64 = 24 * 60 * 60;
 /// refuses sets one.
 const SEARCH_REFUSED_SECS: i64 = 3 * 60;
 
-/// Keep repeated ambiguous 404s from cycling through the pool every few minutes.
+/// Keep repeated ambiguous 404s from cycling through the pool every few
+/// minutes.
 const SEARCH_404_COOLDOWN_SECS: i64 = 30 * 60;
 
 /// `SearchTimeline` from `ph2fARFabkwfxqmSKQ1OPw/SearchTimeline`, so a mark
@@ -433,9 +439,7 @@ impl SessionLimits {
    pub fn refuse(&mut self, api: &str) {
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
       let name = operation_name(api);
-      self
-         .refused_ops
-         .retain(|_, at| now - *at < REFUSED_OP_SECS);
+      self.refused_ops.retain(|_, at| now - *at < REFUSED_OP_SECS);
       self.refused_ops.insert(name.to_owned(), now);
       self.verified_ops.remove(name);
    }
@@ -532,14 +536,11 @@ impl SessionLimits {
    }
 
    pub fn update_limit(&mut self, api: &str, limit: i32, remaining: i32, reset: i64) {
-      self.apis.insert(
-         api.to_owned(),
-         RateLimit {
-            limit,
-            remaining,
-            reset,
-         },
-      );
+      self.apis.insert(api.to_owned(), RateLimit {
+         limit,
+         remaining,
+         reset,
+      });
    }
 
    /// Record a single API as exhausted for the rest of the window.
@@ -576,25 +577,25 @@ impl SessionLimits {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
-   pub id: i64,
-   pub username: String,
-   pub pending: i32,
-   pub limited: bool,
+   pub id:         i64,
+   pub username:   String,
+   pub pending:    i32,
+   pub limited:    bool,
    pub limited_at: i64,
-   pub apis: HashMap<String, RateLimit>,
-   pub kind: SessionKind,
+   pub apis:       HashMap<String, RateLimit>,
+   pub kind:       SessionKind,
 
    // OAuth credentials
-   pub oauth_token: String,
+   pub oauth_token:  String,
    pub oauth_secret: String,
 
    // Cookie credentials
-   pub auth_token: String,
-   pub ct0: String,
+   pub auth_token:   String,
+   pub ct0:          String,
    /// `"search"` keeps this account out of profile and tweet reads. Absent
    /// means the shared view pool, which is every account already on disk.
    #[serde(default)]
-   pub pool: String,
+   pub pool:         String,
    /// `"search"` when this account was reserved for search and a verdict
    /// moved it to the view pool. Written with the move and removed when the
    /// account goes back, so the move can be undone.
@@ -607,35 +608,35 @@ impl Session {
    pub fn into_credentials_and_limits(self) -> (SessionCredentials, SessionLimits) {
       (
          SessionCredentials {
-            id: self.id,
-            username: self.username,
-            kind: self.kind,
-            oauth_token: self.oauth_token,
+            id:           self.id,
+            username:     self.username,
+            kind:         self.kind,
+            oauth_token:  self.oauth_token,
             oauth_secret: self.oauth_secret,
-            auth_token: self.auth_token,
-            ct0: self.ct0,
+            auth_token:   self.auth_token,
+            ct0:          self.ct0,
          },
          SessionLimits {
-            limited: self.limited,
-            limited_at: self.limited_at,
-            rejected: false,
-            filters_cleared: false,
-            filters_failed: false,
-            filters_retry_at: 0,
-            apis: self.apis,
-            refused_ops: HashMap::new(),
-            verified_ops: HashMap::new(),
-            profile_strikes: 0,
-            profile_banned: false,
-            search_404_at: None,
-            search_only: self.pool.eq_ignore_ascii_case("search"),
-            search_banned: false,
+            limited:             self.limited,
+            limited_at:          self.limited_at,
+            rejected:            false,
+            filters_cleared:     false,
+            filters_failed:      false,
+            filters_retry_at:    0,
+            apis:                self.apis,
+            refused_ops:         HashMap::new(),
+            verified_ops:        HashMap::new(),
+            profile_strikes:     0,
+            profile_banned:      false,
+            search_404_at:       None,
+            search_only:         self.pool.eq_ignore_ascii_case("search"),
+            search_banned:       false,
             demoted_from_search: self.demoted_from.eq_ignore_ascii_case("search")
                && !self.pool.eq_ignore_ascii_case("search"),
-            suspended: false,
-            retired: false,
-            ct0_dead: false,
-            resting: HashMap::new(),
+            suspended:           false,
+            retired:             false,
+            ct0_dead:            false,
+            resting:             HashMap::new(),
          },
       )
    }
@@ -792,7 +793,8 @@ mod tests {
    }
 
    #[test]
-   fn a_verified_call_drops_the_refusal_it_contradicts() {      let mut limits = SessionLimits::default();
+   fn a_verified_call_drops_the_refusal_it_contradicts() {
+      let mut limits = SessionLimits::default();
       limits.refuse("old/SearchTimeline");
       assert!(limits.refuses("new/SearchTimeline"));
 
@@ -858,5 +860,24 @@ mod tests {
          limits.headroom_at(api, "SearchTimeline", now + 120),
          Headroom::Safe(150)
       );
+   }
+
+   #[test]
+   fn rejected_flag_persists_across_serialization() {
+      let limits = SessionLimits {
+         rejected: true,
+         filters_failed: true,
+         filters_retry_at: i64::MAX,
+         ..SessionLimits::default()
+      };
+      let encoded = serde_json::to_string(&limits).unwrap();
+      let decoded: SessionLimits = serde_json::from_str(&encoded).unwrap();
+      assert!(decoded.rejected);
+      assert!(decoded.filters_failed);
+      assert_eq!(decoded.filters_retry_at, i64::MAX);
+
+      // Legacy rows without a `rejected` field still deserialize cleanly.
+      let legacy: SessionLimits = serde_json::from_str(r#"{"limited":false}"#).unwrap();
+      assert!(!legacy.rejected);
    }
 }

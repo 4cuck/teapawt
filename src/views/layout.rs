@@ -1,19 +1,29 @@
 use std::sync::LazyLock;
 
-use maud::{DOCTYPE, Markup, PreEscaped, html};
+use maud::{
+   DOCTYPE,
+   Markup,
+   PreEscaped,
+   html,
+};
 use regex::Regex;
 
-use crate::{config::Config, types::Prefs};
+use crate::{
+   config::Config,
+   types::Prefs,
+};
 
 pub const STYLE_CSS: &str = "/css/style.css?teapawt11";
 pub const CLEAN_CSS: &str = "/css/clean.css?teapawt47";
 pub const FONTELLO_CSS: &str = "/css/fontello.css";
 
-pub(super) fn theme_stylesheet(theme: &str) -> Option<String> {
+pub(crate) fn theme_stylesheet(theme: &str) -> Option<String> {
    let name = theme.to_lowercase().replace(' ', "_");
    if name.is_empty()
       || name == "teapot"
-      || !name.bytes().all(|byte| byte.is_ascii_lowercase() || matches!(byte, b'_' | b'(' | b')'))
+      || !name
+         .bytes()
+         .all(|byte| byte.is_ascii_lowercase() || matches!(byte, b'_' | b'(' | b')'))
    {
       return None;
    }
@@ -26,19 +36,19 @@ pub(super) fn theme_stylesheet(theme: &str) -> Option<String> {
    reason = "PageLayout is the canonical name"
 )]
 pub struct PageLayout<'a> {
-   config: &'a Config,
-   title: &'a str,
-   body: Markup,
+   config:      &'a Config,
+   title:       &'a str,
+   body:        Markup,
    description: &'a str,
-   prefs: Option<&'a Prefs>,
-   rss: &'a str,
-   canonical: &'a str,
-   referer: &'a str,
-   og_image: &'a str,
-   og_type: &'a str,
+   prefs:       Option<&'a Prefs>,
+   rss:         &'a str,
+   canonical:   &'a str,
+   referer:     &'a str,
+   og_image:    &'a str,
+   og_type:     &'a str,
    theme_color: &'a str,
-   head_extra: Option<&'a Markup>,
-   custom_og: bool,
+   head_extra:  Option<&'a Markup>,
+   custom_og:   bool,
 }
 
 impl<'a> PageLayout<'a> {
@@ -351,17 +361,13 @@ pub fn render_navbar_full(config: &Config, rss: &str, canonical: &str, referer: 
 
 /// Render error page.
 pub fn render_error(config: &Config, title: &str, message: &str) -> Markup {
-   PageLayout::new(
-      config,
-      title,
-      html! {
-          div class="panel-container" {
-              div class="error-panel" {
-                  span { (message) }
-              }
-          }
-      },
-   )
+   PageLayout::new(config, title, html! {
+       div class="panel-container" {
+           div class="error-panel" {
+               span { (message) }
+           }
+       }
+   })
    .description(message)
    .render()
 }

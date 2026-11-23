@@ -1,9 +1,17 @@
-use std::{fs, net::IpAddr, path::Path, process::Command};
+use std::{
+   fs,
+   net::IpAddr,
+   path::Path,
+   process::Command,
+};
 
 use serde::Deserialize;
 
 use crate::{
-   error::{Error, Result},
+   error::{
+      Error,
+      Result,
+   },
    types::Prefs,
 };
 
@@ -19,11 +27,11 @@ pub enum GifTranscodingMode {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GifTranscodingConfig {
    #[serde(default)]
-   pub mode: GifTranscodingMode,
+   pub mode:            GifTranscodingMode,
    #[serde(default = "default_gif_cache_dir", rename = "cacheDir")]
-   pub cache_dir: String,
+   pub cache_dir:       String,
    #[serde(default = "default_gif_cache_max_mb", rename = "cacheMaxMb")]
-   pub cache_max_mb: u64,
+   pub cache_max_mb:    u64,
    #[serde(default, rename = "externalDomain")]
    pub external_domain: String,
 }
@@ -31,9 +39,9 @@ pub struct GifTranscodingConfig {
 impl Default for GifTranscodingConfig {
    fn default() -> Self {
       Self {
-         mode: GifTranscodingMode::Local,
-         cache_dir: default_gif_cache_dir(),
-         cache_max_mb: default_gif_cache_max_mb(),
+         mode:            GifTranscodingMode::Local,
+         cache_dir:       default_gif_cache_dir(),
+         cache_max_mb:    default_gif_cache_max_mb(),
          external_domain: String::new(),
       }
    }
@@ -56,53 +64,53 @@ const fn default_gif_cache_max_mb() -> u64 {
    reason = "config field in Config mirrors TOML structure"
 )]
 pub struct Config {
-   pub server: ServerConfig,
-   pub cache: CacheConfig,
-   pub config: AppConfig,
+   pub server:          ServerConfig,
+   pub cache:           CacheConfig,
+   pub config:          AppConfig,
    #[serde(default)]
-   pub preferences: PreferencesConfig,
+   pub preferences:     PreferencesConfig,
    #[serde(default, rename = "gifTranscoding")]
    pub gif_transcoding: GifTranscodingConfig,
    #[serde(default)]
-   pub donations: DonationsConfig,
+   pub donations:       DonationsConfig,
    /// Search checkbox. Empty keys leave search open.
    #[serde(default)]
-   pub turnstile: TurnstileConfig,
+   pub turnstile:       TurnstileConfig,
    /// Paid pass that skips the checkbox. Paid through the donation providers.
    #[serde(default)]
-   pub pass: PassConfig,
+   pub pass:            PassConfig,
    /// Turnstile in front of floods that drain the account pool.
    #[serde(default, rename = "antiDdos", alias = "scrape")]
-   pub anti_ddos: AntiDdosConfig,
+   pub anti_ddos:       AntiDdosConfig,
    /// Where people reach the operator. Shown on `/contact`.
    #[serde(default)]
-   pub contact: ContactConfig,
+   pub contact:         ContactConfig,
    /// Precomputed `{scheme}://{hostname}` value set in `Config::load`.
    #[serde(skip)]
-   pub url_prefix: String,
+   pub url_prefix:      String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
    #[serde(default = "default_hostname")]
-   pub hostname: String,
+   pub hostname:             String,
    #[serde(default = "default_title")]
-   pub title: String,
+   pub title:                String,
    #[serde(default = "default_address")]
-   pub address: String,
+   pub address:              String,
    #[serde(default = "default_port")]
-   pub port: u16,
+   pub port:                 u16,
    #[serde(default, rename = "publicPort")]
-   pub public_port: Option<u16>,
+   pub public_port:          Option<u16>,
    #[serde(default)]
-   pub https: bool,
+   pub https:                bool,
    #[serde(
       default = "default_http_max_connections",
       rename = "httpMaxConnections"
    )]
    pub http_max_connections: u32,
    #[serde(default = "default_static_dir", rename = "staticDir")]
-   pub static_dir: String,
+   pub static_dir:           String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,9 +118,9 @@ pub struct CacheConfig {
    #[serde(default = "default_list_minutes", rename = "listMinutes")]
    pub list_minutes: u64,
    #[serde(default = "default_rss_minutes", rename = "rssMinutes")]
-   pub rss_minutes: u64,
+   pub rss_minutes:  u64,
    #[serde(default = "default_max_entries", rename = "maxEntries")]
-   pub max_entries: usize,
+   pub max_entries:  usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -122,88 +130,94 @@ pub struct CacheConfig {
 )]
 pub struct AppConfig {
    #[serde(rename = "hmacKey")]
-   pub hmac_key: String,
+   pub hmac_key:                String,
    /// IndexNow ownership key. Served at `/{key}.txt` when it is 8–128 hex
    /// characters. Empty disables the file. Keep the real value in the
    /// gitignored config, not the public repo.
    #[serde(default, rename = "indexNowKey")]
-   pub indexnow_key: String,
+   pub indexnow_key:            String,
    #[serde(default, rename = "base64Media")]
-   pub base64_media: bool,
+   pub base64_media:            bool,
    #[serde(default = "default_true", rename = "enableRSS")]
-   pub enable_rss: bool,
+   pub enable_rss:              bool,
    #[serde(default = "default_client_budget", rename = "clientBudget")]
-   pub client_budget: bool,
+   pub client_budget:           bool,
    #[serde(default, rename = "trustedProxies")]
-   pub trusted_proxies: Vec<String>,
+   pub trusted_proxies:         Vec<String>,
    #[serde(default, rename = "rateLimitedMessage")]
-   pub rate_limited_message: Vec<String>,
+   pub rate_limited_message:    Vec<String>,
    #[serde(default, rename = "clientBudgetMessage")]
-   pub client_budget_message: Vec<String>,
+   pub client_budget_message:   Vec<String>,
    #[serde(default, rename = "internalErrorMessage")]
-   pub internal_error_message: Vec<String>,
+   pub internal_error_message:  Vec<String>,
    #[serde(default, rename = "enableDebug")]
-   pub enable_debug: bool,
+   pub enable_debug:            bool,
    #[serde(default, rename = "debugToken")]
-   pub debug_token: String,
+   pub debug_token:             String,
    #[serde(default)]
-   pub proxy: String,
+   pub proxy:                   String,
    #[serde(default, rename = "proxyAuth")]
-   pub proxy_auth: String,
+   pub proxy_auth:              String,
    #[serde(default, rename = "apiProxy")]
-   pub api_proxy: String,
+   pub api_proxy:               String,
    /// `host:port:user:pass` SOCKS5 list used for X API calls.
    #[serde(default, rename = "socksProxiesFile")]
-   pub socks_proxies_file: String,
+   pub socks_proxies_file:      String,
    /// Exits used in turn, one per request, only after the direct address
    /// gets an HTML 429. Lines are `http://user:pass@host:port`,
    /// `socks5h://user:pass@host:port`, or `host:port:user:pass` (HTTP).
    #[serde(default, rename = "fallbackProxiesFile")]
-   pub fallback_proxies_file: String,
+   pub fallback_proxies_file:   String,
    /// session id → SOCKS5 port pins so each account keeps the same exit IP.
    #[serde(default, rename = "sessionProxiesFile")]
-   pub session_proxies_file: String,
+   pub session_proxies_file:    String,
    #[serde(default, rename = "disableTid")]
-   pub disable_tid: bool,
+   pub disable_tid:             bool,
+   /// Solve Cloudflare's JSD challenge and attach the resulting `cf_clearance`
+   /// cookie to search calls. One solve failure (the challenge changing) trips
+   /// a circuit breaker that disables the whole flow until restart; search then
+   /// continues without the cookie. Shown on the admin dashboard.
+   #[serde(default = "default_true", rename = "searchClearance")]
+   pub search_clearance:        bool,
    /// Read about-account data from X-Posed's public cache before asking X.
    #[serde(default, rename = "xPosedCommunityCache")]
    pub x_posed_community_cache: bool,
    #[serde(default = "default_max_concurrent_reqs", rename = "maxConcurrentReqs")]
-   pub max_concurrent_reqs: u32,
+   pub max_concurrent_reqs:     u32,
    #[serde(default = "default_paid_emoji", rename = "paidEmoji")]
-   pub paid_emoji: String,
+   pub paid_emoji:              String,
    #[serde(default = "default_ai_emoji", rename = "aiEmoji")]
-   pub ai_emoji: String,
+   pub ai_emoji:                String,
    /// Kagi session token for server-side translation (inline value).
    #[serde(default, rename = "kagiToken")]
-   pub kagi_token: String,
+   pub kagi_token:              String,
    /// Path to a file containing the Kagi session token.
    #[serde(default, rename = "kagiTokenFile")]
-   pub kagi_token_file: String,
+   pub kagi_token_file:         String,
 }
 
 #[derive(Clone, Deserialize, Default)]
 pub struct DonationsConfig {
    #[serde(default = "default_goal_cents", rename = "goalCents")]
-   pub goal_cents: i64,
+   pub goal_cents:    i64,
    /// Kept so older config files still load. The public counter is monthly and
    /// ignores this date.
    #[serde(default = "default_goal_deadline", rename = "goalDeadline")]
    pub goal_deadline: String,
    #[serde(default = "default_ledger_file", rename = "ledgerFile")]
-   pub ledger_file: String,
+   pub ledger_file:   String,
    #[serde(default)]
-   pub stripe: StripeDonationConfig,
+   pub stripe:        StripeDonationConfig,
    #[serde(default)]
-   pub nowpayments: NowPaymentsDonationConfig,
+   pub nowpayments:   NowPaymentsDonationConfig,
    #[serde(default)]
-   pub lzt: LztDonationConfig,
+   pub lzt:           LztDonationConfig,
 }
 
 #[derive(Clone, Deserialize, Default)]
 pub struct TurnstileConfig {
    #[serde(default, rename = "siteKey")]
-   pub site_key: String,
+   pub site_key:   String,
    #[serde(default, rename = "secretKey")]
    pub secret_key: String,
 }
@@ -251,41 +265,41 @@ const fn default_pass_cents() -> i64 {
 #[derive(Clone, Debug, Deserialize)]
 pub struct AntiDdosConfig {
    #[serde(default = "default_true")]
-   pub enabled:             bool,
+   pub enabled:            bool,
    /// Networks challenged on every page, from the `asn-num` header.
    #[serde(default = "default_blocked_asns", rename = "blockedAsns")]
-   pub blocked_asns:        Vec<u32>,
+   pub blocked_asns:       Vec<u32>,
    /// Countries challenged while their page rate is above
    /// `surgePerMinute`, from `cf-ipcountry`.
    #[serde(default = "default_watched_countries", rename = "watchedCountries")]
-   pub watched_countries:   Vec<String>,
+   pub watched_countries:  Vec<String>,
    #[serde(default = "default_surge_per_minute", rename = "surgePerMinute")]
-   pub surge_per_minute:    u32,
+   pub surge_per_minute:   u32,
    /// How long one solved check lets a visitor's address through.
    #[serde(default = "default_gate_pass_minutes", rename = "passMinutes")]
-   pub pass_minutes:        i64,
+   pub pass_minutes:       i64,
    /// Challenge every visitor while the pool is being drained. Raised and
    /// lifted by `pressure`, not by hand.
    #[serde(default = "default_true")]
-   pub automatic:           bool,
+   pub automatic:          bool,
    /// Fallback share, in percent, that counts as a flood.
    #[serde(default = "default_flood_percent", rename = "floodPercent")]
-   pub flood_percent:       u32,
+   pub flood_percent:      u32,
    /// Sustained fallback share, in percent, that counts as a flood once held
    /// for `sustainedMinutes` (`0` disables it).
    #[serde(default = "default_sustained_percent", rename = "sustainedPercent")]
-   pub sustained_percent:   u32,
+   pub sustained_percent:  u32,
    /// Consecutive minutes at or above `sustainedPercent` before raising the
    /// gate.
    #[serde(default = "default_sustained_minutes", rename = "sustainedMinutes")]
-   pub sustained_minutes:   u32,
+   pub sustained_minutes:  u32,
    /// How long the verdict outlives the last minute above `floodPercent`.
    #[serde(default = "default_flood_hold_minutes", rename = "floodHoldMinutes")]
-   pub flood_hold_minutes:  i64,
+   pub flood_hold_minutes: i64,
    /// Every visitor is checked, wherever they come from, until the operator
    /// turns it off.
    #[serde(default)]
-   pub everyone:            bool,
+   pub everyone:           bool,
 }
 
 impl AntiDdosConfig {
@@ -402,7 +416,7 @@ impl std::fmt::Debug for DonationsConfig {
 #[derive(Clone, Deserialize, Default)]
 pub struct StripeDonationConfig {
    #[serde(default, rename = "secretKey")]
-   pub secret_key: String,
+   pub secret_key:     String,
    #[serde(default, rename = "webhookSecret")]
    pub webhook_secret: String,
 }
@@ -425,7 +439,7 @@ impl std::fmt::Debug for StripeDonationConfig {
 #[derive(Clone, Deserialize, Default)]
 pub struct NowPaymentsDonationConfig {
    #[serde(default, rename = "apiKey")]
-   pub api_key: String,
+   pub api_key:    String,
    #[serde(default, rename = "ipnSecret")]
    pub ipn_secret: String,
 }
@@ -451,20 +465,20 @@ pub struct LztDonationConfig {
    #[serde(default, rename = "accessToken")]
    pub access_token: String,
    #[serde(default, rename = "merchantId")]
-   pub merchant_id: u64,
+   pub merchant_id:  u64,
    #[serde(default, rename = "secretKey")]
-   pub secret_key: String,
+   pub secret_key:   String,
    #[serde(default = "default_lzt_currency")]
-   pub currency: String,
+   pub currency:     String,
 }
 
 impl Default for LztDonationConfig {
    fn default() -> Self {
       Self {
          access_token: String::new(),
-         merchant_id: 0,
-         secret_key: String::new(),
-         currency: default_lzt_currency(),
+         merchant_id:  0,
+         secret_key:   String::new(),
+         currency:     default_lzt_currency(),
       }
    }
 }
@@ -542,13 +556,13 @@ fn apply_donation_env(donations: &mut DonationsConfig) {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct PreferencesConfig {
    #[serde(default = "default_theme")]
-   pub theme: String,
+   pub theme:           String,
    #[serde(default, rename = "replaceTwitter")]
    pub replace_twitter: String,
    #[serde(default, rename = "replaceYouTube")]
    pub replace_youtube: String,
    #[serde(default, rename = "replaceReddit")]
-   pub replace_reddit: String,
+   pub replace_reddit:  String,
    #[serde(default, rename = "infiniteScroll")]
    pub infinite_scroll: bool,
    /// Reply order on a post's page for a visitor who has not picked one:
@@ -556,7 +570,7 @@ pub struct PreferencesConfig {
    /// ranking, which X takes about half as long again over as the other two.
    /// Set to `likes`, thread feeds are asked for in that order as well.
    #[serde(default, rename = "replySort")]
-   pub reply_sort: String,
+   pub reply_sort:      String,
 }
 
 // Default value functions

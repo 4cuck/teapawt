@@ -7,22 +7,27 @@
 //! `>` are escaped anyway because `note_tweet` text and bios are not
 //! guaranteed to arrive escaped.
 
-use std::{borrow::Cow, fmt::Write as _, sync::LazyLock};
+use std::{
+   borrow::Cow,
+   fmt::Write as _,
+   sync::LazyLock,
+};
 
 use regex::Regex;
 
-use crate::types::{Entity, EntityKind};
+use crate::types::{
+   Entity,
+   EntityKind,
+};
 
 static MENTION_RE: LazyLock<Regex> =
    LazyLock::new(|| Regex::new("(^|[^A-Za-z0-9_])@([A-Za-z0-9_]{1,15})").unwrap());
-static HASHTAG_RE: LazyLock<Regex> =
-   LazyLock::new(|| Regex::new(r"(^|[^\w&;])(#)(\w+)").unwrap());
+static HASHTAG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|[^\w&;])(#)(\w+)").unwrap());
 /// A cashtag is `$` plus a ticker (`$TSLA`, `$BRK.B`), never a dollar amount.
 /// The regex crate has no lookahead, so a following digit or letter is rejected
 /// in `link_cashtags` (`$AAPL123` and `$ABCDEFG` stay plain text).
-static CASHTAG_RE: LazyLock<Regex> = LazyLock::new(|| {
-   Regex::new(r"(?i)(^|[^\w&;])(\$)([a-z]{1,6}(?:[._][a-z]{1,2})?)").unwrap()
-});
+static CASHTAG_RE: LazyLock<Regex> =
+   LazyLock::new(|| Regex::new(r"(?i)(^|[^\w&;])(\$)([a-z]{1,6}(?:[._][a-z]{1,2})?)").unwrap());
 static CASHTAG_BODY_RE: LazyLock<Regex> =
    LazyLock::new(|| Regex::new(r"(?i)^[a-z]{1,6}(?:[._][a-z]{1,2})?$").unwrap());
 
@@ -278,8 +283,8 @@ mod tests {
    fn expands_mention() {
       let entities = vec![Entity {
          indices: (0, 5),
-         kind: EntityKind::Mention,
-         url: "/test".to_owned(),
+         kind:    EntityKind::Mention,
+         url:     "/test".to_owned(),
          display: "Test User".to_owned(),
       }];
       let result = expand_entities("@test hello", &entities);
@@ -291,8 +296,8 @@ mod tests {
    fn expands_hashtag() {
       let entities = vec![Entity {
          indices: (0, 5),
-         kind: EntityKind::Hashtag,
-         url: String::new(),
+         kind:    EntityKind::Hashtag,
+         url:     String::new(),
          display: String::new(),
       }];
       let result = expand_entities("#rust is great", &entities);

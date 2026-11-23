@@ -276,7 +276,9 @@ async fn open_remote(target: &TargetAddr, port: u16, exit: &ExitEntry) -> io::Re
 
    let addr = match target {
       TargetAddr::V4(octets) => SocketAddr::new(IpAddr::V4(Ipv4Addr::from(*octets)), port),
-      TargetAddr::V6(octets) => SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::from(*octets)), port),
+      TargetAddr::V6(octets) => {
+         SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::from(*octets)), port)
+      },
       TargetAddr::Domain(host) => {
          let want_v4 = exit.bind_ip.is_ipv4();
          let addrs = timeout(CONNECT_TIMEOUT, lookup_host((host.as_str(), port)))
@@ -436,7 +438,10 @@ async fn resolve_direct_udp(
 
 /// Establish an upstream SOCKS5 `UDP ASSOCIATE` session through `via_addr`
 /// (e.g. Mullvad's in-tunnel SOCKS5 at `10.64.0.1:1080`), bound to `bind_ip`.
-async fn open_via_udp(bind_ip: IpAddr, via_addr: SocketAddr) -> io::Result<(TcpStream, SocketAddr)> {
+async fn open_via_udp(
+   bind_ip: IpAddr,
+   via_addr: SocketAddr,
+) -> io::Result<(TcpStream, SocketAddr)> {
    let mut remote = connect_bound(bind_ip, via_addr).await?;
    remote.write_all(&[5, 1, 0]).await?;
    let mut reply = [0_u8; 2];
@@ -507,7 +512,9 @@ async fn open_via_udp(bind_ip: IpAddr, via_addr: SocketAddr) -> io::Result<(TcpS
          addrs
             .into_iter()
             .find(|candidate| candidate.is_ipv4() == want_v4)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "no matching relay IP"))?
+            .ok_or_else(|| {
+               io::Error::new(io::ErrorKind::AddrNotAvailable, "no matching relay IP")
+            })?
       },
       _ => {
          abort_socket(remote);
@@ -958,9 +965,8 @@ mod tests {
    #[test]
    fn parses_direct_and_via_entries() {
       let sample = "\
-         # comment\n\
-         1081 alice secret1 10.137.253.125\n\
-         1086 bob secret2 10.137.253.125 via # trailing\n";
+         # comment\n1081 alice secret1 10.137.253.125\n1086 bob secret2 10.137.253.125 via # \
+                    trailing\n";
       let exits = parse_map(sample).unwrap();
       assert_eq!(exits.len(), 2);
       assert_eq!(exits[0].port, 1081);
@@ -1102,7 +1108,10 @@ mod tests {
       let quic_payload = vec![0xAB_u8; 1250];
       let mut pkt = vec![0_u8; 10 + quic_payload.len()];
       let pkt_len = encode_udp_datagram(echo_addr, &quic_payload, &mut pkt).unwrap();
-      client_udp.send_to(&pkt[..pkt_len], relay_addr).await.unwrap();
+      client_udp
+         .send_to(&pkt[..pkt_len], relay_addr)
+         .await
+         .unwrap();
 
       let mut recv_buf = vec![0_u8; 4096];
       let (n, from) = timeout(Duration::from_secs(2), client_udp.recv_from(&mut recv_buf))
@@ -1223,7 +1232,10 @@ mod tests {
       let quic_payload = vec![0xCD_u8; 1250];
       let mut pkt = vec![0_u8; 10 + quic_payload.len()];
       let pkt_len = encode_udp_datagram(echo_addr, &quic_payload, &mut pkt).unwrap();
-      client_udp.send_to(&pkt[..pkt_len], relay_addr).await.unwrap();
+      client_udp
+         .send_to(&pkt[..pkt_len], relay_addr)
+         .await
+         .unwrap();
 
       let mut recv_buf = vec![0_u8; 4096];
       let (n, _) = timeout(Duration::from_secs(2), client_udp.recv_from(&mut recv_buf))

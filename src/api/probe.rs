@@ -223,7 +223,9 @@ impl ApiClient {
          _ if status.as_u16() == 401 => {
             Ok(ProbeReport {
                verdict: ProbeVerdict::CredentialsRejected,
-               detail: Some(format!("HTTP {status} — unauthorized (auth_token rejected)")),
+               detail: Some(format!(
+                  "HTTP {status} — unauthorized (auth_token rejected)"
+               )),
                verified_search: false,
                fresh_ct0,
             })
@@ -283,8 +285,8 @@ impl ApiClient {
                Ok(ProbeReport {
                   verdict:         ProbeVerdict::CsrfRejected,
                   detail:          Some(
-                     "SearchTimeline returned code 353 and X issued a replacement ct0 (saved; \
-                      run probe again to verify)"
+                     "SearchTimeline returned code 353 and X issued a replacement ct0 (saved; run \
+                      probe again to verify)"
                         .to_owned(),
                   ),
                   verified_search: false,

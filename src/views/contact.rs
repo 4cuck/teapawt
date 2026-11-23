@@ -1,7 +1,10 @@
 //! The contact page: how to reach the operator, and how a past donation
 //! becomes a search pass.
 
-use maud::{Markup, html};
+use maud::{
+   Markup,
+   html,
+};
 
 use crate::config::ContactConfig;
 

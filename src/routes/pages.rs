@@ -255,28 +255,18 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
    let gate_active_globally = gate.enabled
       && state.config.turnstile.configured()
       && (gate.gates_everyone() || flood_share.is_some());
-   // A global Anti-DDoS check already covers search.
-   let search_note = (state.config.turnstile.configured() && !gate_active_globally)
-      .then(|| search_turnstile_warning(progress.goal_cents));
    let gate_note = gate_active_globally.then(|| {
       let check_minutes = (!super::anti_ddos::cleared(&state, &jar) && gate.pass_minutes > 0)
          .then_some(gate.pass_minutes);
       crate::views::anti_ddos::gate_notice(check_minutes)
    });
-   let notice = if drive.is_none()
-      && firefox_note.is_none()
-      && search_note.is_none()
-      && gate_note.is_none()
-   {
-      None
-   } else {
-      Some(html! {
-          @if let Some(gate_note) = gate_note { (gate_note) }
-          @if let Some(search_note) = search_note { (search_note) }
-          @if let Some(drive) = drive { (drive) }
-          @if let Some(firefox_note) = firefox_note { (firefox_note) }
-      })
-   };
+   let fingerprint_note = Some(fingerprint_announcement());
+   let notice = Some(html! {
+       @if let Some(gate_note) = gate_note { (gate_note) }
+       @if let Some(fingerprint_note) = fingerprint_note { (fingerprint_note) }
+       @if let Some(drive) = drive { (drive) }
+       @if let Some(firefox_note) = firefox_note { (firefox_note) }
+   });
    let content = search_view::render_search_page(notice, Some(below));
    let title = format!("{host} — Nitter replacement");
    let description = home_description(&host);
@@ -301,27 +291,14 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
    response
 }
 
-fn format_goal_usd(goal_cents: i64) -> Option<String> {
-   (goal_cents > 0).then(|| {
-      if goal_cents % 100 == 0 {
-         format!("${}", goal_cents / 100)
-      } else {
-         format!("${}.{:02}", goal_cents / 100, goal_cents % 100)
-      }
-   })
-}
-
-fn search_turnstile_warning(goal_cents: i64) -> maud::Markup {
+fn fingerprint_announcement() -> maud::Markup {
    html! {
        aside class="home-announce" {
            p {
-               "Search still asks for a Cloudflare Turnstile checkbox that lasts five minutes while the pool is this size. "
-               "An automatic system that creates thousands of accounts a day replaces it for good once X's whole anti-bot system is worked out. "
-               @if let Some(goal) = format_goal_usd(goal_cents) {
-                   "This month's goal is " (goal) ". "
-               }
-               a href="/donate" { "Donations" }
-               " pay for the search accounts and their proxies, keep the site online, and turn the Turnstile off."
+               "Cloudflare Turnstile will remain on until we make more accounts. "
+               "Want to help debug Castle so we can get account creation working? Voluntarily "
+               a href="/admin/fingerprint" { "submit a browser fingerprint" }
+               " — nothing runs until you click submit."
            }
        }
    }
@@ -489,12 +466,9 @@ mod tests {
    }
 
    #[test]
-   fn search_warning_formats_dynamic_goal_and_handles_zero() {
-      let whole = search_turnstile_warning(60_000).into_string();
-      assert!(whole.contains("This month's goal is $600."));
-      let fractional = search_turnstile_warning(45_005).into_string();
-      assert!(fractional.contains("This month's goal is $450.05."));
-      let unset = search_turnstile_warning(0).into_string();
-      assert!(!unset.contains("This month's goal is"));
+   fn front_page_notice_links_to_fingerprint_capture() {
+      let html = fingerprint_announcement().into_string();
+      assert!(html.contains("Cloudflare Turnstile will remain on until we make more accounts."));
+      assert!(html.contains("href=\"/admin/fingerprint\""));
    }
 }

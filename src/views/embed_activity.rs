@@ -1,11 +1,17 @@
 use std::{
-   fmt::{self, Display, Formatter},
+   fmt::{
+      self,
+      Display,
+      Formatter,
+   },
    str::FromStr,
 };
 
 use super::*;
-
-use crate::{error::Error, types::Translation};
+use crate::{
+   error::Error,
+   types::Translation,
+};
 
 /// The status id Discord echoes back from the activity link. A `/photo/N`
 /// link prefixes N to the tweet id zero-padded to 19 digits, a length no real
@@ -66,56 +72,56 @@ impl FromStr for ActivityId {
 /// for rich text rendering (blockquotes for quoted tweets).
 #[derive(Debug, Serialize)]
 pub struct ActivityPubNote {
-   pub id: String,
-   pub url: String,
-   pub uri: String,
-   pub created_at: String,
-   pub edited_at: Option<String>,
-   pub reblog: Option<()>,
-   pub in_reply_to_id: Option<String>,
+   pub id:                     String,
+   pub url:                    String,
+   pub uri:                    String,
+   pub created_at:             String,
+   pub edited_at:              Option<String>,
+   pub reblog:                 Option<()>,
+   pub in_reply_to_id:         Option<String>,
    pub in_reply_to_account_id: Option<String>,
-   pub language: String,
-   pub content: String,
-   pub spoiler_text: String,
-   pub sensitive: bool,
-   pub visibility: String,
-   pub application: MastodonApplication,
-   pub media_attachments: Vec<MediaAttachment>,
-   pub account: MastodonAccount,
-   pub mentions: Vec<()>,
-   pub tags: Vec<()>,
-   pub emojis: Vec<()>,
-   pub card: Option<MastodonPreviewCard>,
-   pub poll: Option<()>,
+   pub language:               String,
+   pub content:                String,
+   pub spoiler_text:           String,
+   pub sensitive:              bool,
+   pub visibility:             String,
+   pub application:            MastodonApplication,
+   pub media_attachments:      Vec<MediaAttachment>,
+   pub account:                MastodonAccount,
+   pub mentions:               Vec<()>,
+   pub tags:                   Vec<()>,
+   pub emojis:                 Vec<()>,
+   pub card:                   Option<MastodonPreviewCard>,
+   pub poll:                   Option<()>,
    /// Plain translated text for clients that should show the translation
    /// instead of the "Original text" block in `content`. Discord ignores it.
    #[serde(skip_serializing_if = "Option::is_none")]
-   pub translation: Option<Translation>,
+   pub translation:            Option<Translation>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct MastodonPreviewCard {
-   pub url: String,
-   pub title: String,
-   pub description: String,
+   pub url:           String,
+   pub title:         String,
+   pub description:   String,
    #[serde(rename = "type")]
-   pub type_: String,
-   pub authors: Vec<()>,
-   pub author_name: String,
-   pub author_url: String,
+   pub type_:         String,
+   pub authors:       Vec<()>,
+   pub author_name:   String,
+   pub author_url:    String,
    pub provider_name: String,
-   pub provider_url: String,
-   pub html: String,
-   pub width: i32,
-   pub height: i32,
-   pub image: Option<String>,
-   pub embed_url: String,
-   pub blurhash: Option<String>,
+   pub provider_url:  String,
+   pub html:          String,
+   pub width:         i32,
+   pub height:        i32,
+   pub image:         Option<String>,
+   pub embed_url:     String,
+   pub blurhash:      Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct MastodonApplication {
-   pub name: String,
+   pub name:    String,
    pub website: Option<String>,
 }
 
@@ -125,46 +131,46 @@ pub struct MastodonApplication {
    reason = "mirrors the Mastodon API account schema Discord expects"
 )]
 pub struct MastodonAccount {
-   pub id: String,
-   pub display_name: String,
-   pub username: String,
-   pub acct: String,
-   pub url: String,
-   pub uri: String,
-   pub created_at: String,
-   pub locked: bool,
-   pub bot: bool,
-   pub discoverable: bool,
-   pub indexable: bool,
-   pub group: bool,
-   pub avatar: String,
-   pub avatar_static: String,
+   pub id:               String,
+   pub display_name:     String,
+   pub username:         String,
+   pub acct:             String,
+   pub url:              String,
+   pub uri:              String,
+   pub created_at:       String,
+   pub locked:           bool,
+   pub bot:              bool,
+   pub discoverable:     bool,
+   pub indexable:        bool,
+   pub group:            bool,
+   pub avatar:           String,
+   pub avatar_static:    String,
    #[serde(skip_serializing_if = "Option::is_none")]
-   pub header: Option<String>,
+   pub header:           Option<String>,
    #[serde(skip_serializing_if = "Option::is_none")]
-   pub header_static: Option<String>,
-   pub followers_count: i64,
-   pub following_count: i64,
-   pub statuses_count: i64,
+   pub header_static:    Option<String>,
+   pub followers_count:  i64,
+   pub following_count:  i64,
+   pub statuses_count:   i64,
    pub hide_collections: bool,
-   pub noindex: bool,
-   pub emojis: Vec<()>,
-   pub roles: Vec<()>,
-   pub fields: Vec<()>,
+   pub noindex:          bool,
+   pub emojis:           Vec<()>,
+   pub roles:            Vec<()>,
+   pub fields:           Vec<()>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct MediaAttachment {
-   pub id: String,
+   pub id:                 String,
    #[serde(rename = "type")]
-   pub type_: String,
-   pub url: String,
-   pub preview_url: Option<String>,
-   pub remote_url: Option<String>,
+   pub type_:              String,
+   pub url:                String,
+   pub preview_url:        Option<String>,
+   pub remote_url:         Option<String>,
    pub preview_remote_url: Option<String>,
-   pub text_url: Option<String>,
-   pub description: Option<String>,
-   pub meta: Option<MediaMeta>,
+   pub text_url:           Option<String>,
+   pub description:        Option<String>,
+   pub meta:               Option<MediaMeta>,
 }
 
 #[derive(Debug, Serialize)]
@@ -174,9 +180,9 @@ pub struct MediaMeta {
 
 #[derive(Debug, Serialize)]
 pub struct MediaDimensions {
-   pub width: i32,
+   pub width:  i32,
    pub height: i32,
-   pub size: String,
+   pub size:   String,
    pub aspect: f64,
 }
 
@@ -897,48 +903,54 @@ pub fn build_activity_pub_with_reply(
       sensitive: tweet.sensitive,
       visibility: "public".to_owned(),
       application: MastodonApplication {
-         name: application_name(&tweet.source),
+         name:    application_name(&tweet.source),
          website: None,
       },
       media_attachments: attachments,
       account: MastodonAccount {
-         id: tweet.user.id.clone(),
-         display_name: tweet.user.fullname.clone(),
-         username: tweet.user.username.clone(),
-         acct: tweet.user.username.clone(),
-         url: profile_url.clone(),
-         uri: profile_url,
-         created_at: account_created_at,
-         locked: false,
-         bot: false,
-         discoverable: true,
-         indexable: false,
-         group: false,
-         avatar: avatar_url.clone(),
-         avatar_static: avatar_url,
-         header: header_url.clone(),
-         header_static: header_url,
-         followers_count: tweet.user.followers,
-         following_count: tweet.user.following,
-         statuses_count: tweet.user.tweets,
+         id:               tweet.user.id.clone(),
+         display_name:     tweet.user.fullname.clone(),
+         username:         tweet.user.username.clone(),
+         acct:             tweet.user.username.clone(),
+         url:              profile_url.clone(),
+         uri:              profile_url,
+         created_at:       account_created_at,
+         locked:           false,
+         bot:              false,
+         discoverable:     true,
+         indexable:        false,
+         group:            false,
+         avatar:           avatar_url.clone(),
+         avatar_static:    avatar_url,
+         header:           header_url.clone(),
+         header_static:    header_url,
+         followers_count:  tweet.user.followers,
+         following_count:  tweet.user.following,
+         statuses_count:   tweet.user.tweets,
          hide_collections: false,
-         noindex: false,
-         emojis: vec![],
-         roles: vec![],
-         fields: vec![],
+         noindex:          false,
+         emojis:           vec![],
+         roles:            vec![],
+         fields:           vec![],
       },
       mentions: vec![],
       tags: vec![],
       emojis: vec![],
       card,
       poll: None,
-      translation: tweet.translation.clone().filter(|tl| !tl.text.trim().is_empty()),
+      translation: tweet
+         .translation
+         .clone()
+         .filter(|tl| !tl.text.trim().is_empty()),
    }
 }
 
 #[cfg(test)]
 mod tests {
-   use super::{ActivityId, application_name};
+   use super::{
+      ActivityId,
+      application_name,
+   };
 
    #[test]
    fn activity_id_keeps_the_photo_across_discord_followup() {

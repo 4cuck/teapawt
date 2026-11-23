@@ -1,4 +1,8 @@
-use maud::{Markup, PreEscaped, html};
+use maud::{
+   Markup,
+   PreEscaped,
+   html,
+};
 
 use crate::types::Prefs;
 
@@ -49,7 +53,8 @@ fn gen_font_size_select(selected: &str) -> Markup {
    }
 }
 
-/// One-click choices. A radio, not a menu, so picking one does not take a second click.
+/// One-click choices. A radio, not a menu, so picking one does not take a
+/// second click.
 fn gen_choice(name: &str, label: &str, selected: &str, options: &[(&str, &str)]) -> Markup {
    let selected_norm = selected.trim().to_ascii_lowercase();
    html! {

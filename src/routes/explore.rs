@@ -99,7 +99,10 @@ async fn render(
          super::game::sports_games(state),
       )
    } else {
-      (load_explore(state, slug, cursor.as_deref()).await, Vec::new())
+      (
+         load_explore(state, slug, cursor.as_deref()).await,
+         Vec::new(),
+      )
    };
    let mut feed = match feed_res {
       Ok(feed) => feed,

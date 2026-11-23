@@ -19,7 +19,8 @@ pub fn articles_flag(user_id: &str) -> String {
    format!("af:{user_id}")
 }
 
-/// A filtered posts page: All, original posts, or highlights, recent or popular.
+/// A filtered posts page: All, original posts, or highlights, recent or
+/// popular.
 pub fn filtered_posts(username: &str, filter: &str, sort: &str, cursor: Option<&str>) -> String {
    let name = username.to_lowercase();
    match cursor {
@@ -61,7 +62,8 @@ pub fn user_id(id: &str) -> String {
    format!("uid:{id}")
 }
 
-/// Username to user ID mapping, so a later profile can start tweets immediately.
+/// Username to user ID mapping, so a later profile can start tweets
+/// immediately.
 pub fn username_id(username: &str) -> String {
    format!("unid:{}", username.to_lowercase())
 }

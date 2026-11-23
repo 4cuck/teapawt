@@ -1,16 +1,46 @@
-use maud::{Markup, PreEscaped, html};
+use maud::{
+   Markup,
+   PreEscaped,
+   html,
+};
 
 use crate::{
    config::Config,
    types::{
-      Card, CardKind, Chain, Entity, Photo, Poll, Prefs, Tweet, TweetStats, User,
-      VIDEO_CACHE_LIMIT_MESSAGE, Video,
+      Card,
+      CardKind,
+      Chain,
+      Entity,
+      Photo,
+      Poll,
+      Prefs,
+      Tweet,
+      TweetStats,
+      User,
+      VIDEO_CACHE_LIMIT_MESSAGE,
+      Video,
    },
-   utils::{country, entity_expander::expand_with_regex, expand_entities, formatters},
+   utils::{
+      country,
+      entity_expander::expand_with_regex,
+      expand_entities,
+      formatters,
+   },
    views::renderutils::{
-      alt_text, button_referer, gen_img, get_avatar_class, get_medium_pic, get_small_pic, icon,
-      link_user, parse_location, person_label, profile_picture_alt, proxy_media,
-      render_community_note, verified_icon,
+      alt_text,
+      button_referer,
+      gen_img,
+      get_avatar_class,
+      get_medium_pic,
+      get_small_pic,
+      icon,
+      link_user,
+      parse_location,
+      person_label,
+      profile_picture_alt,
+      proxy_media,
+      render_community_note,
+      verified_icon,
    },
 };
 
@@ -56,16 +86,16 @@ pub const fn thread_context(index: usize, total: usize, is_definite_end: bool) -
    reason = "TweetRenderer is the canonical name used across the codebase"
 )]
 pub struct TweetRenderer<'a> {
-   tweet: &'a Tweet,
-   config: &'a Config,
-   is_main: bool,
-   pinned: bool,
-   prefs: Option<&'a Prefs>,
-   thread_ctx: ThreadContext,
+   tweet:       &'a Tweet,
+   config:      &'a Config,
+   is_main:     bool,
+   pinned:      bool,
+   prefs:       Option<&'a Prefs>,
+   thread_ctx:  ThreadContext,
    extra_class: &'a str,
-   index: usize,
+   index:       usize,
    sort_toggle: Option<&'a Markup>,
-   big_thumb: bool,
+   big_thumb:   bool,
 }
 
 impl<'a> TweetRenderer<'a> {
@@ -728,7 +758,6 @@ fn card_href(url: &str) -> String {
    }
    url.to_owned()
 }
-///
 /// App, Player, Summary, and `StoreLink` use small cards.
 /// All other variants, including `SummaryLarge` and `PromoWebsite`, use large
 /// cards.

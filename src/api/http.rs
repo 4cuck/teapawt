@@ -738,10 +738,7 @@ impl PrimaryPool {
 type SessionClientShard = RwLock<HashMap<(i64, u64), Arc<KoonClient>>>;
 
 fn session_client_shard(key: (i64, u64)) -> usize {
-   let mixed = key
-      .0
-      .cast_unsigned()
-      .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+   let mixed = key.0.cast_unsigned().wrapping_mul(0x9E37_79B9_7F4A_7C15)
       ^ key.1.wrapping_mul(0xBF58_476D_1CE4_E5B9);
    let finalized = (mixed ^ (mixed >> 30)).wrapping_mul(0x94D0_49BB_1331_11EB);
    usize::try_from((finalized >> 58) % (SESSION_CLIENT_SHARDS as u64)).unwrap_or(0)
@@ -1212,7 +1209,14 @@ impl HttpClient {
    /// Send a GET request.
    pub async fn get(&self, uri: &str) -> Result<Response> {
       self
-         .send_on(Method::GET, uri, &HeaderMap::new(), Bytes::new(), None, None)
+         .send_on(
+            Method::GET,
+            uri,
+            &HeaderMap::new(),
+            Bytes::new(),
+            None,
+            None,
+         )
          .await
    }
 
@@ -1284,7 +1288,14 @@ impl HttpClient {
    /// Send a HEAD request.
    pub async fn head(&self, uri: &str) -> Result<Response> {
       self
-         .send_on(Method::HEAD, uri, &HeaderMap::new(), Bytes::new(), None, None)
+         .send_on(
+            Method::HEAD,
+            uri,
+            &HeaderMap::new(),
+            Bytes::new(),
+            None,
+            None,
+         )
          .await
    }
 
@@ -1364,9 +1375,7 @@ impl HttpClient {
                alternate_port,
                "retrying through a healthy proxy exit"
             );
-            let retry = self
-               .dispatch(spec, Some(&alternate), header_deadline)
-               .await;
+            let retry = self.dispatch(spec, Some(&alternate), header_deadline).await;
             self.note_answer(Some(&alternate), &retry);
             if matches!(&retry, Ok(response) if is_edge_block(response.status(), response.headers()))
             {
@@ -1517,11 +1526,7 @@ impl HttpClient {
    /// When the account is pinned to a primary proxy exit, the retry moves to a
    /// healthy alternate exit so a stalled or dead tunnel does not stall the
    /// retry for another header deadline.
-   async fn fresh_headers(
-      &self,
-      spec: RequestSpec<'_>,
-      via: Option<&Egress>,
-   ) -> Result<Response> {
+   async fn fresh_headers(&self, spec: RequestSpec<'_>, via: Option<&Egress>) -> Result<Response> {
       self.retire(via);
       let alternate = via.and_then(|egress| self.alternate_primary(egress));
       self.send_fresh(spec, alternate.as_ref().or(via)).await
@@ -2146,7 +2151,8 @@ impl Response {
       &self.headers
    }
 
-   /// Wire protocol negotiated for this response (e.g. `"h3"`, `"h2"`, `"HTTP/1.1"`).
+   /// Wire protocol negotiated for this response (e.g. `"h3"`, `"h2"`,
+   /// `"HTTP/1.1"`).
    #[must_use]
    pub fn version(&self) -> &str {
       &self.inner.version
@@ -2175,7 +2181,8 @@ impl Response {
          .is_some_and(|value| !value.trim().eq_ignore_ascii_case("identity"));
       let declared_len = (!encoded)
          .then(|| {
-            self.headers
+            self
+               .headers
                .get(header::CONTENT_LENGTH)
                .and_then(|value| value.to_str().ok())
                .and_then(|value| value.trim().parse::<u64>().ok())

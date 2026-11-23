@@ -13,20 +13,37 @@ use std::{
 };
 
 use axum::{
-   http::{HeaderMap, HeaderValue, StatusCode, header},
-   response::{IntoResponse, Response},
+   http::{
+      HeaderMap,
+      HeaderValue,
+      StatusCode,
+      header,
+   },
+   response::{
+      IntoResponse,
+      Response,
+   },
 };
-use data_encoding::{BASE64, BASE64URL_NOPAD};
+use data_encoding::{
+   BASE64,
+   BASE64URL_NOPAD,
+};
 use ring::{
-   rand::{self, SystemRandom},
-   signature::{Ed25519KeyPair, KeyPair},
+   rand::{
+      self,
+      SystemRandom,
+   },
+   signature::{
+      Ed25519KeyPair,
+      KeyPair,
+   },
 };
 
 const KEY_FILE: &str = "web-bot-auth.pkcs8";
 
 struct Identity {
-   pair: Ed25519KeyPair,
-   jwks: String,
+   pair:       Ed25519KeyPair,
+   jwks:       String,
    thumbprint: String,
 }
 
@@ -39,7 +56,8 @@ pub fn directory(headers: &HeaderMap) -> Response {
    let expires = created + 86_400;
    let nonce = random_nonce();
    let params = format!(
-      "(\"@authority\";req);alg=\"ed25519\";keyid=\"{}\";nonce=\"{nonce}\";tag=\"http-message-signatures-directory\";created={created};expires={expires}",
+      "(\"@authority\";req);alg=\"ed25519\";keyid=\"{}\";nonce=\"{nonce}\";tag=\"\
+       http-message-signatures-directory\";created={created};expires={expires}",
       identity.thumbprint
    );
    let base = format!("\"@authority\";req: {authority}\n\"@signature-params\": {params}\n");
@@ -57,10 +75,9 @@ pub fn directory(headers: &HeaderMap) -> Response {
    )
       .into_response();
    if let Ok(value) = HeaderValue::from_str(&format!("sig1=:{signature}:")) {
-      response.headers_mut().insert(
-         axum::http::HeaderName::from_static("signature"),
-         value,
-      );
+      response
+         .headers_mut()
+         .insert(axum::http::HeaderName::from_static("signature"), value);
    }
    if let Ok(value) = HeaderValue::from_str(&format!("sig1={params}")) {
       response.headers_mut().insert(
@@ -113,10 +130,10 @@ fn load_or_create() -> Option<Identity> {
    let public = pair.public_key().as_ref();
    let x = BASE64URL_NOPAD.encode(public);
    let canonical = format!("{{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"{x}\"}}");
-   let thumbprint =
-      BASE64URL_NOPAD.encode(&crate::routes::agents::sha256(canonical.as_bytes()));
+   let thumbprint = BASE64URL_NOPAD.encode(&crate::routes::agents::sha256(canonical.as_bytes()));
    let jwks = format!(
-      "{{\"keys\":[{{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"{x}\",\"kid\":\"{thumbprint}\",\"use\":\"sig\",\"alg\":\"EdDSA\"}}]}}"
+      "{{\"keys\":[{{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"{x}\",\"kid\":\"{thumbprint}\",\"\
+       use\":\"sig\",\"alg\":\"EdDSA\"}}]}}"
    );
    Some(Identity {
       pair,

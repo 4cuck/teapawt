@@ -1,9 +1,19 @@
-use maud::{Markup, html};
+use maud::{
+   Markup,
+   html,
+};
 
 use crate::{
-   api::{GameSide, NflGame, ScheduledGame},
+   api::{
+      GameSide,
+      NflGame,
+      ScheduledGame,
+   },
    config::Config,
-   types::{Prefs, Tweet},
+   types::{
+      Prefs,
+      Tweet,
+   },
    views::tweet::TweetRenderer,
 };
 

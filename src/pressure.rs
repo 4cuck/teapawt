@@ -228,7 +228,8 @@ impl Pressure {
    /// The last measured fallback share, in percent.
    #[must_use]
    pub fn share(&self) -> u32 {
-      self.state
+      self
+         .state
          .lock()
          .unwrap_or_else(PoisonError::into_inner)
          .share
@@ -340,23 +341,20 @@ mod tests {
          assert_eq!(pressure.observe(349, 9_240, 1_000 + minute * 60), None);
          assert_eq!(pressure.level(1_000 + minute * 60), Level::Calm);
       }
-      assert_eq!(
-         pressure.status(1_180),
-         Status {
-            flooding:          false,
-            cause:             None,
-            since:             None,
-            until:             None,
-            share:             3,
-            sample:            9_240,
-            observed_at:       Some(1_180),
-            streak_minutes:    4,
-            flood_percent:     50,
-            sustained_percent: 3,
-            sustained_minutes: 5,
-            hold_minutes:      10,
-         }
-      );
+      assert_eq!(pressure.status(1_180), Status {
+         flooding:          false,
+         cause:             None,
+         since:             None,
+         until:             None,
+         share:             3,
+         sample:            9_240,
+         observed_at:       Some(1_180),
+         streak_minutes:    4,
+         flood_percent:     50,
+         sustained_percent: 3,
+         sustained_minutes: 5,
+         hold_minutes:      10,
+      });
 
       // 5th consecutive minute at >= 3% triggers Cause::Sustained.
       assert_eq!(
@@ -366,23 +364,20 @@ mod tests {
             cause: Cause::Sustained,
          })
       );
-      assert_eq!(
-         pressure.status(1_240),
-         Status {
-            flooding:          true,
-            cause:             Some(Cause::Sustained),
-            since:             Some(1_240),
-            until:             Some(1_840),
-            share:             3,
-            sample:            9_240,
-            observed_at:       Some(1_240),
-            streak_minutes:    5,
-            flood_percent:     50,
-            sustained_percent: 3,
-            sustained_minutes: 5,
-            hold_minutes:      10,
-         }
-      );
+      assert_eq!(pressure.status(1_240), Status {
+         flooding:          true,
+         cause:             Some(Cause::Sustained),
+         since:             Some(1_240),
+         until:             Some(1_840),
+         share:             3,
+         sample:            9_240,
+         observed_at:       Some(1_240),
+         streak_minutes:    5,
+         flood_percent:     50,
+         sustained_percent: 3,
+         sustained_minutes: 5,
+         hold_minutes:      10,
+      });
 
       // Continuing sustained pressure extends `until` while preserving `since`.
       assert_eq!(pressure.observe(400, 9_240, 1_300), None);
@@ -405,23 +400,20 @@ mod tests {
 
       // Once hold expires (`1_960`), the next calm report lifts and clears state.
       assert_eq!(pressure.observe(0, 9_240, 1_960), Some(Change::Lifted));
-      assert_eq!(
-         pressure.status(1_960),
-         Status {
-            flooding:          false,
-            cause:             None,
-            since:             None,
-            until:             None,
-            share:             0,
-            sample:            9_240,
-            observed_at:       Some(1_960),
-            streak_minutes:    0,
-            flood_percent:     50,
-            sustained_percent: 3,
-            sustained_minutes: 5,
-            hold_minutes:      10,
-         }
-      );
+      assert_eq!(pressure.status(1_960), Status {
+         flooding:          false,
+         cause:             None,
+         since:             None,
+         until:             None,
+         share:             0,
+         sample:            9_240,
+         observed_at:       Some(1_960),
+         streak_minutes:    0,
+         flood_percent:     50,
+         sustained_percent: 3,
+         sustained_minutes: 5,
+         hold_minutes:      10,
+      });
    }
 
    #[test]

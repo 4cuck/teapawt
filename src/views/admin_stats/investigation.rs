@@ -304,6 +304,8 @@ mod tests {
       assert!(html.contains("before=12625"));
       assert!(!html.contains("before=12675&amp;before=12625"));
       assert!(!html.contains("before=12675&before=12625"));
-      assert!(html.contains("href=\"/admin/stats/restrictions?kind=2&amp;status=historical&amp;pool=view\""));
+      assert!(html.contains(
+         "href=\"/admin/stats/restrictions?kind=2&amp;status=historical&amp;pool=view\""
+      ));
    }
 }

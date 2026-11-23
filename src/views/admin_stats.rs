@@ -12,16 +12,21 @@ use time::{
 };
 
 mod account;
+mod fingerprints;
 mod investigation;
 mod out;
 pub(crate) use account::account;
+pub(crate) use fingerprints::fingerprints;
 pub(crate) use investigation::restrictions;
 pub(crate) use out::out_accounts;
 
 use crate::{
-   api::auth::{
-      OperationPool,
-      PoolCensus,
+   api::{
+      ClearanceStatus,
+      auth::{
+         OperationPool,
+         PoolCensus,
+      },
    },
    pressure::Cause,
    routes::anti_ddos::GateStatus,
@@ -34,6 +39,7 @@ pub(crate) struct Dashboard {
    pub capacity:        Option<f64>,
    pub census:          PoolCensus,
    pub gate:            GateStatus,
+   pub clearance:       ClearanceStatus,
    pub dropped_events:  u64,
    pub buckets:         Vec<Bucket>,
    pub restrictions:    Vec<RestrictionCount>,
@@ -379,7 +385,12 @@ fn axis_time_label(unix: i64, include_date: bool) -> String {
 }
 
 fn theme_mode(theme: &str) -> &'static str {
-   if theme.to_ascii_lowercase().contains("light") {
+   let lower = theme.to_ascii_lowercase();
+   if lower.contains("light")
+      || lower.contains("latte")
+      || lower.contains("dawn")
+      || lower == "twitter"
+   {
       "light"
    } else {
       "dark"
@@ -397,6 +408,7 @@ pub(crate) fn frame(
    let nav_overview = active == "dashboard" || active == "overview";
    let nav_out = active == "out";
    let nav_restrictions = active == "restrictions" || active == "account";
+   let nav_fingerprints = active == "fingerprints";
    html! {
       (DOCTYPE)
       html lang="en" data-theme=(mode) {
@@ -407,6 +419,10 @@ pub(crate) fn frame(
             title { (title) " · Teapot administration" }
             link rel="stylesheet" href="/css/admin-stats.css?v=9";
             script src="/js/admin-stats.js?v=9" defer="" {}
+            @if nav_fingerprints {
+               link rel="stylesheet" href="/css/admin-captures.css?v=1";
+               script src="/js/admin-captures.js?v=2" defer="" {}
+            }
          }
          body data-theme=(mode) {
             div class="admin-layout admin-workspace" {
@@ -418,6 +434,7 @@ pub(crate) fn frame(
                   a href="/admin/stats" aria-current=[nav_overview.then_some("page")] { "Overview & pools" }
                   a href="/admin/stats/out" aria-current=[nav_out.then_some("page")] { "Out / unverified" }
                   a href="/admin/stats/restrictions" aria-current=[nav_restrictions.then_some("page")] { "Restrictions" }
+                  a href="/admin/stats/fingerprints" aria-current=[nav_fingerprints.then_some("page")] { "Fingerprints" }
                   a href="/admin/import" { "Account import" }
                   a class="admin-home" href="/" { "← Back to site" }
                }
@@ -465,20 +482,14 @@ pub(crate) fn kind_label(kind: crate::stats::Restriction) -> &'static str {
 }
 
 pub(crate) fn page(theme: &str, data: Option<&Dashboard>, minutes: i32) -> Markup {
-   frame(
-      theme,
-      "Operations overview",
-      "dashboard",
-      None,
-      html! {
-         header class="admin-page-header" {
-            p class="admin-eyebrow" { "Operations / overview" }
-            h1 { "Operations & pool telemetry" }
-            p { "Live account-pool capacity, Anti-DDoS pressure state, and origin search/quote request health." }
-         }
-         (overview_content(data, minutes))
-      },
-   )
+   frame(theme, "Operations overview", "dashboard", None, html! {
+      header class="admin-page-header" {
+         p class="admin-eyebrow" { "Operations / overview" }
+         h1 { "Operations & pool telemetry" }
+         p { "Live account-pool capacity, Anti-DDoS pressure state, and origin search/quote request health." }
+      }
+      (overview_content(data, minutes))
+   })
 }
 
 fn overview_content(data: Option<&Dashboard>, minutes: i32) -> Markup {
@@ -612,6 +623,7 @@ fn overview_content(data: Option<&Dashboard>, minutes: i32) -> Markup {
 
             @if let Some(dashboard) = data {
                (gate_card(&dashboard.gate, now_unix))
+               (clearance_card(&dashboard.clearance))
             }
          }
 
@@ -852,6 +864,91 @@ fn gate_card(gate: &GateStatus, now_unix: i64) -> Markup {
                   (gate.pass_minutes) "m · "
                   (gate.blocked_networks) " ASN · "
                   (gate.watched_countries) " CC"
+               }
+            }
+         }
+      }
+   }
+}
+
+/// The search `cf_clearance` (Cloudflare JSD) flow and its circuit breaker.
+fn clearance_card(status: &ClearanceStatus) -> Markup {
+   let (tone, badge, label, detail): (&str, &str, &str, &str) = if !status.enabled {
+      (
+         "idle",
+         "neutral",
+         "Disabled",
+         "searchClearance is off. Search runs without a cf_clearance cookie.",
+      )
+   } else if status.tripped {
+      (
+         "bad",
+         "bad",
+         "Tripped — disabled",
+         "A JSD solve failed, so the whole clearance flow is off until restart. No more x.com \
+          clearance requests are made; search continues without the cookie.",
+      )
+   } else if status.successes == 0 {
+      (
+         "warn",
+         "warn",
+         "Armed — no mint yet",
+         "Waiting for the first search to visit x.com and mint a cf_clearance.",
+      )
+   } else {
+      (
+         "ok",
+         "ok",
+         "Active",
+         "Solving Cloudflare's JSD and attaching cf_clearance to search calls.",
+      )
+   };
+
+   html! {
+      div class=(format!("admin-gate-card admin-gate-card--{tone}")) {
+         div class="admin-gate-header" {
+            strong { "Search cf_clearance (JSD)" }
+            span class=(format!("admin-badge admin-badge--{badge}")) { (label) }
+         }
+         p class="admin-gate-detail" {
+            (detail)
+            @if status.tripped {
+               @if let Some(reason) = &status.reason {
+                  " Reason: " (reason) "."
+               }
+            }
+         }
+         dl class="admin-gate-facts" {
+            div {
+               dt { "Sessions cleared" }
+               dd { (status.active_sessions) }
+            }
+            div {
+               dt { "Mints" }
+               dd { (status.successes) " / " (status.attempts) }
+            }
+            div {
+               dt { "Failures" }
+               dd { (status.failures) }
+            }
+            @if let Some(at) = &status.last_ok {
+               div {
+                  dt { "Last mint" }
+                  dd { (at) }
+               }
+            }
+            @if let Some(at) = &status.tripped_at {
+               div {
+                  dt { "Tripped at" }
+                  dd { (at) }
+               }
+            }
+            @if !status.tripped {
+               @if let Some(err) = &status.last_error {
+                  div {
+                     dt { "Last error" }
+                     dd { (err) }
+                  }
                }
             }
          }
@@ -1380,7 +1477,8 @@ fn panel(
    };
    let y_at = |value: f64| -> f64 { 240.0 - 224.0 * (value.clamp(0.0, maximum) / maximum) };
 
-   // Split into contiguous runs so missing minutes are not connected by fake lines.
+   // Split into contiguous runs so missing minutes are not connected by fake
+   // lines.
    let mut segments: Vec<Vec<(f64, f64)>> = Vec::new();
    let mut prev_minute: Option<i64> = None;
    for &(minute, value) in &values {
@@ -1534,6 +1632,22 @@ mod tests {
       }
    }
 
+   fn sample_clearance() -> ClearanceStatus {
+      ClearanceStatus {
+         enabled:         true,
+         armed:           true,
+         tripped:         false,
+         reason:          None,
+         tripped_at:      None,
+         attempts:        3,
+         successes:       3,
+         failures:        0,
+         active_sessions: 3,
+         last_ok:         None,
+         last_error:      None,
+      }
+   }
+
    fn bucket(minute: i64, incoming: i64, success: i64, finished: i64, latency_ms: i64) -> Bucket {
       Bucket {
          minute,
@@ -1633,6 +1747,7 @@ mod tests {
          capacity: Some(1786.6),
          census,
          gate: sample_gate(),
+         clearance: sample_clearance(),
          dropped_events: 0,
          buckets: (0..=120)
             .map(|index| bucket(index * 60, 12, 10, 10, 240))
@@ -1694,7 +1809,9 @@ mod tests {
       assert!(markup.contains("data-xaxis=\"start\""));
       assert!(markup.contains("data-xaxis=\"mid\""));
       assert!(markup.contains("data-xaxis=\"end\""));
-      assert!(markup.contains("<svg class=\"admin-panel-svg\" viewBox=\"0 0 760 260\" role=\"img\""));
+      assert!(
+         markup.contains("<svg class=\"admin-panel-svg\" viewBox=\"0 0 760 260\" role=\"img\"")
+      );
       assert!(markup.contains("class=\"stats-dots\""));
       assert!(markup.contains("class=\"stats-brush\""));
       assert!(markup.contains("class=\"stats-crosshair\""));
@@ -1702,20 +1819,26 @@ mod tests {
       assert!(markup.contains("class=\"stats-hover-dot\""));
       assert!(markup.contains("class=\"stats-hit-area\""));
       assert!(markup.contains("<tr data-minute=\"7200\">"));
-      assert_eq!(markup.matches("scope=\"row\" class=\"admin-col-time\"").count(), TABLE_LIMIT);
+      assert_eq!(
+         markup
+            .matches("scope=\"row\" class=\"admin-col-time\"")
+            .count(),
+         TABLE_LIMIT
+      );
    }
 
    #[test]
    fn single_sample_anchors_to_window_end_and_empty_hides_chart_controls() {
       let single = Dashboard {
-         minutes:        15,
-         pool:           Some((10, 20)),
-         capacity:       Some(33.3),
-         census:         PoolCensus::default(),
-         gate:           sample_gate(),
-         dropped_events: 0,
-         buckets:        vec![bucket(3600, 10, 10, 10, 120)],
-         restrictions:   Vec::new(),
+         minutes:         15,
+         pool:            Some((10, 20)),
+         capacity:        Some(33.3),
+         census:          PoolCensus::default(),
+         gate:            sample_gate(),
+         clearance:       sample_clearance(),
+         dropped_events:  0,
+         buckets:         vec![bucket(3600, 10, 10, 10, 120)],
+         restrictions:    Vec::new(),
          search_accounts: Vec::new(),
       };
       let markup = page("dark", Some(&single), 15).into_string();

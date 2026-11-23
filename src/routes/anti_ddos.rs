@@ -77,12 +77,12 @@ use crate::{
    donations,
    types::Prefs,
    views::{
-      layout::PageLayout,
       anti_ddos::{
          self as view,
          GatePage,
          Why,
       },
+      layout::PageLayout,
    },
 };
 
@@ -216,7 +216,9 @@ enum Reason {
    Surge,
    Everyone,
    /// The automatic switch: the pool is being drained by `share` percent.
-   Flood { share: u32 },
+   Flood {
+      share: u32,
+   },
 }
 
 /// Why this visitor should solve the check, counting the request. `flood` is
@@ -236,7 +238,9 @@ fn reason(
    }
    // A drained pool outranks a country surge: it slows every reader down,
    // wherever they are.
-   if config.automatic && let Some(share) = flood {
+   if config.automatic
+      && let Some(share) = flood
+   {
       return Some(Reason::Flood { share });
    }
    let country = visitor.country.filter(|country| {
@@ -250,16 +254,15 @@ fn reason(
 
 /// The reason to show again after a failed check, without counting.
 fn reason_shown(config: &AntiDdosConfig, visitor: &Visitor<'_>, flood: Option<u32>) -> Reason {
-   if let Some(asn) = visitor
-      .asn
-      .filter(|asn| config.blocked_asns.contains(asn))
-   {
+   if let Some(asn) = visitor.asn.filter(|asn| config.blocked_asns.contains(asn)) {
       return Reason::Network(asn);
    }
    if config.everyone {
       return Reason::Everyone;
    }
-   if config.automatic && let Some(share) = flood {
+   if config.automatic
+      && let Some(share) = flood
+   {
       return Reason::Flood { share };
    }
    Reason::Surge
@@ -387,14 +390,22 @@ pub(super) async fn check(
    let resume = safe_resume(&check.resume);
    let flood = flood_share(&state, now());
    if check.token.is_empty() {
-      let reason = reason_shown(&state.config.anti_ddos, &Visitor::from_headers(&headers), flood);
+      let reason = reason_shown(
+         &state.config.anti_ddos,
+         &Visitor::from_headers(&headers),
+         flood,
+      );
       return challenge(&state, &jar, reason, resume, true);
    }
    if let Err(codes) =
       super::search_gate::verify(&state.config.turnstile.secret_key, &check.token).await
    {
       tracing::info!(errors = %codes.join(","), "anti-DDoS check failed");
-      let reason = reason_shown(&state.config.anti_ddos, &Visitor::from_headers(&headers), flood);
+      let reason = reason_shown(
+         &state.config.anti_ddos,
+         &Visitor::from_headers(&headers),
+         flood,
+      );
       return challenge(&state, &jar, reason, resume, true);
    }
    let Some(client) = budget::current_client() else {

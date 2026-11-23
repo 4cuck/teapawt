@@ -211,7 +211,10 @@ impl ApiClient {
          }
          round += 1;
          if round == 1 {
-            tracing::info!(pending = pending.len(), "turning off the settings that hide posts");
+            tracing::info!(
+               pending = pending.len(),
+               "turning off the settings that hide posts"
+            );
          }
          let ids: Vec<i64> = pending.into_iter().take(BATCH).collect();
          let outcome = self.run_settings_batch(&ids, round).await;
@@ -283,23 +286,16 @@ impl ApiClient {
                   .await;
                outcome.refused += 1;
             },
-            // 326 is the temporary lock X puts on a new account, and a dead
-            // token is a dead token. Neither is a synthesis verdict on search,
-            // so the account keeps its pool. Both are paced rather than left
-            // pending, or the newest accounts fill every batch forever and the
-            // queue never reaches the ones behind them. Paced is still settled:
-            // the account left the pending list, so the next batch is a
-            // different one.
+            // 326 is an account lock and 401 is a dead token. Take the account
+            // permanently out of rotation and never schedule a 24-hour retry:
+            // locked or rejected credentials stay benched across restarts until
+            // an operator explicitly reinstates them.
             Err(err @ Error::SessionRejected(_)) => {
-               tracing::info!(session_id = id, "X would not write this account's settings: {err}");
-               self
-                  .sessions
-                  .mark_filters_failed(
-                     id,
-                     &format!("X would not accept this account's credentials: {err}"),
-                     REFUSAL_MEMORY,
-                  )
-                  .await;
+               tracing::info!(
+                  session_id = id,
+                  "X rejected this account's credentials; taking it out of rotation: {err}"
+               );
+               self.sessions.mark_rejected(id).await;
                outcome.refused += 1;
             },
             Err(err) => {
@@ -339,7 +335,14 @@ impl ApiClient {
          unusable,
          ..
       } = outcome;
-      tracing::info!(round, ok, unresolved, refused, unusable, "account settings done");
+      tracing::info!(
+         round,
+         ok,
+         unresolved,
+         refused,
+         unusable,
+         "account settings done"
+      );
       if let Some(err) = outcome.first_error.as_deref() {
          tracing::warn!(refused, "X refused some account settings: {err}");
       }
@@ -363,6 +366,9 @@ impl ApiClient {
             .acquire_id(session_id, endpoints::ACCOUNT_SETTINGS)
             .await?;
          if session.kind == SessionKind::Cookie {
+            // A freshly imported cookie solves the JSD challenge before its
+            // first write to x.com, so the settings call carries cf_clearance.
+            self.ensure_search_clearance(&session).await;
             self.set_display_sensitive_media(&session).await?;
          }
          return Ok(false);
@@ -376,6 +382,9 @@ impl ApiClient {
          return Ok(true);
       }
 
+      // A freshly imported cookie solves the JSD challenge before its first
+      // write to x.com, so the settings calls carry cf_clearance.
+      self.ensure_search_clearance(&session).await;
       self.set_display_sensitive_media(&session).await?;
       self.set_search_safety(&session, &user_id).await?;
       Ok(true)
@@ -541,9 +550,7 @@ impl ApiClient {
       // an account that X will not let write settings. Refuse the write here
       // instead, so a bootstrap that is still failing does not cost accounts
       // the hour that refusal is believed for.
-      if self.tid_enabled
-         && tid.is_none()
-      {
+      if self.tid_enabled && tid.is_none() {
          return Err(Error::NoTransactionId);
       }
       let ct0 = self

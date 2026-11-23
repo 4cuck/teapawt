@@ -14,7 +14,10 @@ use crate::{
       Trend,
    },
    utils::formatters,
-   views::{game::render_game_cards, tweet::TweetRenderer},
+   views::{
+      game::render_game_cards,
+      tweet::TweetRenderer,
+   },
 };
 
 /// Explore page body. Tabs are ordinary links, so the page works with

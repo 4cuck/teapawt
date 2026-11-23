@@ -112,7 +112,11 @@ pub enum Return<'a> {
 // Building blocks
 
 fn shell(narrow: bool, body: Markup) -> Markup {
-   let class = if narrow { "pass-page is-narrow" } else { "pass-page" };
+   let class = if narrow {
+      "pass-page is-narrow"
+   } else {
+      "pass-page"
+   };
    html! { div class=(class) { (body) } }
 }
 
@@ -165,8 +169,18 @@ fn optional_label(id: &str, text: &str) -> Markup {
 
 fn methods_form(methods: &Methods, price: &str, card: bool) -> Markup {
    let tiles = [
-      (methods.card && card, "stripe", "Card", format!("{price} a month, renews")),
-      (methods.crypto, "nowpayments", "Crypto", "One month".to_owned()),
+      (
+         methods.card && card,
+         "stripe",
+         "Card",
+         format!("{price} a month, renews"),
+      ),
+      (
+         methods.crypto,
+         "nowpayments",
+         "Crypto",
+         "One month".to_owned(),
+      ),
       (methods.lzt, "lzt", "LZT Market", "One month".to_owned()),
    ];
    html! {
@@ -310,7 +324,7 @@ fn admin_card(admin: &Admin<'_>) -> Markup {
    Card {
       title: "Issue a pass",
       class: "is-admin",
-      hint: Some(html! {
+      hint:  Some(html! {
           "With an email that already has a pass, the days are added to it. "
           "Otherwise a new username and password are made."
       }),
@@ -460,7 +474,11 @@ fn password_card() -> Markup {
    Card {
       title: "Password",
       hint: Some(html! { "The old password stops working. Signed-in browsers stay signed in." }),
-      aside: Some(action("/search-pass/password", "pass-btn is-ghost", "Make a new password")),
+      aside: Some(action(
+         "/search-pass/password",
+         "pass-btn is-ghost",
+         "Make a new password",
+      )),
       ..Card::default()
    }
    .wrap(html! {})
@@ -472,61 +490,86 @@ fn password_card() -> Markup {
 pub fn render_return(view: &Return<'_>) -> Markup {
    let manage = html! { a class="pass-link" href="/search-pass" { "Manage the pass and its IP addresses →" } };
    let body = match view {
-      Return::Waiting => html! {
-          span class="pass-spinner" aria-hidden="true" {}
-          h1 { "Waiting for the payment" }
-          p class="pass-hint" { "This page checks again every 10 seconds. Crypto can take a while to confirm." }
-          p class="pass-hint" {
-              "You can close it. Opening " a href="/search-pass" { "the search pass page" }
-              " in this browser later picks up the login."
-          }
+      Return::Waiting => {
+         html! {
+             span class="pass-spinner" aria-hidden="true" {}
+             h1 { "Waiting for the payment" }
+             p class="pass-hint" { "This page checks again every 10 seconds. Crypto can take a while to confirm." }
+             p class="pass-hint" {
+                 "You can close it. Opening " a href="/search-pass" { "the search pass page" }
+                 " in this browser later picks up the login."
+             }
+         }
       },
-      Return::Issued { username, password, paid_until, emailed } => html! {
-          span class="pass-badge is-good" { "Paid" }
-          h1 { "Your search pass is ready" }
-          p class="pass-hint" { "Search skips the checkbox until " strong { (paid_until) } ". This browser is signed in." }
-          (login_box(username, password))
-          @if let Some(to) = emailed {
-              p class="pass-notice is-info" { "A copy is on its way to " (to) "." }
-          } @else {
-              p class="pass-notice is-bad" { "Save this login now. It is shown once, and with no email it cannot be sent again." }
-          }
-          (manage)
+      Return::Issued {
+         username,
+         password,
+         paid_until,
+         emailed,
+      } => {
+         html! {
+             span class="pass-badge is-good" { "Paid" }
+             h1 { "Your search pass is ready" }
+             p class="pass-hint" { "Search skips the checkbox until " strong { (paid_until) } ". This browser is signed in." }
+             (login_box(username, password))
+             @if let Some(to) = emailed {
+                 p class="pass-notice is-info" { "A copy is on its way to " (to) "." }
+             } @else {
+                 p class="pass-notice is-bad" { "Save this login now. It is shown once, and with no email it cannot be sent again." }
+             }
+             (manage)
+         }
       },
-      Return::SignedIn { username, paid_until } => html! {
-          span class="pass-badge is-good" { "Paid" }
-          h1 { "Your search pass is ready" }
-          p class="pass-hint" {
-              "Signed in as " strong { (username) } ". Search skips the checkbox until " strong { (paid_until) } "."
-          }
-          p class="pass-hint" { "The password was shown or emailed already. You can make a new one on the pass page." }
-          (manage)
+      Return::SignedIn {
+         username,
+         paid_until,
+      } => {
+         html! {
+             span class="pass-badge is-good" { "Paid" }
+             h1 { "Your search pass is ready" }
+             p class="pass-hint" {
+                 "Signed in as " strong { (username) } ". Search skips the checkbox until " strong { (paid_until) } "."
+             }
+             p class="pass-hint" { "The password was shown or emailed already. You can make a new one on the pass page." }
+             (manage)
+         }
       },
-      Return::Renewed { paid_until } => html! {
-          span class="pass-badge is-good" { "Paid" }
-          h1 { "Thank you" }
-          p class="pass-hint" { "The pass now runs until " strong { (paid_until) } "." }
-          a class="pass-link" href="/search-pass" { "Back to the pass →" }
+      Return::Renewed { paid_until } => {
+         html! {
+             span class="pass-badge is-good" { "Paid" }
+             h1 { "Thank you" }
+             p class="pass-hint" { "The pass now runs until " strong { (paid_until) } "." }
+             a class="pass-link" href="/search-pass" { "Back to the pass →" }
+         }
       },
-      Return::Emailed { to } => html! {
-          span class="pass-badge is-good" { "Paid" }
-          h1 { "Payment received" }
-          p class="pass-hint" { "The login is on its way to " (to) ". It can take a few minutes." }
-          a class="pass-link" href="/search-pass/login" { "Log in →" }
+      Return::Emailed { to } => {
+         html! {
+             span class="pass-badge is-good" { "Paid" }
+             h1 { "Payment received" }
+             p class="pass-hint" { "The login is on its way to " (to) ". It can take a few minutes." }
+             a class="pass-link" href="/search-pass/login" { "Log in →" }
+         }
       },
-      Return::OtherBrowser => html! {
-          span class="pass-badge is-good" { "Paid" }
-          h1 { "Payment received" }
-          p class="pass-hint" {
-              "Open this page in the browser you paid from. An anonymous pass is handed to that browser's cookies only."
-          }
+      Return::OtherBrowser => {
+         html! {
+             span class="pass-badge is-good" { "Paid" }
+             h1 { "Payment received" }
+             p class="pass-hint" {
+                 "Open this page in the browser you paid from. An anonymous pass is handed to that browser's cookies only."
+             }
+         }
       },
-      Return::Unknown => html! {
-          h1 { "Order not found" }
-          a class="pass-link" href="/search-pass" { "Back to the search pass →" }
+      Return::Unknown => {
+         html! {
+             h1 { "Order not found" }
+             a class="pass-link" href="/search-pass" { "Back to the search pass →" }
+         }
       },
    };
-   shell(true, html! { section class="pass-card pass-center" { (body) } })
+   shell(
+      true,
+      html! { section class="pass-card pass-center" { (body) } },
+   )
 }
 
 pub fn render_new_password(username: &str, password: &str) -> Markup {

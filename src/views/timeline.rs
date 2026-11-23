@@ -1,11 +1,24 @@
-use maud::{Markup, html};
+use maud::{
+   Markup,
+   html,
+};
 
 use super::tweet::TweetRenderer;
 use crate::{
    config::Config,
-   types::{List, Prefs, TimelineKind, Tweet, Tweets},
+   types::{
+      List,
+      Prefs,
+      TimelineKind,
+      Tweet,
+      Tweets,
+   },
    utils::formatters,
-   views::renderutils::{gen_img, header_alt, icon},
+   views::renderutils::{
+      gen_img,
+      header_alt,
+      icon,
+   },
 };
 
 /// Render a timeline of tweets with optional "Load more" link.
@@ -296,10 +309,10 @@ fn render_timeline_items(
 /// Which posts slice and sort the profile menu is showing.
 #[derive(Clone, Copy)]
 pub struct PostsMenu<'a> {
-   pub filter: &'a str,
-   pub sort: &'a str,
+   pub filter:          &'a str,
+   pub sort:            &'a str,
    pub show_highlights: bool,
-   pub show_articles: bool,
+   pub show_articles:   bool,
 }
 
 /// Profile path for a posts filter. Defaults stay on `/{username}`.

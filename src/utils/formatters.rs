@@ -1,7 +1,13 @@
-use std::{borrow::Cow, sync::LazyLock};
+use std::{
+   borrow::Cow,
+   sync::LazyLock,
+};
 
 use data_encoding::BASE64URL_NOPAD;
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{
+   NON_ALPHANUMERIC,
+   utf8_percent_encode,
+};
 use regex::Regex;
 
 use crate::config::Config;
@@ -225,7 +231,8 @@ pub fn join_base(prefix: &str, url: &str) -> String {
    }
 }
 
-/// Image URL. `proxy` serves it from this instance; otherwise the browser loads the CDN directly.
+/// Image URL. `proxy` serves it from this instance; otherwise the browser loads
+/// the CDN directly.
 pub fn get_pic_url(url: &str, base64_media: bool, proxy: bool) -> String {
    if proxy {
       encode_media_url("/pic", url, base64_media)
@@ -234,7 +241,8 @@ pub fn get_pic_url(url: &str, base64_media: bool, proxy: bool) -> String {
    }
 }
 
-/// Full-size image URL. Proxied paths use `/pic/orig`; direct links ask Twitter for `name=orig`.
+/// Full-size image URL. Proxied paths use `/pic/orig`; direct links ask Twitter
+/// for `name=orig`.
 pub fn get_orig_pic_url(url: &str, base64_media: bool, proxy: bool) -> String {
    if proxy {
       return encode_media_url("/pic/orig", url, base64_media);

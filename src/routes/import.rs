@@ -210,8 +210,7 @@ fn public_response(
 async fn dashboard<B: Backend>(State(state): State<B>, jar: CookieJar) -> Response {
    let theme = state.theme(&jar);
    let (snapshot, is_admin) = tokio::join!(state.snapshot(), state.administrator(&jar));
-   let mut response =
-      public_response(snapshot, |snap| view::dashboard(&theme, snap, is_admin));
+   let mut response = public_response(snapshot, |snap| view::dashboard(&theme, snap, is_admin));
    no_store(response.headers_mut());
    response
 }
@@ -483,7 +482,13 @@ async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Req
    let search = match pool.as_deref() {
       Some("view") => false,
       Some("search") => true,
-      _ => return error_with_pool(selected_pool, StatusCode::BAD_REQUEST, "Choose an import pool."),
+      _ => {
+         return error_with_pool(
+            selected_pool,
+            StatusCode::BAD_REQUEST,
+            "Choose an import pool.",
+         );
+      },
    };
    let Some(accounts) = accounts.filter(|value| !value.trim().is_empty()) else {
       return error_with_pool(

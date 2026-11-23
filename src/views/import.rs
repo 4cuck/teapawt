@@ -1,11 +1,24 @@
 //! Public import figures and the separate admin form.
 
-use maud::{DOCTYPE, Markup, html};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use maud::{
+   DOCTYPE,
+   Markup,
+   html,
+};
+use time::{
+   OffsetDateTime,
+   format_description::well_known::Rfc3339,
+};
 
-use crate::accounts::{ImportSummary, Stats};
-
-use super::layout::{CLEAN_CSS, STYLE_CSS, theme_stylesheet};
+use super::layout::{
+   CLEAN_CSS,
+   STYLE_CSS,
+   theme_stylesheet,
+};
+use crate::accounts::{
+   ImportSummary,
+   Stats,
+};
 
 const IMPORT_CSS: &str = "/css/import.css?v=4";
 
@@ -15,11 +28,11 @@ pub(crate) const REFRESH_PATH: &str = "/import/summary";
 
 pub(crate) struct Batch {
    pub timestamp: i64,
-   pub counts: ImportSummary,
+   pub counts:    ImportSummary,
 }
 
 pub(crate) struct Snapshot {
-   pub stats: Stats,
+   pub stats:   Stats,
    pub batches: Option<Vec<Batch>>,
    pub updated: OffsetDateTime,
 }
@@ -56,23 +69,18 @@ fn page(theme: &str, title: &str, dashboard: bool, content: Markup) -> Markup {
 }
 
 pub(crate) fn dashboard(theme: &str, snapshot: Option<&Snapshot>, is_admin: bool) -> Markup {
-   page(
-      theme,
-      "Account inventory",
-      true,
-      html! {
-         p class="import-lead" {
-            "Pool totals and recent import batches. No individual accounts are shown."
-            a href=(PUBLIC_PATH) { "Refresh" }
-            @if is_admin {
-               a class="import-submit import-action" href=(ADMIN_PATH) { "Import accounts" }
-            }
+   page(theme, "Account inventory", true, html! {
+      p class="import-lead" {
+         "Pool totals and recent import batches. No individual accounts are shown."
+         a href=(PUBLIC_PATH) { "Refresh" }
+         @if is_admin {
+            a class="import-submit import-action" href=(ADMIN_PATH) { "Import accounts" }
          }
-         div hx-get=(REFRESH_PATH) hx-trigger="every 60s" hx-swap="innerHTML" aria-live="polite" {
-            (figures(snapshot))
-         }
-      },
-   )
+      }
+      div hx-get=(REFRESH_PATH) hx-trigger="every 60s" hx-swap="innerHTML" aria-live="polite" {
+         (figures(snapshot))
+      }
+   })
 }
 
 fn time_label(instant: OffsetDateTime) -> Markup {
@@ -151,68 +159,58 @@ pub(crate) fn admin(
    notice: Option<&AdminNotice>,
 ) -> Markup {
    let search_selected = selected_pool == "search";
-   page(
-      theme,
-      "Import accounts",
-      false,
-      html! {
-         section class="import-form-section" {
-            h2 { "New batch" }
-            @if let Some(notice) = notice {
-               @match notice {
-                  AdminNotice::Saved(values) => {
-                     div class="import-notice" role="status" {
-                        "Saved: " (summary_line(values)) "."
-                     }
+   page(theme, "Import accounts", false, html! {
+      section class="import-form-section" {
+         h2 { "New batch" }
+         @if let Some(notice) = notice {
+            @match notice {
+               AdminNotice::Saved(values) => {
+                  div class="import-notice" role="status" {
+                     "Saved: " (summary_line(values)) "."
                   }
-                  AdminNotice::Error(message) => {
-                     div class="import-notice" role="alert" { (message) }
-                  }
+               }
+               AdminNotice::Error(message) => {
+                  div class="import-notice" role="alert" { (message) }
                }
             }
-            form method="post" action=(ADMIN_PATH) autocomplete="off" {
-               input type="hidden" name="csrf" value=(csrf);
-               div class="import-field" {
-                  label for="import-pool" { "Pool" }
-                  select id="import-pool" name="pool" required {
-                     option value="view" selected[!search_selected] { "View" }
-                     option value="search" selected[search_selected] { "Search" }
-                  }
+         }
+         form method="post" action=(ADMIN_PATH) autocomplete="off" {
+            input type="hidden" name="csrf" value=(csrf);
+            div class="import-field" {
+               label for="import-pool" { "Pool" }
+               select id="import-pool" name="pool" required {
+                  option value="view" selected[!search_selected] { "View" }
+                  option value="search" selected[search_selected] { "Search" }
                }
-               div class="import-field" {
-                  label for="import-accounts" { "Account data" }
-                  p class="import-help" id="import-help" {
-                     "Paste a colon- or dash-delimited account export, a Netscape cookie file, "
-                     "a JSON cookie export, or one Cookie header per line. Records missing "
-                     code { "auth_token" } " or " code { "ct0" } " are skipped. Up to "
-                     (max_lines) " lines and 256 KiB. Not shown after submit."
-                  }
-                  textarea id="import-accounts" name="accounts" rows="12" maxlength=(max_chars)
-                     aria-describedby="import-help" spellcheck="false" autocapitalize="off" required {}
-               }
-               button type="submit" class="import-submit" { "Import" }
             }
+            div class="import-field" {
+               label for="import-accounts" { "Account data" }
+               p class="import-help" id="import-help" {
+                  "Paste a colon- or dash-delimited account export, a Netscape cookie file, "
+                  "a JSON cookie export, or one Cookie header per line. Records missing "
+                  code { "auth_token" } " or " code { "ct0" } " are skipped. Up to "
+                  (max_lines) " lines and 256 KiB. Not shown after submit."
+               }
+               textarea id="import-accounts" name="accounts" rows="12" maxlength=(max_chars)
+                  aria-describedby="import-help" spellcheck="false" autocapitalize="off" required {}
+            }
+            button type="submit" class="import-submit" { "Import" }
          }
-         nav class="import-nav-row" aria-label="Import navigation" {
-            a href=(PUBLIC_PATH) { "← Public inventory" }
-            a href="/admin/stats" { "Admin stats →" }
-         }
-      },
-   )
+      }
+      nav class="import-nav-row" aria-label="Import navigation" {
+         a href=(PUBLIC_PATH) { "← Public inventory" }
+         a href="/admin/stats" { "Admin stats →" }
+      }
+   })
 }
 
 pub(crate) fn forbidden(theme: &str) -> Markup {
-   page(
-      theme,
-      "Import accounts",
-      false,
-      html! {
-         div class="import-signin" {
-            p { "An administrator session is required." }
-            p { a href="/search-pass/login" { "Sign in" } " and return to this page." }
-         }
-      },
-   )
+   page(theme, "Import accounts", false, html! {
+      div class="import-signin" {
+         p { "An administrator session is required." }
+         p { a href="/search-pass/login" { "Sign in" } " and return to this page." }
+      }
+   })
 }
 
 #[cfg(test)]

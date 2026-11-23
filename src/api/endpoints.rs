@@ -144,8 +144,7 @@ static ENCODED_TWEET_DETAIL_FIELD_TOGGLES: LazyLock<String> =
 static ENCODED_TWEET_RESULTS_TOGGLES: LazyLock<String> =
    LazyLock::new(|| encode_query_value(TWEET_RESULTS_TOGGLES));
 
-static ENCODED_GQL_FEATURES: LazyLock<String> =
-   LazyLock::new(|| encode_query_value(GQL_FEATURES));
+static ENCODED_GQL_FEATURES: LazyLock<String> = LazyLock::new(|| encode_query_value(GQL_FEATURES));
 static ENCODED_USER_REPOSTS_FEATURES: LazyLock<String> =
    LazyLock::new(|| encode_query_value(USER_REPOSTS_FEATURES));
 static ENCODED_EXPLORE_FEATURES: LazyLock<String> =

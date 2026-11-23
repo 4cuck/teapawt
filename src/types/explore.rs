@@ -11,8 +11,8 @@ pub struct ExploreTab {
    pub label: String,
 }
 
-/// A trending topic or news card. `story_id` is X's `/i/trending/{id}` snowflake
-/// when the row is a story. Otherwise the row stays a search.
+/// A trending topic or news card. `story_id` is X's `/i/trending/{id}`
+/// snowflake when the row is a story. Otherwise the row stays a search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trend {
    pub name:     String,
@@ -26,10 +26,10 @@ pub struct Trend {
 /// One trending-story page: the writeup, the posts, and nearby stories.
 #[derive(Debug, Clone, Default)]
 pub struct TrendStory {
-   pub id:      String,
-   pub title:   String,
-   pub summary: String,
-   pub updated: String,
+   pub id:          String,
+   pub title:       String,
+   pub summary:     String,
+   pub updated:     String,
    pub tweets:      Vec<Tweet>,
    pub related:     Vec<Trend>,
    /// X timeline that supplied `tweets`, when the story named one.

@@ -1,6 +1,11 @@
 //! Offline account administration. Only PostgreSQL is contacted.
 
-use std::{env, ffi::OsString, path::PathBuf, process::ExitCode};
+use std::{
+   env,
+   ffi::OsString,
+   path::PathBuf,
+   process::ExitCode,
+};
 
 // Share storage and the session format without including the server.
 #[allow(dead_code)]
@@ -24,8 +29,14 @@ mod error {
    pub type Result<T> = std::result::Result<T, Error>;
 }
 
-use accounts::{AccountStore, Stats};
-use error::{Error, Result};
+use accounts::{
+   AccountStore,
+   Stats,
+};
+use error::{
+   Error,
+   Result,
+};
 
 const USAGE: &str = "Usage:
   import-accounts migrate
@@ -61,9 +72,11 @@ fn parse_pool(pool: &OsString) -> std::result::Result<Pool, &'static str> {
 }
 
 fn parse_command(args: &[OsString]) -> std::result::Result<Command, &'static str> {
-   let import = |path: &OsString, pool| Command::Import {
-      path: path.into(),
-      pool,
+   let import = |path: &OsString, pool| {
+      Command::Import {
+         path: path.into(),
+         pool,
+      }
    };
    match args {
       [command] if command == "-h" || command == "--help" => Ok(Command::Help),
@@ -86,9 +99,11 @@ fn legacy_path(variable: &'static str, default: &str) -> Result<String> {
    match env::var(variable) {
       Ok(path) => Ok(path),
       Err(env::VarError::NotPresent) => Ok(default.to_owned()),
-      Err(env::VarError::NotUnicode(_)) => Err(Error::InvalidConfig(format!(
-         "{variable} must be valid UTF-8"
-      ))),
+      Err(env::VarError::NotUnicode(_)) => {
+         Err(Error::InvalidConfig(format!(
+            "{variable} must be valid UTF-8"
+         )))
+      },
    }
 }
 
@@ -132,15 +147,20 @@ async fn main() -> ExitCode {
       && command == "restore-search"
    {
       let result = async {
-         let text = tokio::fs::read_to_string(PathBuf::from(path)).await
+         let text = tokio::fs::read_to_string(PathBuf::from(path))
+            .await
             .map_err(|_| Error::Internal("could not read the UTF-8 import file".to_owned()))?;
          let store = AccountStore::connect().await?;
          println!("restored={}", store.restore_batch_to_search(&text).await?);
          Ok::<_, Error>(())
-      }.await;
+      }
+      .await;
       return match result {
          Ok(()) => ExitCode::SUCCESS,
-         Err(err) => { eprintln!("{err}"); ExitCode::FAILURE },
+         Err(err) => {
+            eprintln!("{err}");
+            ExitCode::FAILURE
+         },
       };
    }
    let command = match parse_command(&args) {
@@ -205,7 +225,7 @@ mod tests {
          parse(&["import", "stats", "view"]),
          Ok(Command::Import {
             path: "stats".into(),
-            pool: Pool::View
+            pool: Pool::View,
          })
       );
    }

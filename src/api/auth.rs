@@ -205,7 +205,8 @@ impl OutReasons {
    }
 }
 
-/// Live summary of one account listed on the Out / unverified investigation page.
+/// Live summary of one account listed on the Out / unverified investigation
+/// page.
 #[derive(Debug, Clone, Serialize)]
 pub struct OutAccountEntry {
    pub id:                  i64,
@@ -383,19 +384,19 @@ pub struct SessionPool {
    /// Requests clone an immutable snapshot of the roster (`slots` + O(1)
    /// `by_id` index), not all of its slots. Publishing an import swaps the
    /// snapshot without replacing existing slot identities.
-   sessions:        Arc<std::sync::RwLock<Arc<SessionRoster>>>,
-   max_concurrency: usize,
-   cursor:          Arc<AtomicUsize>,
-   recovery_cursor: Arc<AtomicUsize>,
-   limit_writer:    Option<limits_db::LimitsDb>,
-   account_store:   Option<AccountStore>,
+   sessions:             Arc<std::sync::RwLock<Arc<SessionRoster>>>,
+   max_concurrency:      usize,
+   cursor:               Arc<AtomicUsize>,
+   recovery_cursor:      Arc<AtomicUsize>,
+   limit_writer:         Option<limits_db::LimitsDb>,
+   account_store:        Option<AccountStore>,
    #[cfg(test)]
-   source_path:     String,
+   source_path:          String,
    #[cfg(test)]
-   source_write:    Arc<tokio::sync::Mutex<()>>,
-   writes:          Arc<AccountWrites>,
+   source_write:         Arc<tokio::sync::Mutex<()>>,
+   writes:               Arc<AccountWrites>,
    /// Calls parked until an account frees up, for the minute report.
-   waiting:         Arc<AtomicUsize>,
+   waiting:              Arc<AtomicUsize>,
    /// Time each call spent getting an account, reported every minute.
    queue:                Arc<AccountQueue>,
    telemetry:            Option<crate::stats::StatsStore>,
@@ -565,7 +566,8 @@ const SEARCH_CANARY_TRIGGER_THRESHOLD: u32 = 3;
 const TWEET_SEARCH_HEALTHY_WINDOW_SECS: u64 = 300;
 
 /// What [`SessionPool::record_search_timeline_failure`] decided to do with a
-/// search account after `"Internal server error"` on `search_timeline.timeline`.
+/// search account after `"Internal server error"` on
+/// `search_timeline.timeline`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SearchFailureAction {
    Rested,
@@ -681,7 +683,12 @@ fn can_stop_early(best: &[Candidate]) -> bool {
    best.len() >= SCAN_TOP_K && best.iter().all(|chosen| !chosen.slow_exit)
 }
 
-fn insert_best(best: &mut Vec<Candidate>, candidate: Candidate, prefer_warm: bool, is_search: bool) {
+fn insert_best(
+   best: &mut Vec<Candidate>,
+   candidate: Candidate,
+   prefer_warm: bool,
+   is_search: bool,
+) {
    let pos = best
       .iter()
       .position(|&existing| better_candidate(candidate, existing, prefer_warm, is_search))
@@ -726,7 +733,8 @@ struct SessionSlot {
    /// The exit this account is pinned to answers well behind the rest.
    slow_exit:                 AtomicBool,
    /// Lock-free mirrors of `limits` flags so scans skip wrong-pool and dead
-   /// accounts without touching `limits`. Always kept in sync by `write_limits`.
+   /// accounts without touching `limits`. Always kept in sync by
+   /// `write_limits`.
    rejected:                  AtomicBool,
    search_only:               AtomicBool,
    unavailable:               AtomicBool,
@@ -970,21 +978,24 @@ impl SessionPool {
 
    fn empty(max_concurrent_requests: u32) -> Self {
       Self {
-         sessions:        Arc::new(std::sync::RwLock::new(Arc::new(SessionRoster::default()))),
-         max_concurrency: usize::try_from(max_concurrent_requests.max(1)).unwrap_or(usize::MAX),
-         cursor:          Arc::default(),
-         recovery_cursor: Arc::default(),
-         limit_writer:    None,
-         account_store:   None,
+         sessions:                  Arc::new(std::sync::RwLock::new(Arc::new(
+            SessionRoster::default(),
+         ))),
+         max_concurrency:           usize::try_from(max_concurrent_requests.max(1))
+            .unwrap_or(usize::MAX),
+         cursor:                    Arc::default(),
+         recovery_cursor:           Arc::default(),
+         limit_writer:              None,
+         account_store:             None,
          #[cfg(test)]
-         source_path:     String::new(),
+         source_path:               String::new(),
          #[cfg(test)]
-         source_write:    Arc::default(),
-         writes:          Arc::default(),
-         waiting:              Arc::default(),
-         queue:                Arc::default(),
-         telemetry:            None,
-         last_tweet_search_ok: Arc::new(AtomicU64::new(0)),
+         source_write:              Arc::default(),
+         writes:                    Arc::default(),
+         waiting:                   Arc::default(),
+         queue:                     Arc::default(),
+         telemetry:                 None,
+         last_tweet_search_ok:      Arc::new(AtomicU64::new(0)),
       }
    }
 
@@ -1030,7 +1041,11 @@ impl SessionPool {
             lims.reserve_for_search();
          }
          by_id.insert(creds.id, base + new_slots.len());
-         new_slots.push(Arc::new(SessionSlot::new(creds, lims, self.max_concurrency)));
+         new_slots.push(Arc::new(SessionSlot::new(
+            creds,
+            lims,
+            self.max_concurrency,
+         )));
       }
       let count = new_slots.len();
       if count > 0 {
@@ -1611,7 +1626,9 @@ impl SessionPool {
             Some("TweetDetail") => (!in_search && td_reasons.any()).then_some(td_reasons),
             _ => {
                match pool {
-                  Some("demoted") => (!in_search && lim.demoted_from_search).then_some(view_reasons),
+                  Some("demoted") => {
+                     (!in_search && lim.demoted_from_search).then_some(view_reasons)
+                  },
                   Some("search") => (in_search && search_reasons.any()).then_some(search_reasons),
                   Some("view") => (!in_search && view_reasons.any()).then_some(view_reasons),
                   _ => {
@@ -1631,7 +1648,11 @@ impl SessionPool {
 
          if let Some(ref needle) = query_name {
             let id_match = query_id == Some(slot.credentials.id);
-            let user_match = slot.credentials.username.to_ascii_lowercase().contains(needle);
+            let user_match = slot
+               .credentials
+               .username
+               .to_ascii_lowercase()
+               .contains(needle);
             if !id_match && !user_match {
                continue;
             }
@@ -1645,9 +1666,8 @@ impl SessionPool {
          breakdown.suspended += usize::from(lim.suspended);
          breakdown.search_banned += usize::from(reasons.search_banned);
          breakdown.profile_banned += usize::from(reasons.profile_banned);
-         breakdown.refused += usize::from(
-            !reasons.refused_operations.is_empty() || reasons.search_404_cooldown,
-         );
+         breakdown.refused +=
+            usize::from(!reasons.refused_operations.is_empty() || reasons.search_404_cooldown);
          breakdown.globally_limited += usize::from(reasons.globally_limited);
 
          if let Some(selected_reason) = reason
@@ -1704,11 +1724,7 @@ impl SessionPool {
       let total_pages = total_filtered.div_ceil(page_size).max(1);
       let page = page.clamp(1, total_pages);
       let start = (page - 1).saturating_mul(page_size);
-      let accounts = filtered
-         .into_iter()
-         .skip(start)
-         .take(page_size)
-         .collect();
+      let accounts = filtered.into_iter().skip(start).take(page_size).collect();
 
       OutAccountsSnapshot {
          counts,
@@ -2151,7 +2167,9 @@ impl SessionPool {
          .last_active
          .store(u64::try_from(now).unwrap_or(0), Ordering::Relaxed);
       slot.write_limits(|lim| {
-         lim.rejected = false;
+         // Rate-limit headers also arrive on HTTP 200/403 code-326 responses,
+         // so seeing a window header must never clear `lim.rejected`; only an
+         // explicit operator `reinstate` lifts a credentials rejection.
          // The session responded, so clear its expired global limit
          if lim.limited && !lim.is_limited(api) {
             lim.limited = false;
@@ -2367,11 +2385,7 @@ impl SessionPool {
          // The settings write was refused. Nothing about search is known, so
          // the account is paced — never benched, never moved.
          self
-            .mark_filters_failed(
-               session_id,
-               evidence,
-               crate::api::filters::REFUSAL_MEMORY,
-            )
+            .mark_filters_failed(session_id, evidence, crate::api::filters::REFUSAL_MEMORY)
             .await;
          return;
       }
@@ -2504,7 +2518,11 @@ impl SessionPool {
          "probe",
          "Manual probe found the account alive; verdict cleared",
       );
-      tracing::info!(session_id, search = search_account, "account reinstated by probe");
+      tracing::info!(
+         session_id,
+         search = search_account,
+         "account reinstated by probe"
+      );
       true
    }
 
@@ -2659,7 +2677,8 @@ impl SessionPool {
       candidates
    }
 
-   /// Clear the search-demotion marker and persist the permanent view assignment.
+   /// Clear the search-demotion marker and persist the permanent view
+   /// assignment.
    pub(super) async fn clear_demoted_from_search(&self, session_id: i64) {
       self.writes.cancel_demotion(session_id);
       if let Some(slot) = self.slot(session_id) {
@@ -2725,19 +2744,31 @@ impl SessionPool {
       true
    }
 
-   /// Mark a session's credentials as refused, taking it out of rotation until
-   /// the tokens are replaced.
+   /// Mark a session's credentials as refused, taking it permanently out of
+   /// rotation (including across restarts and settings sync) until an operator
+   /// explicitly reinstates it.
    pub async fn mark_rejected(&self, session_id: i64) {
-      self.record_restriction(
-         session_id,
-         crate::stats::Restriction::CredentialsRejected,
-         "upstream",
-         "Upstream rejected the account credentials",
-      );
-      if let Some(slot) = self.slot(session_id) {
-         slot.write_limits(|lim| {
-            lim.rejected = true;
-         });
+      let Some(slot) = self.slot(session_id) else {
+         return;
+      };
+      let (newly_rejected, changed) = slot.write_limits(|lim| {
+         let newly_rejected = !lim.rejected;
+         let changed = newly_rejected || !lim.filters_failed || lim.filters_retry_at != i64::MAX;
+         lim.rejected = true;
+         lim.filters_failed = true;
+         lim.filters_retry_at = i64::MAX;
+         (newly_rejected, changed)
+      });
+      if newly_rejected {
+         self.record_restriction(
+            session_id,
+            crate::stats::Restriction::CredentialsRejected,
+            "upstream",
+            "Upstream rejected the account credentials",
+         );
+      }
+      if changed {
+         self.persist_soon(session_id);
       }
    }
 
@@ -3225,12 +3256,14 @@ impl SessionPool {
             {
                return None;
             }
-            Some(((lim.search_only, !lim.verified_ops.is_empty()), slot.credentials.id))
+            Some((
+               (lim.search_only, !lim.verified_ops.is_empty()),
+               slot.credentials.id,
+            ))
          })
          .collect();
-      pending.sort_unstable_by(|left, right| {
-         right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1))
-      });
+      pending
+         .sort_unstable_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
       pending.into_iter().map(|(_, id)| id).collect()
    }
 
@@ -3270,7 +3303,9 @@ impl SessionPool {
    /// One account's credentials, without taking a concurrency slot or checking
    /// whether it may be used. For work that only needs to know who it is.
    pub fn credentials(&self, session_id: i64) -> Option<Arc<SessionCredentials>> {
-      self.slot(session_id).map(|slot| Arc::clone(&slot.credentials))
+      self
+         .slot(session_id)
+         .map(|slot| Arc::clone(&slot.credentials))
    }
 
    /// The `ct0` to send: one x.com issued on a rejection since startup, or the
@@ -3471,7 +3506,8 @@ impl SessionPool {
    /// correct default: nothing should be spent on a retired account. A probe is
    /// the one caller that has to reach it anyway — the whole point is to ask X
    /// whether a verdict is still true. Only the pool-level gates are skipped;
-   /// X still answers for itself, and `note_suspended` records whatever it says.
+   /// X still answers for itself, and `note_suspended` records whatever it
+   /// says.
    ///
    /// The slot is not metered, so a refused probe costs the account no quota.
    pub async fn probe_lease(&self, session_id: i64) -> Result<SessionLease> {
@@ -3769,7 +3805,8 @@ mod tests {
 
       assert_eq!(pool.pending_filter_sync_ids().await, vec![7]);
 
-      pool.mark_filters_failed(7, "synthetic refusal", Duration::from_hours(24))
+      pool
+         .mark_filters_failed(7, "synthetic refusal", Duration::from_hours(24))
          .await;
       assert!(
          pool.pending_filter_sync_ids().await.is_empty(),
@@ -4604,11 +4641,7 @@ mod tests {
       assert!(pool.acquire_id(1, "id/UserTweets").await.is_err());
 
       pool
-         .demote_to_view(
-            1,
-            None,
-            "Account suspended; moved to the view pool",
-         )
+         .demote_to_view(1, None, "Account suspended; moved to the view pool")
          .await;
 
       // It leaves search for good...
@@ -4621,11 +4654,7 @@ mod tests {
       // already on record as `search_banned`, and no store write is spent on an
       // account that is already in the pool it would move to.
       pool
-         .demote_to_view(
-            2,
-            None,
-            "Account suspended; moved to the view pool",
-         )
+         .demote_to_view(2, None, "Account suspended; moved to the view pool")
          .await;
       assert!(pool.slot(2).unwrap().read_limits().search_banned);
       assert!(pool.acquire_id(2, "id/UserTweets").await.is_ok());
@@ -4912,12 +4941,12 @@ mod tests {
       for id in 1..=200_i64 {
          let mut apis = std::collections::HashMap::new();
          apis.insert("x/UserTweets".to_owned(), crate::types::RateLimit {
-            limit:     150,
+            limit: 150,
             remaining: 100,
             reset,
          });
          apis.insert("x/TweetDetail".to_owned(), crate::types::RateLimit {
-            limit:     150,
+            limit: 150,
             remaining: if id == 200 { 50 } else { 0 },
             reset,
          });
@@ -4980,16 +5009,14 @@ mod tests {
 
       {
          let now = time::OffsetDateTime::now_utc().unix_timestamp();
-         assert!(
-            pool
-               .pool_line("UserTweets", now)
-               .starts_with("UserTweets accounts: 1 free, 0 mid-call, 0 held for parked calls, 0 resting after a bare 429, 0 spent, 0 out;")
-         );
-         assert!(
-            pool
-               .pool_line("SearchTimeline", now)
-               .starts_with("SearchTimeline accounts: 1 free, 0 mid-call, 0 held for parked calls, 0 resting after a bare 429, 0 spent, 1 out;")
-         );
+         assert!(pool.pool_line("UserTweets", now).starts_with(
+            "UserTweets accounts: 1 free, 0 mid-call, 0 held for parked calls, 0 resting after a \
+             bare 429, 0 spent, 0 out;"
+         ));
+         assert!(pool.pool_line("SearchTimeline", now).starts_with(
+            "SearchTimeline accounts: 1 free, 0 mid-call, 0 held for parked calls, 0 resting \
+             after a bare 429, 0 spent, 1 out;"
+         ));
       }
 
       pool
@@ -5123,7 +5150,7 @@ mod tests {
          let mut apis = std::collections::HashMap::with_capacity(endpoints.len());
          for &ep in &endpoints {
             apis.insert(ep.to_owned(), crate::types::RateLimit {
-               limit:     150,
+               limit: 150,
                remaining: 50 + (id % 100) as i32,
                reset,
             });
@@ -5134,7 +5161,11 @@ mod tests {
             kind: SessionKind::Cookie,
             auth_token: "tok".to_owned(),
             ct0: "ct0".to_owned(),
-            pool: if search { "search".to_owned() } else { String::new() },
+            pool: if search {
+               "search".to_owned()
+            } else {
+               String::new()
+            },
             apis,
             ..crate::types::Session::default()
          });
@@ -5164,7 +5195,8 @@ mod tests {
             latencies_us
          }));
       }
-      // Exercise concurrent reads (census / queue_report / cookie_header) beside acquires.
+      // Exercise concurrent reads (census / queue_report / cookie_header) beside
+      // acquires.
       let reader_pool = pool.clone();
       let reader = tokio::spawn(async move {
          for _ in 0..5 {
@@ -5185,7 +5217,8 @@ mod tests {
       let max = *all.last().unwrap();
       let qps = (all.len() as f64) / elapsed.as_secs_f64();
       eprintln!(
-         "fleet-scale 5440 accounts: {} ops in {:?} ({:.0} ops/s), acquire p50={}us p99={}us max={}us",
+         "fleet-scale 5440 accounts: {} ops in {:?} ({:.0} ops/s), acquire p50={}us p99={}us \
+          max={}us",
          all.len(),
          elapsed,
          qps,
@@ -5232,7 +5265,8 @@ mod tests {
          .last_active
          .store(0, super::Ordering::Relaxed);
 
-      // Expired/fresh accounts (187) must be chosen before hammering warm account 1 (160).
+      // Expired/fresh accounts (187) must be chosen before hammering warm account 1
+      // (160).
       let first = pool.acquire(api, Some(SessionKind::Cookie)).await.unwrap();
       assert_ne!(
          first.id, 1,
@@ -5276,7 +5310,8 @@ mod tests {
       pool.mark_verified(2, api).await;
 
       let now = u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap();
-      // Strike 1 on query A rests account 1 without demoting it or stripping verified_ops.
+      // Strike 1 on query A rests account 1 without demoting it or stripping
+      // verified_ops.
       assert_eq!(
          pool
             .record_search_timeline_failure_at(1, api, 111, true, now)
@@ -5299,7 +5334,8 @@ mod tests {
             .await,
          SearchFailureAction::Rested
       );
-      // A different query too soon (< 10s after strike 1) does NOT double-strike either.
+      // A different query too soon (< 10s after strike 1) does NOT double-strike
+      // either.
       assert_eq!(
          pool
             .record_search_timeline_failure_at(1, api, 222, true, now + 3)
@@ -5529,20 +5565,17 @@ mod tests {
          .find(|op| op.operation == "UserTweets")
          .unwrap();
 
-      let search_snap = pool.out_accounts_snapshot(
-         Some("SearchTimeline"),
-         None,
-         None,
-         None,
-         "priority",
-         1,
-         50,
-      );
+      let search_snap =
+         pool.out_accounts_snapshot(Some("SearchTimeline"), None, None, None, "priority", 1, 50);
       assert_eq!(search_snap.counts.search_timeline, search_op.out);
       assert_eq!(search_snap.total_filtered, search_op.out);
       // Priority places stale ct0 (#3) ahead of unverified (#2).
       assert_eq!(
-         search_snap.accounts.iter().map(|a| a.id).collect::<Vec<_>>(),
+         search_snap
+            .accounts
+            .iter()
+            .map(|a| a.id)
+            .collect::<Vec<_>>(),
          vec![3, 2]
       );
       assert_eq!(search_snap.breakdown.ct0_dead, 1);
@@ -5552,7 +5585,11 @@ mod tests {
          pool.out_accounts_snapshot(Some("UserTweets"), None, None, None, "priority", 1, 50);
       assert_eq!(tweets_snap.counts.user_tweets, tweets_op.out);
       assert_eq!(
-         tweets_snap.accounts.iter().map(|a| a.id).collect::<Vec<_>>(),
+         tweets_snap
+            .accounts
+            .iter()
+            .map(|a| a.id)
+            .collect::<Vec<_>>(),
          vec![5]
       );
 
@@ -5560,12 +5597,21 @@ mod tests {
          pool.out_accounts_snapshot(None, Some("demoted"), None, None, "priority", 1, 50);
       assert_eq!(demoted_snap.counts.demoted_from_search, 1);
       assert_eq!(
-         demoted_snap.accounts.iter().map(|a| a.id).collect::<Vec<_>>(),
+         demoted_snap
+            .accounts
+            .iter()
+            .map(|a| a.id)
+            .collect::<Vec<_>>(),
          vec![6]
       );
 
       // Updating ct0 replaces the token and clears ct0_dead immediately.
-      assert!(pool.set_ct0(3, "fresh_operator_ct0".to_owned()).await.unwrap());
+      assert!(
+         pool
+            .set_ct0(3, "fresh_operator_ct0".to_owned())
+            .await
+            .unwrap()
+      );
       assert_eq!(pool.ct0(3).as_deref(), Some("fresh_operator_ct0"));
       let after = pool.account_state(3).await.unwrap();
       assert!(!after.ct0_dead);
@@ -5573,15 +5619,8 @@ mod tests {
       assert_eq!(after.ct0_len, "fresh_operator_ct0".len());
 
       // Account #3 is no longer out for SearchTimeline.
-      let search_snap_after = pool.out_accounts_snapshot(
-         Some("SearchTimeline"),
-         None,
-         None,
-         None,
-         "priority",
-         1,
-         50,
-      );
+      let search_snap_after =
+         pool.out_accounts_snapshot(Some("SearchTimeline"), None, None, None, "priority", 1, 50);
       assert_eq!(
          search_snap_after
             .accounts
@@ -5607,5 +5646,81 @@ mod tests {
       let s5 = pool.account_state(5).await.unwrap();
       assert!(!s5.credentials_rejected);
       assert!(s5.available);
+   }
+
+   #[tokio::test]
+   async fn rejected_credentials_stay_permanently_benched_across_headers_and_filters() {
+      let pool = SessionPool::empty(2);
+      let sessions = vec![
+         crate::types::Session {
+            id: 10,
+            username: "locked_search".to_owned(),
+            kind: SessionKind::Cookie,
+            auth_token: "a10".to_owned(),
+            ct0: "c10".to_owned(),
+            pool: "search".to_owned(),
+            ..crate::types::Session::default()
+         },
+         crate::types::Session {
+            id: 11,
+            username: "locked_view".to_owned(),
+            kind: SessionKind::Cookie,
+            auth_token: "a11".to_owned(),
+            ct0: "c11".to_owned(),
+            ..crate::types::Session::default()
+         },
+      ];
+      assert_eq!(pool.append_sessions(sessions).await, 2);
+
+      pool.mark_rejected(10).await;
+      pool.mark_rejected(11).await;
+
+      // Rate-limit headers from HTTP 200/403 code-326 responses must never
+      // un-reject the account.
+      let reset = time::OffsetDateTime::now_utc().unix_timestamp() + 900;
+      pool
+         .update_session_limit(10, "ph2f/SearchTimeline", 187, 186, reset)
+         .await;
+      pool
+         .update_session_limit(11, "x/UserTweets", 150, 149, reset)
+         .await;
+
+      let s10 = pool.account_state(10).await.unwrap();
+      assert!(s10.credentials_rejected);
+      assert!(!s10.available);
+      assert!(s10.filters_failed);
+      assert_eq!(s10.filters_retry_at, i64::MAX);
+
+      let s11 = pool.account_state(11).await.unwrap();
+      assert!(s11.credentials_rejected);
+      assert!(!s11.available);
+      assert!(s11.filters_failed);
+      assert_eq!(s11.filters_retry_at, i64::MAX);
+
+      assert!(pool.pending_filter_sync_ids().await.is_empty());
+      assert!(pool.search_audit_ids("ph2f/SearchTimeline").await.is_empty());
+      assert!(pool.cookie_header().is_none());
+      assert!(matches!(
+         pool.acquire_id(10, "ph2f/SearchTimeline").await,
+         Err(Error::SessionRejected(_))
+      ));
+      assert!(matches!(
+         pool.acquire_id(11, "x/UserTweets").await,
+         Err(Error::SessionRejected(_))
+      ));
+
+      // Only an explicit reinstate lifts the rejection and resets the settings
+      // retry fence.
+      assert!(pool.reinstate(10).await);
+      let reinstated = pool.account_state(10).await.unwrap();
+      assert!(!reinstated.credentials_rejected);
+      assert!(reinstated.available);
+      assert!(!reinstated.filters_failed);
+      assert_eq!(reinstated.filters_retry_at, 0);
+      assert_eq!(pool.pending_filter_sync_ids().await, vec![10]);
+      assert_eq!(
+         pool.search_audit_ids("ph2f/SearchTimeline").await,
+         vec![10]
+      );
    }
 }

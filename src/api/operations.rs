@@ -112,7 +112,8 @@ struct Operation {
    /// Shared view of `features` to avoid cloning the JSON blob per call.
    #[serde(skip)]
    features_arc:     Arc<str>,
-   /// Pre-encoded `features` query value matching `form_urlencoded::Serializer`.
+   /// Pre-encoded `features` query value matching
+   /// `form_urlencoded::Serializer`.
    #[serde(skip)]
    encoded_features: Arc<str>,
 }
@@ -574,6 +575,9 @@ mod tests {
       assert_eq!(&*resolved.features, features);
       let mut qs = form_urlencoded::Serializer::new(String::new());
       qs.append_pair("features", features);
-      assert_eq!(format!("features={}", resolved.encoded_features), qs.finish());
+      assert_eq!(
+         format!("features={}", resolved.encoded_features),
+         qs.finish()
+      );
    }
 }

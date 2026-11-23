@@ -41,8 +41,8 @@ INSERT INTO session_limits (id, body) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE
                       EXCLUDED.body";
 
 const BATCH_UPSERT: &str = "\
-INSERT INTO session_limits (id, body) SELECT * FROM UNNEST($1::bigint[], $2::jsonb[]) ON \
-                            CONFLICT (id) DO UPDATE SET body = EXCLUDED.body";
+INSERT INTO session_limits (id, body) SELECT * FROM UNNEST($1::bigint[], $2::jsonb[]) ON CONFLICT \
+                            (id) DO UPDATE SET body = EXCLUDED.body";
 
 /// Handle for saving one account without rewriting the rest.
 #[derive(Clone)]
@@ -76,8 +76,8 @@ impl Connected {
          .map_err(|err| Error::InvalidConfig(format!("postgres schema: {err}")))?;
       let _ = client
          .batch_execute(
-            "ALTER TABLE session_limits SET (fillfactor = 70, \
-             autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_limit = 1000)",
+            "ALTER TABLE session_limits SET (fillfactor = 70, autovacuum_vacuum_scale_factor = \
+             0.02, autovacuum_vacuum_cost_limit = 1000)",
          )
          .await;
       Ok(Self { client })
@@ -105,7 +105,10 @@ impl Connected {
 
    /// First boot: the JSON file is the copy we already have. One transaction
    /// moves it into the table, and later changes update a single row.
-   #[allow(dead_code, reason = "retained for standalone JSON-to-Postgres migration")]
+   #[allow(
+      dead_code,
+      reason = "retained for standalone JSON-to-Postgres migration"
+   )]
    pub async fn import(&mut self, limits: &HashMap<i64, SessionLimits>) -> Result<()> {
       let transaction = self
          .client
@@ -180,7 +183,9 @@ impl Connected {
             // flush window, as it is now.
             let (batch_ids, batch_bodies) = encode_batch(&mut pending, &snapshot);
             if !batch_ids.is_empty()
-               && let Err(err) = client.execute(&statement, &[&batch_ids, &batch_bodies]).await
+               && let Err(err) = client
+                  .execute(&statement, &[&batch_ids, &batch_bodies])
+                  .await
             {
                tracing::warn!(
                   rows = batch_ids.len(),
@@ -228,9 +233,8 @@ mod tests {
    #[test]
    fn encode_batch_drains_distinct_ids_and_skips_missing_snapshots() {
       let mut pending = HashSet::from([10_i64, 20, 30]);
-      let (mut ids, bodies) = encode_batch(&mut pending, &|id| {
-         (id != 20).then(SessionLimits::default)
-      });
+      let (mut ids, bodies) =
+         encode_batch(&mut pending, &|id| (id != 20).then(SessionLimits::default));
       assert!(pending.is_empty());
       ids.sort_unstable();
       assert_eq!(ids, [10, 30]);

@@ -1,11 +1,25 @@
-use maud::{Markup, html};
+use maud::{
+   Markup,
+   html,
+};
 
-use super::timeline::{render_media_view_tabs, render_timeline_with_view};
+use super::timeline::{
+   render_media_view_tabs,
+   render_timeline_with_view,
+};
 use crate::{
    config::Config,
-   types::{List, Prefs, Tweets, User},
+   types::{
+      List,
+      Prefs,
+      Tweets,
+      User,
+   },
    utils::formatters,
-   views::{renderutils::icon, user_list::render_user},
+   views::{
+      renderutils::icon,
+      user_list::render_user,
+   },
 };
 
 /// Visible page heading. Bing flags a crawled URL that has no `<h1>`.
@@ -23,7 +37,8 @@ fn search_heading(query: &str) -> String {
 }
 
 /// Search pagination URL. The Twitter cursor is opaque and must be encoded —
-/// raw `+` / `=` in the query string get treated as form syntax and break paging.
+/// raw `+` / `=` in the query string get treated as form syntax and break
+/// paging.
 fn search_page_url(query: &str, tab: &str, cursor: Option<&str>, view: &str) -> String {
    let mut url = format!("/search?q={}&f={tab}", formatters::url_encode(query));
    if tab == "media" && !view.is_empty() && view != "timeline" {
@@ -329,18 +344,18 @@ fn render_search_tabs(query: &str, active: &str, view: &str) -> Markup {
    reason = "SearchFilters is the canonical name"
 )]
 pub struct SearchFilters {
-   pub media: bool,
-   pub images: bool,
-   pub videos: bool,
-   pub links: bool,
-   pub news: bool,
-   pub quote: bool,
-   pub verified: bool,
-   pub exclude_replies: bool,
+   pub media:            bool,
+   pub images:           bool,
+   pub videos:           bool,
+   pub links:            bool,
+   pub news:             bool,
+   pub quote:            bool,
+   pub verified:         bool,
+   pub exclude_replies:  bool,
    pub exclude_retweets: bool,
-   pub since: String,
-   pub until: String,
-   pub min_faves: String,
+   pub since:            String,
+   pub until:            String,
+   pub min_faves:        String,
 }
 
 impl SearchFilters {
@@ -504,7 +519,10 @@ fn gen_search_checkbox(name: &str, label: &str, checked: bool) -> Markup {
 
 #[cfg(test)]
 mod tests {
-   use super::{SearchFilters, render_search_panel_with_action};
+   use super::{
+      SearchFilters,
+      render_search_panel_with_action,
+   };
 
    fn checkbox_is_checked(html: &str, name: &str) -> bool {
       let needle = format!("name=\"{name}\"");
@@ -522,8 +540,9 @@ mod tests {
          exclude_retweets: true,
          ..SearchFilters::default()
       };
-      let html = render_search_panel_with_action("candy", Some(&filters), "/alice/search", "tweets", "")
-         .into_string();
+      let html =
+         render_search_panel_with_action("candy", Some(&filters), "/alice/search", "tweets", "")
+            .into_string();
       assert!(
          checkbox_is_checked(&html, "e-nativeretweets"),
          "exclude retweets was reset: {html}"

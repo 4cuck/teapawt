@@ -14,6 +14,7 @@ pub fn router(indexnow_key: &str) -> Router<AppState> {
       .merge(super::seo::router(indexnow_key))
       .merge(super::agents::router())
       .merge(super::pages::router())
+      .merge(super::fingerprint::router())
       .merge(super::donate::router())
       .merge(super::pass::router())
       .merge(super::import::router())

@@ -1,7 +1,10 @@
 //! What a visitor sees instead of content when the Anti-DDoS gate is up:
 //! the gate page itself and the home page notice that explains it.
 
-use maud::{Markup, html};
+use maud::{
+   Markup,
+   html,
+};
 
 /// Why this visitor is being checked.
 pub enum Why {
@@ -150,38 +153,41 @@ mod tests {
    #[test]
    fn the_gate_names_tencent_and_carries_the_resume_path() {
       let page = render_gate(&GatePage {
-         site_key: "key",
-         action: "/.ddos-check",
-         resume: "/jack?x=1",
-         why: Why::Network { asn: 132_203, per_minute: 6100 },
-         price: "$15",
+         site_key:     "key",
+         action:       "/.ddos-check",
+         resume:       "/jack?x=1",
+         why:          Why::Network {
+            asn:        132_203,
+            per_minute: 6100,
+         },
+         price:        "$15",
          pass_minutes: 60,
-         failed: false,
+         failed:       false,
       })
       .into_string();
       assert!(page.contains("Tencent Cloud (AS132203)"));
       assert!(page.contains("6100"));
       assert!(page.contains("value=\"/jack?x=1\""));
       let surge = render_gate(&GatePage {
-         site_key: "key",
-         action: "/.ddos-check",
-         resume: "/",
-         why: Why::Surge,
-         price: "$15",
+         site_key:     "key",
+         action:       "/.ddos-check",
+         resume:       "/",
+         why:          Why::Surge,
+         price:        "$15",
          pass_minutes: 60,
-         failed: true,
+         failed:       true,
       })
       .into_string();
       assert!(!surge.contains("To Tencent Cloud"));
       assert!(surge.contains("did not go through"));
       let everyone = render_gate(&GatePage {
-         site_key: "key",
-         action: "/.ddos-check",
-         resume: "/",
-         why: Why::Everyone,
-         price: "$15",
+         site_key:     "key",
+         action:       "/.ddos-check",
+         resume:       "/",
+         why:          Why::Everyone,
+         price:        "$15",
          pass_minutes: 60,
-         failed: false,
+         failed:       false,
       })
       .into_string();
       assert!(everyone.contains("Quick check"));
@@ -193,13 +199,13 @@ mod tests {
    #[test]
    fn the_automatic_gate_says_how_much_traffic_is_being_flooded() {
       let page = render_gate(&GatePage {
-         site_key: "key",
-         action: "/.ddos-check",
-         resume: "/",
-         why: Why::Attack { share: 92 },
-         price: "$15",
+         site_key:     "key",
+         action:       "/.ddos-check",
+         resume:       "/",
+         why:          Why::Attack { share: 92 },
+         price:        "$15",
          pass_minutes: 60,
-         failed: false,
+         failed:       false,
       })
       .into_string();
       assert!(page.contains("Slow down"));

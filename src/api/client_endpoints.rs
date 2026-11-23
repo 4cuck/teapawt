@@ -379,7 +379,8 @@ const fn user_has_no_timeline_posts(user: &User) -> bool {
 }
 
 enum HintedOutcome<T> {
-   /// Profile needs no timeline fetch (protected, suspended, or empty first page).
+   /// Profile needs no timeline fetch (protected, suspended, or empty first
+   /// page).
    UserOnly(Box<User>),
    /// User resolved with the hinted numeric id and the timeline completed.
    Matched {
@@ -419,9 +420,7 @@ where
    };
 
    let user = resolve_hinted_user(user_res, known_full)?;
-   if user.protected
-      || user.suspended
-      || (skip_empty_timeline && user_has_no_timeline_posts(&user))
+   if user.protected || user.suspended || (skip_empty_timeline && user_has_no_timeline_posts(&user))
    {
       return Ok(HintedOutcome::UserOnly(Box::new(user)));
    }
@@ -1243,9 +1242,9 @@ impl ApiClient {
       let known_full = known.filter(|user| !user.fullname.is_empty());
 
       if cursor.is_none() {
-         if let Some(known_user) = known_full.filter(|user| {
-            !user.protected && !user.suspended && user_has_no_timeline_posts(user)
-         }) {
+         if let Some(known_user) = known_full
+            .filter(|user| !user.protected && !user.suspended && user_has_no_timeline_posts(user))
+         {
             return Ok(OpenProfile::ready(profile_from_parts(
                known_user.clone(),
                Timeline::default(),
@@ -2363,7 +2362,10 @@ mod first_page_tests {
 
    #[test]
    fn empty_primary_answer_routes_verification_without_fallback_credit() {
-      assert_eq!(secondary_route(true, Route::Originals), Route::EmptyVerified);
+      assert_eq!(
+         secondary_route(true, Route::Originals),
+         Route::EmptyVerified
+      );
       assert_eq!(secondary_route(true, Route::Replies), Route::EmptyVerified);
       assert_eq!(secondary_route(false, Route::Originals), Route::Originals);
       assert_eq!(secondary_route(false, Route::Replies), Route::Replies);

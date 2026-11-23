@@ -148,7 +148,9 @@ fn challenge(state: &AppState, prefs: &Prefs, prompt: &Prompt<'_>, failed: bool)
    // A challenge is the gate working, not a failed search. Tagging it keeps it
    // out of the error rate, which otherwise reads 90% on a healthy site because
    // every first-time visitor gets one of these.
-   response.extensions_mut().insert(crate::stats::Outcome::Challenged);
+   response
+      .extensions_mut()
+      .insert(crate::stats::Outcome::Challenged);
    response
 }
 
@@ -170,7 +172,9 @@ fn redirect(cookie: Option<Cookie<'static>>, url: &str) -> Response {
    // The visitor solved the challenge and is being sent to their results. That
    // is a finished request, not an unknown outcome; counting it as "other" made
    // a working gate look like tens of thousands of unexplained responses.
-   response.extensions_mut().insert(crate::stats::Outcome::Success);
+   response
+      .extensions_mut()
+      .insert(crate::stats::Outcome::Success);
    private(response)
 }
 

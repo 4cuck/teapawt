@@ -38,40 +38,70 @@ const SORTS: [(&str, &str); 4] = [
 
 fn scope_heading(query: &OutAccountsQuery) -> (&'static str, &'static str) {
    match query.op.as_deref() {
-      Some("SearchTimeline") => (
-         "SearchTimeline — Out / unverified",
-         "Search-pool accounts currently counted in the red Out / unverified bar for SearchTimeline. Export cookies into your browser, replace stale ct0 tokens, or run a live Search or Health probe.",
-      ),
-      Some("UserTweets") => (
-         "UserTweets — Out / unverified",
-         "View-pool accounts currently counted in the red Out / unverified bar for UserTweets. Inspect restriction history, export cookies, replace bad ct0 tokens, and test live probes.",
-      ),
-      Some("UserByScreenName") => (
-         "UserByScreenName — Out / unverified",
-         "View-pool accounts currently counted in the red Out / unverified bar for UserByScreenName. Inspect restriction history, export cookies, replace bad ct0 tokens, and test live probes.",
-      ),
-      Some("TweetDetail") => (
-         "TweetDetail — Out / unverified",
-         "View-pool accounts currently counted in the red Out / unverified bar for TweetDetail. Inspect restriction history, export cookies, replace bad ct0 tokens, and test live probes.",
-      ),
+      Some("SearchTimeline") => {
+         (
+            "SearchTimeline — Out / unverified",
+            "Search-pool accounts currently counted in the red Out / unverified bar for \
+             SearchTimeline. Export cookies into your browser, replace stale ct0 tokens, or run a \
+             live Search or Health probe.",
+         )
+      },
+      Some("UserTweets") => {
+         (
+            "UserTweets — Out / unverified",
+            "View-pool accounts currently counted in the red Out / unverified bar for UserTweets. \
+             Inspect restriction history, export cookies, replace bad ct0 tokens, and test live \
+             probes.",
+         )
+      },
+      Some("UserByScreenName") => {
+         (
+            "UserByScreenName — Out / unverified",
+            "View-pool accounts currently counted in the red Out / unverified bar for \
+             UserByScreenName. Inspect restriction history, export cookies, replace bad ct0 \
+             tokens, and test live probes.",
+         )
+      },
+      Some("TweetDetail") => {
+         (
+            "TweetDetail — Out / unverified",
+            "View-pool accounts currently counted in the red Out / unverified bar for \
+             TweetDetail. Inspect restriction history, export cookies, replace bad ct0 tokens, \
+             and test live probes.",
+         )
+      },
       _ => {
          match query.pool.as_deref() {
-            Some("demoted") => (
-               "Demoted from search (now in view pool)",
-               "Accounts originally assigned to search that were demoted into the view pool. Export cookies to inspect in a browser, fix stale ct0 tokens, run a Search probe, or reinstate them.",
-            ),
-            Some("search") => (
-               "Search pool — Out / unverified",
-               "Search-pool accounts currently out of rotation or unverified for SearchTimeline.",
-            ),
-            Some("view") => (
-               "View pool — Out / unverified",
-               "View-pool accounts currently out of rotation for UserTweets, UserByScreenName, or TweetDetail.",
-            ),
-            _ => (
-               "Out / unverified accounts",
-               "All live accounts currently counted as Out / unverified in their assigned pool. Click any operation tab, export Cookie-Editor JSON into your browser, paste a replacement ct0, and run a test probe.",
-            ),
+            Some("demoted") => {
+               (
+                  "Demoted from search (now in view pool)",
+                  "Accounts originally assigned to search that were demoted into the view pool. \
+                   Export cookies to inspect in a browser, fix stale ct0 tokens, run a Search \
+                   probe, or reinstate them.",
+               )
+            },
+            Some("search") => {
+               (
+                  "Search pool — Out / unverified",
+                  "Search-pool accounts currently out of rotation or unverified for \
+                   SearchTimeline.",
+               )
+            },
+            Some("view") => {
+               (
+                  "View pool — Out / unverified",
+                  "View-pool accounts currently out of rotation for UserTweets, UserByScreenName, \
+                   or TweetDetail.",
+               )
+            },
+            _ => {
+               (
+                  "Out / unverified accounts",
+                  "All live accounts currently counted as Out / unverified in their assigned \
+                   pool. Click any operation tab, export Cookie-Editor JSON into your browser, \
+                   paste a replacement ct0, and run a test probe.",
+               )
+            },
          }
       },
    }
@@ -99,11 +129,7 @@ fn pagination_bar(data: &OutAccountsPageData, query: &OutAccountsQuery) -> Marku
    } else {
       (data.page - 1) * data.page_size + 1
    };
-   let end = if shown == 0 {
-      0
-   } else {
-      start + shown - 1
-   };
+   let end = if shown == 0 { 0 } else { start + shown - 1 };
 
    html! {
       div class="admin-pagination-bar" {
@@ -158,167 +184,187 @@ pub(crate) fn out_accounts(
 
    let tabs: [(&str, Option<&str>, Option<&str>, usize); 6] = [
       ("All out", None, None, data.counts.all_out),
-      ("SearchTimeline", Some("SearchTimeline"), None, data.counts.search_timeline),
-      ("UserTweets (view)", Some("UserTweets"), None, data.counts.user_tweets),
-      ("UserByScreenName (view)", Some("UserByScreenName"), None, data.counts.user_by_screen_name),
-      ("TweetDetail (view)", Some("TweetDetail"), None, data.counts.tweet_detail),
-      ("Demoted from search", None, Some("demoted"), data.counts.demoted_from_search),
+      (
+         "SearchTimeline",
+         Some("SearchTimeline"),
+         None,
+         data.counts.search_timeline,
+      ),
+      (
+         "UserTweets (view)",
+         Some("UserTweets"),
+         None,
+         data.counts.user_tweets,
+      ),
+      (
+         "UserByScreenName (view)",
+         Some("UserByScreenName"),
+         None,
+         data.counts.user_by_screen_name,
+      ),
+      (
+         "TweetDetail (view)",
+         Some("TweetDetail"),
+         None,
+         data.counts.tweet_detail,
+      ),
+      (
+         "Demoted from search",
+         None,
+         Some("demoted"),
+         data.counts.demoted_from_search,
+      ),
    ];
 
-   let search_mode_default = op == Some("SearchTimeline") || pool == Some("demoted") || pool == Some("search");
+   let search_mode_default =
+      op == Some("SearchTimeline") || pool == Some("demoted") || pool == Some("search");
 
-   frame(
-      theme,
-      heading,
-      "out",
-      None,
-      html! {
-         header class="admin-page-header" {
-            a class="admin-text-link" href="/admin/stats" { "← Overview & pools" }
-            p class="admin-eyebrow" { "Operations / out & unverified" }
-            h1 { (heading) }
-            p { (subtitle) }
+   frame(theme, heading, "out", None, html! {
+      header class="admin-page-header" {
+         a class="admin-text-link" href="/admin/stats" { "← Overview & pools" }
+         p class="admin-eyebrow" { "Operations / out & unverified" }
+         h1 { (heading) }
+         p { (subtitle) }
+      }
+
+      div class="admin-stats-toolbar admin-out-scope-bar" {
+         nav class="admin-range-tabs" aria-label="Operation and pool scope" {
+            @for (label, tab_op, tab_pool, count) in tabs {
+               @let active = op == tab_op && (tab_op.is_some() || pool == tab_pool);
+               a
+                  class=(if active { "admin-range-tab is-active" } else { "admin-range-tab" })
+                  href=(query.with_scope(tab_op, tab_pool))
+                  aria-current=[active.then_some("page")]
+               {
+                  (label)
+                  " "
+                  span class="admin-tab-count" { (count) }
+               }
+            }
          }
+         div class="admin-stats-toolbar-meta" {
+            button
+               id="out-refresh"
+               class="admin-btn"
+               type="button"
+               data-uri=(canonical_uri)
+            {
+               "Refresh"
+            }
+         }
+      }
 
-         div class="admin-stats-toolbar admin-out-scope-bar" {
-            nav class="admin-range-tabs" aria-label="Operation and pool scope" {
-               @for (label, tab_op, tab_pool, count) in tabs {
-                  @let active = op == tab_op && (tab_op.is_some() || pool == tab_pool);
+      @if op == Some("SearchTimeline") && data.counts.demoted_from_search > 0 {
+         p class="admin-notice admin-notice--warn" {
+            (data.counts.demoted_from_search)
+            " additional search account"
+            @if data.counts.demoted_from_search != 1 { "s were" } @else { " was" }
+            " demoted into the view pool. "
+            a class="admin-text-link" href=(query.with_scope(None, Some("demoted"))) {
+               "Inspect demoted accounts →"
+            }
+         }
+      }
+
+      section class="admin-stats-panel" aria-label="Filter out accounts" {
+         div class="admin-reason-chips" role="navigation" aria-label="Filter by reason" {
+            @let all_active = active_reason.is_none();
+            a
+               class=(if all_active { "admin-chip is-active" } else { "admin-chip" })
+               href=(query.with_reason(None))
+               aria-current=[all_active.then_some("page")]
+            {
+               "All reasons"
+               span class="admin-chip-count" { (data.breakdown.total) }
+            }
+            @for (key, label) in REASONS {
+               @let count = reason_count(data, key);
+               @let active = active_reason == Some(key);
+               @if count > 0 || active {
                   a
-                     class=(if active { "admin-range-tab is-active" } else { "admin-range-tab" })
-                     href=(query.with_scope(tab_op, tab_pool))
+                     class=(if active { "admin-chip is-active" } else { "admin-chip" })
+                     href=(query.with_reason(Some(key)))
                      aria-current=[active.then_some("page")]
                   {
                      (label)
-                     " "
-                     span class="admin-tab-count" { (count) }
-                  }
-               }
-            }
-            div class="admin-stats-toolbar-meta" {
-               button
-                  id="out-refresh"
-                  class="admin-btn"
-                  type="button"
-                  data-uri=(canonical_uri)
-               {
-                  "Refresh"
-               }
-            }
-         }
-
-         @if op == Some("SearchTimeline") && data.counts.demoted_from_search > 0 {
-            p class="admin-notice admin-notice--warn" {
-               (data.counts.demoted_from_search)
-               " additional search account"
-               @if data.counts.demoted_from_search != 1 { "s were" } @else { " was" }
-               " demoted into the view pool. "
-               a class="admin-text-link" href=(query.with_scope(None, Some("demoted"))) {
-                  "Inspect demoted accounts →"
-               }
-            }
-         }
-
-         section class="admin-stats-panel" aria-label="Filter out accounts" {
-            div class="admin-reason-chips" role="navigation" aria-label="Filter by reason" {
-               @let all_active = active_reason.is_none();
-               a
-                  class=(if all_active { "admin-chip is-active" } else { "admin-chip" })
-                  href=(query.with_reason(None))
-                  aria-current=[all_active.then_some("page")]
-               {
-                  "All reasons"
-                  span class="admin-chip-count" { (data.breakdown.total) }
-               }
-               @for (key, label) in REASONS {
-                  @let count = reason_count(data, key);
-                  @let active = active_reason == Some(key);
-                  @if count > 0 || active {
-                     a
-                        class=(if active { "admin-chip is-active" } else { "admin-chip" })
-                        href=(query.with_reason(Some(key)))
-                        aria-current=[active.then_some("page")]
-                     {
-                        (label)
-                        span class="admin-chip-count" { (count) }
-                     }
-                  }
-               }
-            }
-
-            form class="admin-filters" action="/admin/stats/out" method="get" {
-               @if let Some(selected_op) = op {
-                  input type="hidden" name="op" value=(selected_op);
-               }
-               @if let Some(selected_pool) = pool {
-                  input type="hidden" name="pool" value=(selected_pool);
-               }
-               @if let Some(selected_reason) = active_reason {
-                  input type="hidden" name="reason" value=(selected_reason);
-               }
-               label class="admin-filter-field admin-filter-field--search" {
-                  "Account or ID"
-                  input
-                     type="search"
-                     name="q"
-                     value=(query.q.as_deref().unwrap_or(""))
-                     placeholder="Username or numeric ID";
-               }
-               label class="admin-filter-field" {
-                  "Sort order"
-                  select name="sort" {
-                     @for (value, label) in SORTS {
-                        option value=(value) selected[active_sort == value] { (label) }
-                     }
-                  }
-               }
-               div class="admin-filters-actions" {
-                  button class="admin-btn admin-btn--primary" type="submit" { "Filter" }
-                  @if query.has_filters() {
-                     a class="admin-btn" href="/admin/stats/out" { "Clear" }
+                     span class="admin-chip-count" { (count) }
                   }
                }
             }
          }
 
-         section class="admin-stats-panel" aria-labelledby="out-accounts-title" {
-            div class="admin-section-heading" {
-               div {
-                  h2 id="out-accounts-title" { "Accounts requiring investigation" }
-                  p { "Use Copy cookies or JSON to import into Cookie-Editor in your browser, Fix ct0 to insert a replacement CSRF token, or Probe to test live against X." }
+         form class="admin-filters" action="/admin/stats/out" method="get" {
+            @if let Some(selected_op) = op {
+               input type="hidden" name="op" value=(selected_op);
+            }
+            @if let Some(selected_pool) = pool {
+               input type="hidden" name="pool" value=(selected_pool);
+            }
+            @if let Some(selected_reason) = active_reason {
+               input type="hidden" name="reason" value=(selected_reason);
+            }
+            label class="admin-filter-field admin-filter-field--search" {
+               "Account or ID"
+               input
+                  type="search"
+                  name="q"
+                  value=(query.q.as_deref().unwrap_or(""))
+                  placeholder="Username or numeric ID";
+            }
+            label class="admin-filter-field" {
+               "Sort order"
+               select name="sort" {
+                  @for (value, label) in SORTS {
+                     option value=(value) selected[active_sort == value] { (label) }
+                  }
                }
             }
-            p id="out-status" class="admin-notice" role="status" hidden {}
+            div class="admin-filters-actions" {
+               button class="admin-btn admin-btn--primary" type="submit" { "Filter" }
+               @if query.has_filters() {
+                  a class="admin-btn" href="/admin/stats/out" { "Clear" }
+               }
+            }
+         }
+      }
 
-            (pagination_bar(data, query))
+      section class="admin-stats-panel" aria-labelledby="out-accounts-title" {
+         div class="admin-section-heading" {
+            div {
+               h2 id="out-accounts-title" { "Accounts requiring investigation" }
+               p { "Use Copy cookies or JSON to import into Cookie-Editor in your browser, Fix ct0 to insert a replacement CSRF token, or Probe to test live against X." }
+            }
+         }
+         p id="out-status" class="admin-notice" role="status" hidden {}
 
-            @if data.accounts.is_empty() {
-               p class="admin-empty" { "No accounts match the selected operation, pool, and reason filters." }
-            } @else {
-               div class="admin-table-wrap" {
-                  table class="admin-table admin-out-table" {
-                     thead {
-                        tr {
-                           th scope="col" { "Account" }
-                           th scope="col" { "Pool & ct0" }
-                           th scope="col" { "Why out / flags" }
-                           th scope="col" class="admin-col-evidence" { "Latest restriction & activity" }
-                           th scope="col" { "Actions" }
-                        }
+         (pagination_bar(data, query))
+
+         @if data.accounts.is_empty() {
+            p class="admin-empty" { "No accounts match the selected operation, pool, and reason filters." }
+         } @else {
+            div class="admin-table-wrap" {
+               table class="admin-table admin-out-table" {
+                  thead {
+                     tr {
+                        th scope="col" { "Account" }
+                        th scope="col" { "Pool & ct0" }
+                        th scope="col" { "Why out / flags" }
+                        th scope="col" class="admin-col-evidence" { "Latest restriction & activity" }
+                        th scope="col" { "Actions" }
                      }
-                     tbody {
-                        @for row in &data.accounts {
-                           (account_row(row, search_mode_default))
-                        }
+                  }
+                  tbody {
+                     @for row in &data.accounts {
+                        (account_row(row, search_mode_default))
                      }
                   }
                }
             }
-
-            (pagination_bar(data, query))
          }
-      },
-   )
+
+         (pagination_bar(data, query))
+      }
+   })
 }
 
 fn account_row(row: &OutAccountRow, search_mode_default: bool) -> Markup {
@@ -588,7 +634,7 @@ mod tests {
          ..OutAccountsQuery::default()
       };
       let data = OutAccountsPageData {
-         counts: OutOperationCounts {
+         counts:         OutOperationCounts {
             all_out:             15,
             search_timeline:     3,
             user_tweets:         12,
@@ -596,7 +642,7 @@ mod tests {
             tweet_detail:        12,
             demoted_from_search: 2,
          },
-         breakdown: OutBreakdown {
+         breakdown:      OutBreakdown {
             total:                3,
             ct0_dead:             1,
             credentials_rejected: 0,
@@ -630,7 +676,7 @@ mod tests {
                search_empty_streak: 0,
                profile_strikes:     0,
                reasons:             OutReasons {
-                  ct0_dead:          true,
+                  ct0_dead: true,
                   unverified_search: true,
                   ..OutReasons::default()
                },
@@ -639,7 +685,8 @@ mod tests {
          }],
          now:            1_700_000_100,
       };
-      let markup = out_accounts("dark", &data, &query, "/admin/stats/out?op=SearchTimeline").into_string();
+      let markup =
+         out_accounts("dark", &data, &query, "/admin/stats/out?op=SearchTimeline").into_string();
       assert!(!markup.contains("style=\""));
       assert!(!markup.contains("<script>"));
       assert!(markup.contains("SearchTimeline — Out / unverified"));

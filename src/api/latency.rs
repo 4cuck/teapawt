@@ -397,8 +397,8 @@ impl Latency {
             };
             let _ = write!(
                line,
-               "{name}: {} answered, p50 {} ms, p90 {} ms, p99 {} ms, hedge at {} \
-                ms{suppressed}, {} hedged, {} rescued",
+               "{name}: {} answered, p50 {} ms, p90 {} ms, p99 {} ms, hedge at {} ms{suppressed}, \
+                {} hedged, {} rescued",
                operation.answered,
                percentile(&operation.ring, 50),
                percentile(&operation.ring, 90),
@@ -496,7 +496,8 @@ mod tests {
       assert!(report[0].contains("(suppressed)"), "{}", report[0]);
       assert_eq!(latency.hedge_delay("x/TweetDetail"), None);
 
-      // Once probes lift the rescue rate back to >= 5% (2/33 >= 5%), hedging re-enables.
+      // Once probes lift the rescue rate back to >= 5% (2/33 >= 5%), hedging
+      // re-enables.
       latency.hedged("x/TweetDetail");
       latency.rescued("x/TweetDetail");
       assert_eq!(latency.hedge_delay("x/TweetDetail"), Some(expected));

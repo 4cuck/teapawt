@@ -1,20 +1,33 @@
 //! Card, crypto, and LZT Market donations.
 //!
-//! Secrets stay in the server config or the environment. Nothing here prints them.
+//! Secrets stay in the server config or the environment. Nothing here prints
+//! them.
 
 use std::{
    path::PathBuf,
-   sync::{Arc, LazyLock},
+   sync::{
+      Arc,
+      LazyLock,
+   },
    time::Duration,
 };
 
 use data_encoding::HEXLOWER;
 use ring::{
    hmac,
-   rand::{SecureRandom, SystemRandom},
+   rand::{
+      SecureRandom,
+      SystemRandom,
+   },
 };
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde::{
+   Deserialize,
+   Serialize,
+};
+use serde_json::{
+   Map,
+   Value,
+};
 use tokio::sync::Mutex;
 
 use crate::config::DonationsConfig;
@@ -40,17 +53,17 @@ impl PayError {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Entry {
-   id: String,
-   provider: String,
+   id:           String,
+   provider:     String,
    #[serde(default)]
    provider_ref: String,
-   cents: i64,
-   status: String,
+   cents:        i64,
+   status:       String,
    /// Unix time the payment was confirmed. Older ledger rows have no date;
    /// the first time the monthly counter sees them, it stamps "now" so they
    /// belong to the open period and then age out on the 23rd.
    #[serde(default)]
-   paid_at: i64,
+   paid_at:      i64,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -73,7 +86,8 @@ impl DonationLedger {
 
    pub async fn cents_for(&self, id: &str) -> Option<i64> {
       let file = self.read().await.ok()?;
-      file.entries
+      file
+         .entries
          .iter()
          .find(|entry| entry.id == id)
          .map(|entry| entry.cents)
@@ -83,7 +97,8 @@ impl DonationLedger {
       let Ok(file) = self.read().await else {
          return 0;
       };
-      file.entries
+      file
+         .entries
          .iter()
          .filter(|entry| entry.status == "paid")
          .map(|entry| entry.cents.max(0))
@@ -157,7 +172,11 @@ impl DonationLedger {
          self.write(&file).await;
          return;
       }
-      if let Some(entry) = file.entries.iter_mut().find(|entry| !id.is_empty() && entry.id == id) {
+      if let Some(entry) = file
+         .entries
+         .iter_mut()
+         .find(|entry| !id.is_empty() && entry.id == id)
+      {
          entry.status = "paid".to_owned();
          entry.provider = provider.to_owned();
          entry.provider_ref = provider_ref.to_owned();
@@ -207,10 +226,15 @@ pub fn valid_donation_id(id: &str) -> bool {
    rest.len() == 16 && rest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// Dollars the visitor typed. `$1` through `$10,000`, at most two decimal places.
+/// Dollars the visitor typed. `$1` through `$10,000`, at most two decimal
+/// places.
 pub fn parse_amount_cents(raw: &str) -> Result<i64, &'static str> {
    let raw = raw.trim();
-   if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.') {
+   if raw.is_empty()
+      || !raw
+         .bytes()
+         .all(|byte| byte.is_ascii_digit() || byte == b'.')
+   {
       return Err("Enter an amount in dollars, like 25 or 25.50");
    }
    let (whole, frac) = match raw.split_once('.') {
@@ -228,9 +252,7 @@ pub fn parse_amount_cents(raw: &str) -> Result<i64, &'static str> {
    let dollars: i64 = if whole.is_empty() {
       0
    } else {
-      whole
-         .parse()
-         .map_err(|_| "That amount is too large")?
+      whole.parse().map_err(|_| "That amount is too large")?
    };
    let cents_part: i64 = if frac.is_empty() {
       0
@@ -251,7 +273,8 @@ pub fn parse_amount_cents(raw: &str) -> Result<i64, &'static str> {
 }
 
 impl Entry {
-   /// Keep the original confirmation time. Returns whether a missing date was filled in.
+   /// Keep the original confirmation time. Returns whether a missing date was
+   /// filled in.
    fn stamp_paid(&mut self, now: i64) -> bool {
       if self.paid_at > 0 {
          return false;
@@ -274,7 +297,7 @@ pub const PERIOD_RESET_DAY: u8 = 23;
 
 pub struct DonationPeriod {
    pub start: time::OffsetDateTime,
-   pub end: time::OffsetDateTime,
+   pub end:   time::OffsetDateTime,
 }
 
 /// The open month. On the 23rd a new period starts; before that, the period
@@ -312,16 +335,19 @@ fn shift_month(year: i32, month: time::Month, delta: i32) -> (i32, time::Month) 
       index -= 12;
       year += 1;
    }
-   (year, time::Month::try_from(index as u8 + 1).expect("month 1-12"))
+   (
+      year,
+      time::Month::try_from(index as u8 + 1).expect("month 1-12"),
+   )
 }
 
 /// What the homepage and donate page show for the open month.
 pub struct MonthProgress {
    pub raised_cents: i64,
-   pub goal_cents: i64,
+   pub goal_cents:   i64,
    /// `YYYY-MM-DD` of the next reset, UTC.
-   pub reset_on: String,
-   pub reset_label: String,
+   pub reset_on:     String,
+   pub reset_label:  String,
 }
 
 impl MonthProgress {
@@ -348,7 +374,9 @@ pub async fn month_progress(ledger: &DonationLedger, goal_cents: i64) -> MonthPr
       raised_cents,
       goal_cents,
       reset_on: reset_at.date().to_string(),
-      reset_label: reset_at.format(format).unwrap_or_else(|_| reset_at.date().to_string()),
+      reset_label: reset_at
+         .format(format)
+         .unwrap_or_else(|_| reset_at.date().to_string()),
    }
 }
 
@@ -530,7 +558,9 @@ pub async fn nowpayments_invoice(
    let status = response.status();
    let body: Value = response.json().await.unwrap_or(Value::Null);
    if !status.is_success() {
-      let message = body["message"].as_str().unwrap_or("NOWPayments rejected the invoice");
+      let message = body["message"]
+         .as_str()
+         .unwrap_or("NOWPayments rejected the invoice");
       return Err(PayError::new(format!("nowpayments {status}: {message}")));
    }
    body["invoice_url"]
@@ -639,7 +669,11 @@ pub async fn lzt_paid_invoice(
    }
    let body: Value = response.json().await.unwrap_or(Value::Null);
    let invoice = &body["invoice"];
-   if invoice["status"].as_str().unwrap_or("").eq_ignore_ascii_case("paid") {
+   if invoice["status"]
+      .as_str()
+      .unwrap_or("")
+      .eq_ignore_ascii_case("paid")
+   {
       let cents = dollars_value_to_cents(invoice.get("amount").unwrap_or(&Value::Null));
       let reference = invoice["invoice_id"]
          .as_i64()
@@ -689,7 +723,10 @@ fn urlencoding_path(value: &str) -> String {
 }
 
 fn constant_hex_eq(expected_hex: &str, provided: &str) -> bool {
-   bytes_eq(expected_hex.as_bytes(), provided.to_ascii_lowercase().as_bytes())
+   bytes_eq(
+      expected_hex.as_bytes(),
+      provided.to_ascii_lowercase().as_bytes(),
+   )
 }
 
 fn bytes_eq(left: &[u8], right: &[u8]) -> bool {
@@ -812,33 +849,37 @@ mod tests {
       let current = datetime!(2026-09-23 00:00 UTC).unix_timestamp();
       let entries = [
          Entry {
-            id: "a".into(),
-            provider: "stripe".into(),
+            id:           "a".into(),
+            provider:     "stripe".into(),
             provider_ref: "old".into(),
-            cents: 1000,
-            status: "paid".into(),
-            paid_at: old,
+            cents:        1000,
+            status:       "paid".into(),
+            paid_at:      old,
          },
          Entry {
-            id: "b".into(),
-            provider: "stripe".into(),
+            id:           "b".into(),
+            provider:     "stripe".into(),
             provider_ref: "now".into(),
-            cents: 2500,
-            status: "paid".into(),
-            paid_at: current,
+            cents:        2500,
+            status:       "paid".into(),
+            paid_at:      current,
          },
          Entry {
-            id: "c".into(),
-            provider: "stripe".into(),
+            id:           "c".into(),
+            provider:     "stripe".into(),
             provider_ref: "wait".into(),
-            cents: 9000,
-            status: "pending".into(),
-            paid_at: current,
+            cents:        9000,
+            status:       "pending".into(),
+            paid_at:      current,
          },
       ];
       let period = donation_period(datetime!(2026-10-01 00:00 UTC));
       assert_eq!(
-         sum_paid_in_window(&entries, period.start.unix_timestamp(), period.end.unix_timestamp()),
+         sum_paid_in_window(
+            &entries,
+            period.start.unix_timestamp(),
+            period.end.unix_timestamp()
+         ),
          2500
       );
    }
@@ -849,12 +890,12 @@ mod tests {
       let ledger = DonationLedger::open(path.to_str().unwrap());
       let file = LedgerFile {
          entries: vec![Entry {
-            id: "don_0123456789abcdef".into(),
-            provider: "stripe".into(),
+            id:           "don_0123456789abcdef".into(),
+            provider:     "stripe".into(),
             provider_ref: "cs_old".into(),
-            cents: 500,
-            status: "paid".into(),
-            paid_at: 0,
+            cents:        500,
+            status:       "paid".into(),
+            paid_at:      0,
          }],
       };
       ledger.write(&file).await;
@@ -871,7 +912,9 @@ mod tests {
    async fn paid_amount_is_counted_once() {
       let path = std::env::temp_dir().join(format!("teapot-donations-{}.json", new_donation_id()));
       let ledger = DonationLedger::open(path.to_str().unwrap());
-      ledger.remember_pending("don_0123456789abcdef", "stripe", 500).await;
+      ledger
+         .remember_pending("don_0123456789abcdef", "stripe", 500)
+         .await;
       ledger
          .mark_paid("don_0123456789abcdef", "stripe", "cs_test", 500)
          .await;

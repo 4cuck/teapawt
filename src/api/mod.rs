@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod browser;
 pub mod budget;
+mod clearance;
 mod client;
 mod cookies;
 mod endpoints;
@@ -21,6 +22,7 @@ mod tid;
 mod timeline_route;
 
 pub use auth::*;
+pub use clearance::ClearanceStatus;
 pub use client::*;
 pub use http::HttpClient;
 pub use parser::{

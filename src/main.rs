@@ -17,40 +17,75 @@ mod views;
 mod web_bot_auth;
 
 use std::{
-   env, io,
-   net::{IpAddr, SocketAddr},
+   env,
+   io,
+   net::{
+      IpAddr,
+      SocketAddr,
+   },
    sync::Arc,
    time::Duration,
 };
 
-use axum::http::header;
 use axum::{
-   Router, ServiceExt,
+   Router,
+   ServiceExt,
    extract::Request,
-   http::{Extensions, HeaderMap, StatusCode, Version, header::HeaderValue},
+   http::{
+      Extensions,
+      HeaderMap,
+      StatusCode,
+      Version,
+      header,
+      header::HeaderValue,
+   },
    middleware,
 };
-use tokio::net::{TcpListener, TcpSocket};
-use tower::{Layer as _, limit::ConcurrencyLimitLayer};
+use tokio::net::{
+   TcpListener,
+   TcpSocket,
+};
+use tower::{
+   Layer as _,
+   limit::ConcurrencyLimitLayer,
+};
 use tower_http::{
    CompressionLevel,
    compression::{
       CompressionLayer,
-      predicate::{Predicate as _, SizeAbove},
+      predicate::{
+         Predicate as _,
+         SizeAbove,
+      },
    },
    normalize_path::NormalizePathLayer,
-   services::{ServeDir, ServeFile},
+   services::{
+      ServeDir,
+      ServeFile,
+   },
    set_header::SetResponseHeaderLayer,
    timeout::TimeoutLayer,
 };
 use tracing_appender::non_blocking::NonBlockingBuilder;
-use tracing_subscriber::{fmt, layer::SubscriberExt as _, util::SubscriberInitExt as _};
+use tracing_subscriber::{
+   fmt,
+   layer::SubscriberExt as _,
+   util::SubscriberInitExt as _,
+};
 
 use crate::{
    accounts::AccountStore,
-   api::{ApiClient, HttpClient, ProxyPool, SessionPool},
+   api::{
+      ApiClient,
+      HttpClient,
+      ProxyPool,
+      SessionPool,
+   },
    cache::Cache,
-   config::{Config, GifTranscodingMode},
+   config::{
+      Config,
+      GifTranscodingMode,
+   },
    transcode::GifTranscoder,
 };
 
@@ -60,18 +95,18 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 /// Application state shared across all routes.
 #[derive(Clone)]
 pub struct AppState {
-   pub config: Arc<Config>,
-   pub cache: Cache,
-   pub api: ApiClient,
-   pub accounts: AccountStore,
-   pub stats: Option<stats::StatsStore>,
-   pub http_client: HttpClient,
-   pub gif_transcoder: Option<Arc<GifTranscoder>>,
+   pub config:              Arc<Config>,
+   pub cache:               Cache,
+   pub api:                 ApiClient,
+   pub accounts:            AccountStore,
+   pub stats:               Option<stats::StatsStore>,
+   pub http_client:         HttpClient,
+   pub gif_transcoder:      Option<Arc<GifTranscoder>>,
    pub translation_limiter: Arc<translation::TranslationLimiter>,
    /// Peers permitted to name a different caller through forwarding headers.
-   pub trusted_proxies: Arc<[IpAddr]>,
-   pub donations: Arc<donations::DonationLedger>,
-   pub passes: Arc<passes::PassStore>,
+   pub trusted_proxies:     Arc<[IpAddr]>,
+   pub donations:           Arc<donations::DonationLedger>,
+   pub passes:              Arc<passes::PassStore>,
 }
 
 /// Log lines held for stdout before new ones are dropped.
@@ -145,8 +180,8 @@ async fn main() -> eyre::Result<()> {
    );
 
    error::set_messages(error::Messages {
-      client_budget: config.config.client_budget_message.clone(),
-      rate_limited: config.config.rate_limited_message.clone(),
+      client_budget:  config.config.client_budget_message.clone(),
+      rate_limited:   config.config.rate_limited_message.clone(),
       internal_error: config.config.internal_error_message.clone(),
    });
 
@@ -166,16 +201,20 @@ async fn main() -> eyre::Result<()> {
    // before the pool reads them. A failure here does not keep the site down:
    // the pool still loads with what is stored, and the next start tries again.
    match account_repair::run().await {
-      Ok(summary) if summary.changed() => tracing::info!(
-         restored_to_search = summary.restored_to_search,
-         unretired = summary.unretired,
-         cleared_suspended = summary.cleared_suspended,
-         "account repair applied"
-      ),
+      Ok(summary) if summary.changed() => {
+         tracing::info!(
+            restored_to_search = summary.restored_to_search,
+            unretired = summary.unretired,
+            cleared_suspended = summary.cleared_suspended,
+            persisted_rejected = summary.persisted_rejected,
+            "account repair applied"
+         )
+      },
       Ok(_) => {},
       Err(err) => tracing::warn!("account repair did not run: {err}"),
    }
-   let sessions = SessionPool::from_store(accounts.clone(), config.config.max_concurrent_reqs).await?;
+   let sessions =
+      SessionPool::from_store(accounts.clone(), config.config.max_concurrent_reqs).await?;
 
    // Cloudflare caches the HTML (`s-maxage`). This process does not keep a
    // second copy: that map served timelines after new posts and, full, made
@@ -198,7 +237,9 @@ async fn main() -> eyre::Result<()> {
    // address.
    let exits = proxies.as_ref().map(ProxyPool::all).unwrap_or_default();
 
-   let stats = match tokio::time::timeout(Duration::from_secs(5), stats::StatsStore::connect()).await {
+   let stats = match tokio::time::timeout(Duration::from_secs(5), stats::StatsStore::connect())
+      .await
+   {
       Ok(Ok(store)) => Some(store),
       _ => {
          tracing::warn!("statistics storage unavailable; search will continue without telemetry");
@@ -207,9 +248,15 @@ async fn main() -> eyre::Result<()> {
    };
 
    // Initialize API client
-   let mut api = ApiClient::new(&config, sessions, proxies, fallback_proxies, accounts.clone())
-      .await?
-      .with_telemetry(stats.clone());
+   let mut api = ApiClient::new(
+      &config,
+      sessions,
+      proxies,
+      fallback_proxies,
+      accounts.clone(),
+   )
+   .await?
+   .with_telemetry(stats.clone());
    api.sessions.set_telemetry(stats.clone());
    api.spawn_tid_warmup();
    api.spawn_filter_sync();

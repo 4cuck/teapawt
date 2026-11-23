@@ -1,4 +1,7 @@
-use serde::{Deserialize, Serialize};
+use serde::{
+   Deserialize,
+   Serialize,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -17,37 +20,37 @@ pub enum VerifiedType {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct User {
-   pub id: String,
-   pub username: String,
-   pub fullname: String,
-   pub location: String,
-   pub account_based_in: String,
+   pub id:                String,
+   pub username:          String,
+   pub fullname:          String,
+   pub location:          String,
+   pub account_based_in:  String,
    pub connection_source: String,
    pub location_accurate: Option<bool>,
-   pub website: String,
-   pub bio: String,
-   pub user_pic: String,
-   pub banner: String,
-   pub pinned_tweet: i64,
-   pub following: i64,
-   pub followers: i64,
-   pub tweets: i64,
-   pub likes: i64,
-   pub media: i64,
-   pub verified_type: VerifiedType,
-   pub protected: bool,
-   pub suspended: bool,
+   pub website:           String,
+   pub bio:               String,
+   pub user_pic:          String,
+   pub banner:            String,
+   pub pinned_tweet:      i64,
+   pub following:         i64,
+   pub followers:         i64,
+   pub tweets:            i64,
+   pub likes:             i64,
+   pub media:             i64,
+   pub verified_type:     VerifiedType,
+   pub protected:         bool,
+   pub suspended:         bool,
    /// X reported at least one highlighted post, so the posts menu can offer it.
-   pub has_highlights: bool,
+   pub has_highlights:    bool,
    #[serde(with = "time::serde::timestamp::option")]
-   pub join_date: Option<time::OffsetDateTime>,
+   pub join_date:         Option<time::OffsetDateTime>,
 }
 
 /// X's "About this account" record.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AccountContext {
-   pub account_based_in: String,
+   pub account_based_in:  String,
    pub connection_source: String,
    pub location_accurate: Option<bool>,
 }

@@ -29,6 +29,7 @@ const DEFAULT_URL: &str = "host=/var/run/postgresql user=teapot dbname=teapot";
 const LOCK_KEY: i64 = 0x7465_6170_6163_6374;
 
 const REPAIR_FALSE_SUSPENSIONS: &str = "repair-false-suspensions-v1";
+const REPAIR_PERSIST_REJECTED: &str = "persist-rejected-credentials-v1";
 const MAX_REASONABLE_RETRY_UNIX: i64 = 4_000_000_000;
 
 fn db_error(err: tokio_postgres::Error) -> Error {
@@ -45,12 +46,18 @@ pub struct Summary {
    pub unretired:          usize,
    /// Accounts whose suspension flag rested on evidence that proved nothing.
    pub cleared_suspended:  usize,
+   /// Accounts whose prior credentials rejection was persisted so restarts and
+   /// the 24-hour filter rescan do not keep retrying locked/dead accounts.
+   pub persisted_rejected: usize,
 }
 
 impl Summary {
    #[must_use]
    pub const fn changed(&self) -> bool {
-      self.restored_to_search != 0 || self.unretired != 0 || self.cleared_suspended != 0
+      self.restored_to_search != 0
+         || self.unretired != 0
+         || self.cleared_suspended != 0
+         || self.persisted_rejected != 0
    }
 }
 
@@ -80,8 +87,8 @@ pub(crate) async fn apply(client: &mut tokio_postgres::Client) -> Result<Summary
 
    let has_core_tables: bool = tx
       .query_one(
-         "SELECT to_regclass('account_migrations') IS NOT NULL \
-             AND to_regclass('account_sessions') IS NOT NULL",
+         "SELECT to_regclass('account_migrations') IS NOT NULL AND \
+          to_regclass('account_sessions') IS NOT NULL",
          &[],
       )
       .await
@@ -93,23 +100,29 @@ pub(crate) async fn apply(client: &mut tokio_postgres::Client) -> Result<Summary
       return Ok(Summary::default());
    }
 
-   let already_applied = tx
-      .query_opt(
-         "SELECT 1 FROM account_migrations WHERE name = $1",
-         &[&REPAIR_FALSE_SUSPENSIONS],
-      )
+   let false_suspensions_applied = tx
+      .query_opt("SELECT 1 FROM account_migrations WHERE name = $1", &[
+         &REPAIR_FALSE_SUSPENSIONS,
+      ])
       .await
       .map_err(db_error)?
       .is_some();
-   if already_applied {
+   let persist_rejected_applied = tx
+      .query_opt("SELECT 1 FROM account_migrations WHERE name = $1", &[
+         &REPAIR_PERSIST_REJECTED,
+      ])
+      .await
+      .map_err(db_error)?
+      .is_some();
+   if false_suspensions_applied && persist_rejected_applied {
       tx.commit().await.map_err(db_error)?;
       return Ok(Summary::default());
    }
 
    let optional_tables = tx
       .query_one(
-         "SELECT to_regclass('session_limits') IS NOT NULL, \
-                 to_regclass('stats_account_events') IS NOT NULL",
+         "SELECT to_regclass('session_limits') IS NOT NULL, to_regclass('stats_account_events') \
+          IS NOT NULL",
          &[],
       )
       .await
@@ -119,31 +132,94 @@ pub(crate) async fn apply(client: &mut tokio_postgres::Client) -> Result<Summary
 
    let mut summary = Summary::default();
 
-   if has_events {
-      restore_search_accounts(&tx, has_limits, &mut summary).await?;
-      tag_demoted_search_accounts(&tx, has_limits).await?;
-   }
+   if !false_suspensions_applied {
+      if has_events {
+         restore_search_accounts(&tx, has_limits, &mut summary).await?;
+         tag_demoted_search_accounts(&tx, has_limits).await?;
+      }
 
-   if has_limits {
-      clear_false_suspensions(&tx, has_events, &mut summary).await?;
-      tx.execute(
-         "DELETE FROM session_limits l \
-          WHERE NOT EXISTS (SELECT 1 FROM account_sessions s WHERE s.id = l.id)",
-         &[],
-      )
+      if has_limits {
+         clear_false_suspensions(&tx, has_events, &mut summary).await?;
+         tx.execute(
+            "DELETE FROM session_limits l WHERE NOT EXISTS (SELECT 1 FROM account_sessions s \
+             WHERE s.id = l.id)",
+            &[],
+         )
+         .await
+         .map_err(db_error)?;
+      }
+
+      tx.execute("INSERT INTO account_migrations (name) VALUES ($1)", &[
+         &REPAIR_FALSE_SUSPENSIONS,
+      ])
       .await
       .map_err(db_error)?;
    }
 
-   tx.execute(
-      "INSERT INTO account_migrations (name) VALUES ($1)",
-      &[&REPAIR_FALSE_SUSPENSIONS],
-   )
-   .await
-   .map_err(db_error)?;
+   if !persist_rejected_applied {
+      if has_limits && has_events {
+         persist_rejected_credentials(&tx, &mut summary).await?;
+      }
+      tx.execute("INSERT INTO account_migrations (name) VALUES ($1)", &[
+         &REPAIR_PERSIST_REJECTED,
+      ])
+      .await
+      .map_err(db_error)?;
+   }
    tx.commit().await.map_err(db_error)?;
 
    Ok(summary)
+}
+
+async fn persist_rejected_credentials(
+   tx: &Transaction<'_>,
+   summary: &mut Summary,
+) -> Result<()> {
+   let updated = tx
+      .execute(
+         "WITH latest AS (
+             SELECT DISTINCT ON (e.session_id) e.session_id, e.kind, e.evidence
+             FROM stats_account_events e
+             ORDER BY e.session_id, e.observed_unix DESC, e.id DESC
+          ),
+          rejected AS (
+             SELECT s.id
+             FROM account_sessions s
+             JOIN latest l ON l.session_id = s.id
+             WHERE l.kind = 3
+                OR (l.kind = 9 AND l.evidence LIKE 'X would not accept this account''s \
+                   credentials:%')
+          )
+          INSERT INTO session_limits (id, body)
+          SELECT
+             r.id,
+             jsonb_build_object(
+                'rejected', true,
+                'filters_failed', true,
+                'filters_retry_at', $1::bigint
+             )
+          FROM rejected r
+          ON CONFLICT (id) DO UPDATE SET
+             body = session_limits.body || jsonb_build_object(
+                'rejected', true,
+                'filters_failed', true,
+                'filters_retry_at', $1::bigint
+             )
+          WHERE COALESCE((session_limits.body->>'rejected')::boolean, false) = false
+             OR COALESCE((session_limits.body->>'filters_failed')::boolean, false) = false
+             OR (
+                CASE
+                   WHEN jsonb_typeof(session_limits.body->'filters_retry_at') = 'number'
+                      THEN (session_limits.body->>'filters_retry_at')::bigint
+                   ELSE 0
+                END
+             ) <> $1::bigint",
+         &[&i64::MAX],
+      )
+      .await
+      .map_err(db_error)?;
+   summary.persisted_rejected = usize::try_from(updated).unwrap_or(usize::MAX);
+   Ok(())
 }
 
 async fn restore_search_accounts(
@@ -226,8 +302,8 @@ async fn restore_search_accounts(
    if has_limits {
       let retired_count: i64 = tx
          .query_one(
-            "SELECT count(*) FROM session_limits \
-             WHERE id = ANY($1) AND (body->>'retired')::boolean IS TRUE",
+            "SELECT count(*) FROM session_limits WHERE id = ANY($1) AND \
+             (body->>'retired')::boolean IS TRUE",
             &[&candidates],
          )
          .await
@@ -239,9 +315,9 @@ async fn restore_search_accounts(
 
    let moved = tx
       .execute(
-         "UPDATE account_sessions \
-          SET body = (body - 'demoted_from') || '{\"pool\":\"search\"}'::jsonb \
-          WHERE id = ANY($1) AND lower(COALESCE(body->>'pool', '')) <> 'search'",
+         "UPDATE account_sessions SET body = (body - 'demoted_from') || \
+          '{\"pool\":\"search\"}'::jsonb WHERE id = ANY($1) AND lower(COALESCE(body->>'pool', \
+          '')) <> 'search'",
          &[&candidates],
       )
       .await
@@ -249,9 +325,8 @@ async fn restore_search_accounts(
    summary.restored_to_search += usize::try_from(moved).unwrap_or(usize::MAX);
 
    tx.execute(
-      "UPDATE account_sessions \
-       SET body = body - 'demoted_from' \
-       WHERE id = ANY($1) AND body ? 'demoted_from'",
+      "UPDATE account_sessions SET body = body - 'demoted_from' WHERE id = ANY($1) AND body ? \
+       'demoted_from'",
       &[&candidates],
    )
    .await
@@ -259,11 +334,10 @@ async fn restore_search_accounts(
 
    if has_limits {
       tx.execute(
-         "UPDATE session_limits \
-          SET body = ((body #- '{refused_ops,SearchTimeline}'::text[]) - 'search_404_at'::text) \
-             || '{\"suspended\":false,\"retired\":false,\"search_banned\":false,\"search_only\":\
-                 true,\"demoted_from_search\":false,\"filters_failed\":false,\"filters_retry_at\":\
-                 0}'::jsonb \
+         "UPDATE session_limits SET body = ((body #- '{refused_ops,SearchTimeline}'::text[]) - \
+          'search_404_at'::text) || \
+          '{\"suspended\":false,\"retired\":false,\"search_banned\":false,\"search_only\":true,\"\
+          demoted_from_search\":false,\"filters_failed\":false,\"filters_retry_at\":0}'::jsonb \
           WHERE id = ANY($1)",
          &[&candidates],
       )
@@ -310,9 +384,8 @@ async fn tag_demoted_search_accounts(tx: &Transaction<'_>, has_limits: bool) -> 
    }
 
    tx.execute(
-      "UPDATE account_sessions \
-       SET body = body || '{\"demoted_from\":\"search\"}'::jsonb \
-       WHERE id = ANY($1)",
+      "UPDATE account_sessions SET body = body || '{\"demoted_from\":\"search\"}'::jsonb WHERE id \
+       = ANY($1)",
       &[&demoted_ids],
    )
    .await
@@ -320,9 +393,8 @@ async fn tag_demoted_search_accounts(tx: &Transaction<'_>, has_limits: bool) -> 
 
    if has_limits {
       tx.execute(
-         "UPDATE session_limits \
-          SET body = body || '{\"demoted_from_search\":true}'::jsonb \
-          WHERE id = ANY($1)",
+         "UPDATE session_limits SET body = body || '{\"demoted_from_search\":true}'::jsonb WHERE \
+          id = ANY($1)",
          &[&demoted_ids],
       )
       .await
@@ -386,8 +458,9 @@ async fn clear_false_suspensions(
                 ELSE 0
              END
           ) > $2 THEN
-             body || '{\"suspended\":false,\"retired\":false,\"search_banned\":false,\
-                       \"filters_failed\":false,\"filters_retry_at\":0}'::jsonb
+             body || \
+       '{\"suspended\":false,\"retired\":false,\"search_banned\":false,\"filters_failed\":false,\"\
+       filters_retry_at\":0}'::jsonb
           ELSE
              body || '{\"suspended\":false,\"retired\":false,\"search_banned\":false}'::jsonb
        END
@@ -424,6 +497,13 @@ mod tests {
       assert!(
          Summary {
             cleared_suspended: 3,
+            ..Summary::default()
+         }
+         .changed()
+      );
+      assert!(
+         Summary {
+            persisted_rejected: 4,
             ..Summary::default()
          }
          .changed()

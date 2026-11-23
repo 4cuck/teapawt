@@ -6,7 +6,11 @@
 
 use std::future::Future;
 
-use axum::http::{HeaderMap, HeaderName, header};
+use axum::http::{
+   HeaderMap,
+   HeaderName,
+   header,
+};
 
 /// Apex hosts that serve this instance.
 pub const APEX_HOSTS: &[&str] = &[
@@ -38,7 +42,8 @@ pub fn request_origin() -> Option<String> {
    REQUEST_ORIGIN.try_with(Clone::clone).ok()
 }
 
-/// Request origin, or `fallback` (usually `Config::url_prefix`) with no trailing slash.
+/// Request origin, or `fallback` (usually `Config::url_prefix`) with no
+/// trailing slash.
 pub fn current_origin(fallback: &str) -> String {
    request_origin().unwrap_or_else(|| fallback.trim_end_matches('/').to_owned())
 }
@@ -85,14 +90,24 @@ fn is_public_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-   use axum::http::{HeaderMap, HeaderValue, header};
+   use axum::http::{
+      HeaderMap,
+      HeaderValue,
+      header,
+   };
 
-   use super::{indexnow_key, origin_from_headers};
+   use super::{
+      indexnow_key,
+      origin_from_headers,
+   };
 
    #[test]
    fn indexnow_key_accepts_only_hex() {
       assert_eq!(indexnow_key("abcdef0123456789"), Some("abcdef0123456789"));
-      assert_eq!(indexnow_key("  abcdef0123456789 "), Some("abcdef0123456789"));
+      assert_eq!(
+         indexnow_key("  abcdef0123456789 "),
+         Some("abcdef0123456789")
+      );
       assert_eq!(indexnow_key("short"), None);
       assert_eq!(indexnow_key("abcdef0123456789zz"), None);
    }

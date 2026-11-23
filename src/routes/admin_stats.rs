@@ -152,19 +152,26 @@ impl InvestigationQuery {
             let trimmed = val.trim();
             !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("all")
          })
-         || self.status.as_deref().is_some_and(|val| !val.trim().is_empty())
-         || self.pool.as_deref().is_some_and(|val| !val.trim().is_empty())
+         || self
+            .status
+            .as_deref()
+            .is_some_and(|val| !val.trim().is_empty())
+         || self
+            .pool
+            .as_deref()
+            .is_some_and(|val| !val.trim().is_empty())
          || self.before.is_some()
    }
 
-   pub(crate) fn to_uri(
-      &self,
-      base_path: &str,
-      before_override: Option<Option<i64>>,
-   ) -> String {
+   pub(crate) fn to_uri(&self, base_path: &str, before_override: Option<Option<i64>>) -> String {
       let mut serializer = form_urlencoded::Serializer::new(String::new());
       let mut any = false;
-      if let Some(search) = self.q.as_deref().map(str::trim).filter(|val| !val.is_empty()) {
+      if let Some(search) = self
+         .q
+         .as_deref()
+         .map(str::trim)
+         .filter(|val| !val.is_empty())
+      {
          serializer.append_pair("q", search);
          any = true;
       }
@@ -487,6 +494,9 @@ pub(crate) async fn admin_no_store(request: Request, next: Next) -> Response {
    let path = request.uri().path();
    let private = private_path(path);
    let stats = path == "/admin/stats" || path.starts_with("/admin/stats/");
+   let captures = path == "/admin/stats/fingerprints"
+      || path.starts_with("/admin/stats/fingerprints/")
+      || path.starts_with("/admin/stats/captures/");
    let mut response = next.run(request).await;
    if private {
       let headers = response.headers_mut();
@@ -496,13 +506,17 @@ pub(crate) async fn admin_no_store(request: Request, next: Next) -> Response {
          HeaderValue::from_static("noindex, nofollow"),
       );
       if stats {
+         let csp = if captures {
+            "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src \
+             'self' data:; font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors \
+             'none'"
+         } else {
+            "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src \
+             'self'; font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+         };
          headers.insert(
             header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(
-               "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; \
-                img-src 'self'; font-src 'self'; form-action 'self'; base-uri 'none'; \
-                frame-ancestors 'none'",
-            ),
+            HeaderValue::from_static(csp),
          );
       }
    }
@@ -529,7 +543,7 @@ fn range(request: &Request) -> i32 {
    range_from_uri(request.uri())
 }
 
-fn forbidden_html(theme: &str) -> Response {
+pub(super) fn forbidden_html(theme: &str) -> Response {
    (
       StatusCode::FORBIDDEN,
       Html(view::forbidden(theme).into_string()),
@@ -568,6 +582,7 @@ async fn snapshot(state: &AppState, minutes: i32) -> Option<Dashboard> {
          capacity: Some(capacity),
          census,
          gate,
+         clearance: state.api.clearance_status(),
          dropped_events: data.dropped_events,
          buckets: data
             .buckets
@@ -816,7 +831,12 @@ async fn investigation(state: &AppState, query: &InvestigationQuery) -> Option<I
       .status
       .as_deref()
       .filter(|status| matches!(*status, "active" | "historical"));
-   let ids = match query.q.as_deref().map(str::trim).filter(|val| !val.is_empty()) {
+   let ids = match query
+      .q
+      .as_deref()
+      .map(str::trim)
+      .filter(|val| !val.is_empty())
+   {
       Some(search) => Some(state.accounts.find_identities(search, 500).await.ok()?),
       None => None,
    };
@@ -906,8 +926,7 @@ async fn investigation(state: &AppState, query: &InvestigationQuery) -> Option<I
          {
             ident.pool = live_pool.to_owned();
          }
-         let demoted_from_search =
-            current.is_some_and(|account| account.demoted_from_search);
+         let demoted_from_search = current.is_some_and(|account| account.demoted_from_search);
 
          observations.push(Observation {
             event,
@@ -937,11 +956,7 @@ async fn investigation(state: &AppState, query: &InvestigationQuery) -> Option<I
    })
 }
 
-async fn restrictions(
-   State(state): State<AppState>,
-   jar: CookieJar,
-   request: Request,
-) -> Response {
+async fn restrictions(State(state): State<AppState>, jar: CookieJar, request: Request) -> Response {
    let theme = Prefs::from_cookies(&jar, &state.config).theme;
    if !administrator(&state, &jar).await {
       return forbidden_html(&theme);
@@ -1121,12 +1136,14 @@ async fn execute_probe(
 
    let (verdict_enum, mut detail, report_verified_search, fresh_ct0) =
       match state.api.probe_account_with_mode(id, mode).await {
-         Ok(report) => (
-            Some(report.verdict),
-            report.detail,
-            report.verified_search,
-            report.fresh_ct0,
-         ),
+         Ok(report) => {
+            (
+               Some(report.verdict),
+               report.detail,
+               report.verified_search,
+               report.fresh_ct0,
+            )
+         },
          Err(err) => (None, Some(err.to_string()), false, None),
       };
 
@@ -1148,8 +1165,8 @@ async fn execute_probe(
                state.api.record_probe_search_verified(id).await;
                verified_search = true;
             } else {
-               let note = "Account is currently in the view pool; use Move to Search Pool to \
-                           promote it.";
+               let note =
+                  "Account is currently in the view pool; use Move to Search Pool to promote it.";
                detail = Some(match detail {
                   Some(existing) => format!("{existing}. {note}"),
                   None => note.to_owned(),
@@ -1171,6 +1188,9 @@ async fn execute_probe(
          } else {
             state.api.sessions.mark_ct0_dead(id).await;
          }
+      },
+      Some(ProbeVerdict::CredentialsRejected) => {
+         state.api.sessions.mark_rejected(id).await;
       },
       _ => {},
    }
@@ -1248,7 +1268,8 @@ fn extract_ct0_from_json(value: &serde_json::Value) -> Option<&str> {
       serde_json::Value::Array(items) => {
          items.iter().find_map(|item| {
             let name = item.get("name")?.as_str()?;
-            name.eq_ignore_ascii_case("ct0")
+            name
+               .eq_ignore_ascii_case("ct0")
                .then(|| item.get("value").and_then(serde_json::Value::as_str))
                .flatten()
          })
@@ -1319,7 +1340,9 @@ fn parse_ct0_input(raw: &str) -> std::result::Result<String, &'static str> {
       .all(|byte| byte.is_ascii_graphic() && byte != b';')
       || HeaderValue::from_str(&extracted).is_err()
    {
-      return Err("ct0 contains invalid cookie characters (whitespace, semicolons, or control bytes).");
+      return Err(
+         "ct0 contains invalid cookie characters (whitespace, semicolons, or control bytes).",
+      );
    }
    Ok(extracted)
 }
@@ -1355,7 +1378,12 @@ async fn set_ct0(
       Ok(ct0) => ct0,
       Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
    };
-   let probe_mode = match payload.probe.as_deref().map(str::trim).filter(|val| !val.is_empty()) {
+   let probe_mode = match payload
+      .probe
+      .as_deref()
+      .map(str::trim)
+      .filter(|val| !val.is_empty())
+   {
       None => None,
       Some(mode) => {
          match parse_probe_mode(Some(mode)) {
@@ -1443,6 +1471,9 @@ async fn set_pool(
    };
    match state.api.sessions.set_account_pool(id, to_search).await {
       Ok(changed) => {
+         if to_search {
+            state.api.wake_search_check();
+         }
          let fallback_pool = if to_search { "search" } else { "view" };
          let after_pool = state
             .api
@@ -1576,7 +1607,9 @@ mod tests {
    fn scopes_admin_and_search_paths() {
       for path in [
          "/admin",
+         "/admin/fingerprint",
          "/admin/stats/data",
+         "/admin/stats/fingerprints",
          "/import/admin",
          "/import/admin/index.md",
       ] {
@@ -1606,10 +1639,10 @@ mod tests {
       let query = InvestigationQuery::from_uri(&uri);
       assert_eq!(query.before, Some(12625));
 
-      let noisy: Uri =
-         "/admin/stats/restrictions?q=alice&q=bob&kind=2&kind=5&status=active&pool=view&before=999&before=bad&before=-3"
-            .parse()
-            .unwrap();
+      let noisy: Uri = "/admin/stats/restrictions?q=alice&q=bob&kind=2&kind=5&status=active&\
+                        pool=view&before=999&before=bad&before=-3"
+         .parse()
+         .unwrap();
       let parsed = InvestigationQuery::from_uri(&noisy);
       assert_eq!(parsed.q.as_deref(), Some("bob"));
       assert_eq!(parsed.kind.as_deref(), Some("5"));
@@ -1625,10 +1658,10 @@ mod tests {
 
    #[test]
    fn investigation_query_to_uri_never_duplicates_parameters() {
-      let initial: Uri =
-         "/admin/stats/restrictions?q=@alice+test&kind=2&status=active&pool=view&before=12675&before=12625"
-            .parse()
-            .unwrap();
+      let initial: Uri = "/admin/stats/restrictions?q=@alice+test&kind=2&status=active&pool=view&\
+                          before=12675&before=12625"
+         .parse()
+         .unwrap();
       let page1 = InvestigationQuery::from_uri(&initial);
       let uri2 = page1.to_uri("/admin/stats/restrictions", Some(Some(12575)));
       assert_eq!(uri2.matches("before=").count(), 1);
@@ -1660,7 +1693,11 @@ mod tests {
          360
       );
       assert_eq!(
-         range_from_uri(&"/admin/stats?minutes=15&minutes=1440&minutes=999".parse().unwrap()),
+         range_from_uri(
+            &"/admin/stats?minutes=15&minutes=1440&minutes=999"
+               .parse()
+               .unwrap()
+         ),
          1440
       );
       assert_eq!(range_from_uri(&"/admin/stats".parse().unwrap()), 60);
@@ -1670,27 +1707,27 @@ mod tests {
    fn suspended_active_restriction_checks_suspended_or_retired() {
       let event = AccountEvent::new(7, Restriction::Suspended, "account/settings", "403");
       let mut account = crate::api::auth::AccountState {
-         id:                   7,
-         username:             "alice".to_owned(),
-         kind:                 SessionKind::Cookie,
-         pool:                 "view",
-         demoted_from_search:  false,
-         available:            true,
-         has_auth_token:       true,
-         ct0_present:          true,
-         ct0_len:              160,
-         credentials_rejected: false,
-         search_banned:        false,
-         profile_banned:       false,
-         ct0_dead:             false,
-         suspended:            false,
-         retired:              false,
-         filters_cleared:      false,
-         filters_retry_at:     0,
-         filters_failed:       true,
-         globally_limited:     false,
-         limited_at:           None,
-         profile_strikes:      0,
+         id:                        7,
+         username:                  "alice".to_owned(),
+         kind:                      SessionKind::Cookie,
+         pool:                      "view",
+         demoted_from_search:       false,
+         available:                 true,
+         has_auth_token:            true,
+         ct0_present:               true,
+         ct0_len:                   160,
+         credentials_rejected:      false,
+         search_banned:             false,
+         profile_banned:            false,
+         ct0_dead:                  false,
+         suspended:                 false,
+         retired:                   false,
+         filters_cleared:           false,
+         filters_retry_at:          0,
+         filters_failed:            true,
+         globally_limited:          false,
+         limited_at:                None,
+         profile_strikes:           0,
          active_calls:              0,
          last_active:               None,
          search_empty_streak:       0,
@@ -1751,10 +1788,16 @@ mod tests {
    fn parse_ct0_input_supports_raw_header_and_json_formats() {
       let token = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
       assert_eq!(parse_ct0_input(token).unwrap(), token);
-      assert_eq!(parse_ct0_input(&format!("  \"{token}\" \n")).unwrap(), token);
+      assert_eq!(
+         parse_ct0_input(&format!("  \"{token}\" \n")).unwrap(),
+         token
+      );
       assert_eq!(parse_ct0_input(&format!("ct0={token};")).unwrap(), token);
       assert_eq!(
-         parse_ct0_input(&format!("Cookie: auth_token=deadbeef; ct0={token}; lang=en")).unwrap(),
+         parse_ct0_input(&format!(
+            "Cookie: auth_token=deadbeef; ct0={token}; lang=en"
+         ))
+         .unwrap(),
          token
       );
       assert_eq!(
@@ -1788,7 +1831,8 @@ mod tests {
 
    #[test]
    fn out_accounts_query_round_trips_and_scopes_cleanly() {
-      let uri: Uri = "/admin/stats/out?op=SearchTimeline&reason=ct0_dead&q=alice&sort=id_desc&page=3"
+      let uri: Uri = "/admin/stats/out?op=SearchTimeline&reason=ct0_dead&q=alice&sort=id_desc&\
+                      page=3"
          .parse()
          .unwrap();
       let query = OutAccountsQuery::from_uri(&uri);

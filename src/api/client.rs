@@ -92,6 +92,7 @@ use crate::{
       Result,
       TwitterError,
    },
+   pressure::Pressure,
    types::{
       AccountContext,
       Article,
@@ -109,7 +110,6 @@ use crate::{
       User,
    },
    utils::formatters,
-   pressure::Pressure,
 };
 
 /// True when the 429 carries X's account window rather than a bare edge page.
@@ -334,8 +334,10 @@ fn is_denylisted(message: &str) -> bool {
 }
 
 fn is_rate_limit_error(err: &ApiError) -> bool {
-   matches!(TwitterError::from_code(err.code), Some(TwitterError::RateLimited))
-      || err.message.to_ascii_lowercase().contains("rate limit")
+   matches!(
+      TwitterError::from_code(err.code),
+      Some(TwitterError::RateLimited)
+   ) || err.message.to_ascii_lowercase().contains("rate limit")
 }
 
 fn is_session_error(err: &ApiError) -> bool {
@@ -924,7 +926,9 @@ fn auxiliary_endpoints_use_settings_suspension_probe() {
    assert!(is_settings_probe_endpoint(endpoints::VERIFY_CREDENTIALS));
    assert!(is_settings_probe_endpoint(endpoints::SEARCH_SAFETY));
    assert!(is_settings_probe_endpoint(endpoints::STRATO_TRANSLATE));
-   assert!(!is_settings_probe_endpoint(endpoints::GRAPH_SEARCH_TIMELINE));
+   assert!(!is_settings_probe_endpoint(
+      endpoints::GRAPH_SEARCH_TIMELINE
+   ));
    assert!(!is_settings_probe_endpoint(endpoints::GRAPH_USER_TWEETS));
 }
 
@@ -1034,33 +1038,40 @@ impl Drop for InflightGuard {
 /// Twitter/X API client.
 #[derive(Clone)]
 pub struct ApiClient {
-   pub(crate) client:   HttpClient,
-   pub(crate) sessions: SessionPool,
-   proxies:             Option<Arc<ProxyPool>>,
-   tid:                 TidClient,
-   operations:          Operations,
-   budget:              ClientBudget,
+   pub(crate) client:        HttpClient,
+   pub(crate) sessions:      SessionPool,
+   proxies:                  Option<Arc<ProxyPool>>,
+   tid:                      TidClient,
+   operations:               Operations,
+   budget:                   ClientBudget,
    /// Retweeter lists per caller, on whatever `clientBudget` says.
-   list_budget:         ClientBudget,
-   pub(crate) tid_enabled: bool,
-   denylist:            super::search_denylist::SearchDenylist,
-   latency:             Arc<Latency>,
-   hedges:              Arc<Semaphore>,
+   list_budget:              ClientBudget,
+   pub(crate) tid_enabled:   bool,
+   denylist:                 super::search_denylist::SearchDenylist,
+   latency:                  Arc<Latency>,
+   hedges:                   Arc<Semaphore>,
    /// Which call served each first profile page, reported every minute.
-   timeline_routes:     Arc<TimelineRoutes>,
+   timeline_routes:          Arc<TimelineRoutes>,
    /// How far the minute's fallback share is past the flood trigger. The
    /// Anti-DDoS gate reads it on every request.
-   pressure:            Arc<Pressure>,
+   pressure:                 Arc<Pressure>,
    /// Coalesces identical concurrent in-flight GraphQL calls; entries live
    /// only while the upstream request is in flight and are removed on drop.
-   inflight:            Arc<InflightCoalescer>,
-   telemetry:           Option<crate::stats::StatsStore>,
-   pub(crate) cookies:  Arc<Jar>,
+   inflight:                 Arc<InflightCoalescer>,
+   telemetry:                Option<crate::stats::StatsStore>,
+   /// Cloudflare JSD solver + the circuit breaker that disables it after one
+   /// failure. Search attaches the `cf_clearance` it mints.
+   clearance:                super::clearance::ClearanceGate,
+   pub(crate) cookies:       Arc<Jar>,
    /// Set when accounts arrive through `/import`, so their filters are turned
    /// off as soon as they are in the pool instead of on the next rescan.
-   pub(crate) filter_wakeup: Arc<tokio::sync::Notify>,
+   pub(crate) filter_wakeup:       Arc<tokio::sync::Notify>,
+   /// Set when accounts arrive through `/import` or move into the search pool,
+   /// so unverified search accounts are checked right away instead of waiting
+   /// for the next periodic scan.
+   pub(crate) search_check_wakeup: Arc<tokio::sync::Notify>,
    /// Wakes the account reconciliation task immediately after `/import`.
-   reconcile_wakeup: Arc<tokio::sync::Notify>,
+   reconcile_wakeup:               Arc<tokio::sync::Notify>,
 }
 
 impl ApiClient {
@@ -1117,14 +1128,17 @@ impl ApiClient {
          .unwrap_or_else(|_| "search-denylist.json".to_owned());
       // Accounts that arrive through `/import` are reconciled into the pool
       // immediately when woken or every ten seconds; `filter_wakeup` tells
-      // the filter sync they are there.
+      // the filter sync they are there and `search_check_wakeup` wakes the
+      // search audit so newly imported search accounts do not wait half an hour.
       let filter_wakeup = Arc::new(tokio::sync::Notify::new());
+      let search_check_wakeup = Arc::new(tokio::sync::Notify::new());
       let reconcile_wakeup = Arc::new(tokio::sync::Notify::new());
       Self::spawn_account_reconcile(
          accounts,
          sessions.clone(),
          Arc::clone(&cookies),
          Arc::clone(&filter_wakeup),
+         Arc::clone(&search_check_wakeup),
          Arc::clone(&reconcile_wakeup),
       );
 
@@ -1149,8 +1163,10 @@ impl ApiClient {
          )),
          inflight: Arc::new(InflightCoalescer::new()),
          telemetry: None,
+         clearance: super::clearance::ClearanceGate::new(config.config.search_clearance),
          cookies,
          filter_wakeup,
+         search_check_wakeup,
          reconcile_wakeup,
       })
    }
@@ -1164,6 +1180,67 @@ impl ApiClient {
    #[must_use]
    pub fn pressure(&self) -> &Arc<Pressure> {
       &self.pressure
+   }
+
+   /// The clearance flow's state, for the admin dashboard.
+   #[must_use]
+   pub fn clearance_status(&self) -> super::clearance::ClearanceStatus {
+      self.clearance.status()
+   }
+
+   /// Before a search, make sure this session holds a fresh `cf_clearance`.
+   ///
+   /// Solving visits x.com, reads Cloudflare's JSD challenge and posts the
+   /// oneshot; the cookie it returns lands in the session's jar and is sent on
+   /// the search that follows. This is best-effort and never blocks search: a
+   /// session that already has a fresh cookie, a non-Chrome identity, or a
+   /// tripped breaker returns at once. The first solve failure trips the
+   /// breaker, after which no further x.com clearance requests are made and
+   /// search continues without the cookie.
+   pub(crate) async fn ensure_search_clearance(&self, session: &SessionLease) {
+      if session.kind != SessionKind::Cookie || !self.clearance.should_solve(session.id) {
+         return;
+      }
+      // The JSD payload describes a Chrome desktop; only mint for Chrome
+      // sessions so the token names the browser the requests present as.
+      let identity = super::browser::identity_for(session.id);
+      if identity.engine != super::browser::Engine::Chrome {
+         return;
+      }
+      let Some(user_agent) = super::browser::profile_header(session.id, "user-agent") else {
+         return;
+      };
+      let info = super::clearance::ClientInfo {
+         user_agent,
+         sec_ch_ua: super::browser::profile_header(session.id, "sec-ch-ua").unwrap_or_default(),
+         sec_ch_ua_platform: super::browser::profile_header(session.id, "sec-ch-ua-platform")
+            .unwrap_or_else(|| super::browser::sec_ch_ua_platform(identity.os)),
+         navigator_platform: super::browser::navigator_platform(identity.os).to_owned(),
+      };
+
+      // One solve at a time. Re-check under the permit: a sibling may have
+      // minted for this session, or tripped the breaker, while we waited.
+      let _permit = self.clearance.solve_permit().await;
+      if !self.clearance.should_solve(session.id) {
+         return;
+      }
+      self.clearance.record_attempt();
+      let egress = self.egress_for(session);
+      let target = super::clearance::ClearanceTarget::x_com();
+      match super::clearance::solve(&self.client, &egress, &info, &target).await {
+         Ok(_cookie) => {
+            self.clearance.mark_ok(session.id);
+            tracing::info!(session_id = session.id, "cf_clearance minted for search");
+         },
+         Err(reason) => {
+            self.clearance.trip(&reason);
+            tracing::warn!(
+               session_id = session.id,
+               reason = %reason,
+               "cf_clearance solve failed; disabling the clearance flow until restart"
+            );
+         },
+      }
    }
 
    pub(crate) async fn cookie_snapshot(&self, session_id: i64) -> Option<Vec<EditorCookie>> {
@@ -1186,11 +1263,18 @@ impl ApiClient {
       self.reconcile_wakeup.notify_one();
    }
 
+   /// Wake the search check task so newly added search accounts start verifying
+   /// without waiting for the periodic scan.
+   pub fn wake_search_check(&self) {
+      self.search_check_wakeup.notify_one();
+   }
+
    fn spawn_account_reconcile(
       store: AccountStore,
       pool: SessionPool,
       cookies: Arc<Jar>,
       filter_wakeup: Arc<tokio::sync::Notify>,
+      search_check_wakeup: Arc<tokio::sync::Notify>,
       reconcile_wakeup: Arc<tokio::sync::Notify>,
    ) {
       tokio::spawn(async move {
@@ -1207,9 +1291,10 @@ impl ApiClient {
                Ok(added) => {
                   tracing::info!(added, "added imported accounts to the live pool");
                   // New accounts hide NSFW media until their settings are
-                  // written, so the sync is woken instead of waiting for the
-                  // next rescan.
+                  // written, and new search accounts need verification before
+                  // serving visitors, so both background workers are woken.
                   filter_wakeup.notify_one();
+                  search_check_wakeup.notify_one();
                },
                Err(err) => tracing::warn!("could not reconcile imported accounts: {err}"),
             }
@@ -1277,11 +1362,10 @@ impl ApiClient {
             }
             let eligible_accounts = api.user_timeline_accounts().await;
             if let Some(report) = api.timeline_routes.report(eligible_accounts) {
-               match api.pressure.observe(
-                  report.off_primary,
-                  report.total,
-                  crate::pressure::now(),
-               ) {
+               match api
+                  .pressure
+                  .observe(report.off_primary, report.total, crate::pressure::now())
+               {
                   Some(crate::pressure::Change::Raised { share, cause }) => {
                      let trigger = match cause {
                         crate::pressure::Cause::Spike => "single-minute spike",
@@ -1765,8 +1849,11 @@ impl ApiClient {
    fn spawn_search_failure_canary(&self, session_id: i64) {
       let api = self.clone();
       tokio::spawn(async move {
-         let outcome =
-            timeout(Duration::from_secs(25), api.probe_search_capable(session_id)).await;
+         let outcome = timeout(
+            Duration::from_secs(25),
+            api.probe_search_capable(session_id),
+         )
+         .await;
          match outcome {
             Ok(Ok(true)) => {
                api.sessions.record_tweet_search_ok(session_id, true);
@@ -2024,6 +2111,11 @@ impl ApiClient {
    where
       T: DeserializeOwned,
    {
+      // Search rides a cf_clearance cookie. Mint one for this session first
+      // (no-op once it has a fresh one, or once the breaker has tripped).
+      if endpoint.ends_with("/SearchTimeline") {
+         self.ensure_search_clearance(session).await;
+      }
       let sent_tid = self.tid_enabled && session.kind == SessionKind::Cookie;
       let wire = self.wire_operation(session, endpoint, features);
       let path = format!("/i/api/graphql/{}", wire.path.as_str());
@@ -2405,7 +2497,8 @@ impl ApiClient {
       graphql_request: Option<(&str, &str)>,
       response: super::http::Response,
    ) -> Result<(bytes::Bytes, ResponseLimits)> {
-      let response_limits = if let Some(remaining) = response.headers().get("x-rate-limit-remaining")
+      let response_limits = if let Some(remaining) =
+         response.headers().get("x-rate-limit-remaining")
          && let Ok(remaining_str) = remaining.to_str()
          && let Ok(remaining_val) = remaining_str.parse::<i32>()
       {
@@ -2568,8 +2661,7 @@ impl ApiClient {
          // page this way, and reading it as dead credentials benched healthy
          // accounts for good. Only a JSON 403 can carry X's own verdict.
          if status.as_u16() == 401
-            || (status.as_u16() == 403
-               && twitter_error_code(&body) == Some(326))
+            || (status.as_u16() == 403 && twitter_error_code(&body) == Some(326))
          {
             tracing::error!(
                session_id = session.id,
@@ -2647,12 +2739,16 @@ impl ApiClient {
             );
             self.sessions.disarm_meter(session);
             let (probe, evidence) = if is_settings {
-               (SuspensionProbe::Settings, "Settings write refused (code 64)")
+               (
+                  SuspensionProbe::Settings,
+                  "Settings write refused (code 64)",
+               )
             } else {
                // `None` restriction: the event above already recorded it.
                (SuspensionProbe::Data, "Account suspended")
             };
-            self.sessions
+            self
+               .sessions
                .note_suspended(session.id, probe, None, evidence)
                .await;
             return Err(Error::UserSuspended(format!("Status {status}: {shown}")));
@@ -3046,7 +3142,11 @@ mod tests {
 
       pool.hold_ct0(id, "fresh".to_owned());
       pool
-         .demote_to_view(id, Some(crate::stats::Restriction::SearchBanned), "search refused")
+         .demote_to_view(
+            id,
+            Some(crate::stats::Restriction::SearchBanned),
+            "search refused",
+         )
          .await;
       let mut answer = axum::http::HeaderMap::new();
       answer.append(
@@ -3194,9 +3294,11 @@ mod tests {
    #[test]
    fn search_rate_limit_and_lock_errors_are_never_swallowed_as_empty_or_backend_failure() {
       let rate_limited_body = br#"{"data":{"search_by_raw_query":{"search_timeline":{}}},"errors":[{"code":88,"message":"Rate limit exceeded","path":["search_by_raw_query","search_timeline","timeline"]}]}"#;
-      let env: GqlResponse<SearchTimelineData> =
-         serde_json::from_slice(rate_limited_body).unwrap();
-      assert_eq!(search_timeline_failure(rate_limited_body, &env.errors), None);
+      let env: GqlResponse<SearchTimelineData> = serde_json::from_slice(rate_limited_body).unwrap();
+      assert_eq!(
+         search_timeline_failure(rate_limited_body, &env.errors),
+         None
+      );
       let serious = request_errors(&env.errors, env.data.is_some());
       assert_eq!(serious.len(), 1);
       assert!(matches!(

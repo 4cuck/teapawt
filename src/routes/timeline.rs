@@ -130,11 +130,7 @@ fn profile_json_ld(user: &crate::types::User, page_url: &str, image: &str) -> ma
    }
 }
 
-async fn load_first_profile(
-   state: &AppState,
-   username: &str,
-   skip_rail: bool,
-) -> Result<Profile> {
+async fn load_first_profile(state: &AppState, username: &str, skip_rail: bool) -> Result<Profile> {
    let cache_key = cache_keys::profile(username);
    match state.cache.lookup::<Profile>(&cache_key) {
       Some(Hit::Fresh(profile)) => {
@@ -177,11 +173,7 @@ async fn refresh_profile(state: &AppState, username: &str) {
    }
 }
 
-async fn fetch_profile(
-   state: &AppState,
-   username: &str,
-   skip_rail: bool,
-) -> Result<Profile> {
+async fn fetch_profile(state: &AppState, username: &str, skip_rail: bool) -> Result<Profile> {
    let hint = helpers::user_hint_resolved(state, username).await;
    let rail = if skip_rail {
       Some(Vec::new())

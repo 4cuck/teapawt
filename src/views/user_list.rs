@@ -1,11 +1,22 @@
-use maud::{Markup, PreEscaped, html};
+use maud::{
+   Markup,
+   PreEscaped,
+   html,
+};
 
 use crate::{
    config::Config,
-   types::{Prefs, User},
+   types::{
+      Prefs,
+      User,
+   },
    utils::formatters,
    views::renderutils::{
-      get_avatar_class, link_user, profile_picture_alt, render_bio_html, verified_icon,
+      get_avatar_class,
+      link_user,
+      profile_picture_alt,
+      render_bio_html,
+      verified_icon,
    },
 };
 

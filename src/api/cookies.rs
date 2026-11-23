@@ -175,12 +175,14 @@ impl Jar {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
          let needs_write = match bags.get(&session) {
-            Some(jar) => updates.iter().any(|(name, cookie)| {
-               match cookie {
-                  Some(value) => jar.get(name) != Some(value),
-                  None => jar.contains_key(name),
-               }
-            }),
+            Some(jar) => {
+               updates.iter().any(|(name, cookie)| {
+                  match cookie {
+                     Some(value) => jar.get(name) != Some(value),
+                     None => jar.contains_key(name),
+                  }
+               })
+            },
             None => updates.iter().any(|(_, cookie)| cookie.is_some()),
          };
          if !needs_write {
