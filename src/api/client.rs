@@ -1232,13 +1232,42 @@ impl ApiClient {
             self.clearance.mark_ok(session.id);
             tracing::info!(session_id = session.id, "cf_clearance minted for search");
          },
-         Err(reason) => {
-            self.clearance.trip(&reason);
+         Err(err) if err.is_changed() => {
+            // Cloudflare changed the challenge: every solve would fail the same
+            // way, so disable the whole flow until restart (one strike).
+            let reason = err.reason();
+            self.clearance.record_failure(reason, false);
+            self.clearance.trip(reason);
             tracing::warn!(
                session_id = session.id,
                reason = %reason,
-               "cf_clearance solve failed; disabling the clearance flow until restart"
+               "cf_clearance challenge changed; disabling the clearance flow until restart"
             );
+         },
+         Err(err) => {
+            // A one-off (bad response, network blip, declined mint): keep the
+            // flow alive and let another session retry. Only a long streak of
+            // these trips the breaker, so a persistent fault stops hammering.
+            let reason = err.reason();
+            let streak = self.clearance.record_failure(reason, true);
+            if streak >= super::clearance::max_failure_streak() {
+               self.clearance.trip(&format!(
+                  "{streak} consecutive clearance failures; last: {reason}"
+               ));
+               tracing::warn!(
+                  session_id = session.id,
+                  streak,
+                  reason = %reason,
+                  "too many consecutive cf_clearance failures; disabling the clearance flow until restart"
+               );
+            } else {
+               tracing::info!(
+                  session_id = session.id,
+                  streak,
+                  reason = %reason,
+                  "cf_clearance solve failed (transient); flow stays enabled"
+               );
+            }
          },
       }
    }

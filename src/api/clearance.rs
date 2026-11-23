@@ -150,9 +150,19 @@ struct Inner {
    attempts:  AtomicU64,
    successes: AtomicU64,
    failures:  AtomicU64,
+   /// Transient failures (a subset of `failures`): bad responses, network
+   /// errors, declined mints. These do not trip the breaker on their own.
+   transient: AtomicU64,
+   /// Failures in a row (any kind), reset by a success. A long run trips the
+   /// breaker so a persistent problem stops hammering x.com.
+   streak:    AtomicU64,
    last_ok:   Mutex<Option<OffsetDateTime>>,
    last_err:  Mutex<Option<String>>,
 }
+
+/// Consecutive failures that trip the breaker even when each looks transient:
+/// something is persistently wrong (every exit blocked, say), so stop trying.
+const MAX_FAILURE_STREAK: u64 = 20;
 
 enum GateState {
    Armed,
@@ -173,6 +183,8 @@ impl ClearanceGate {
             attempts: AtomicU64::new(0),
             successes: AtomicU64::new(0),
             failures: AtomicU64::new(0),
+            transient: AtomicU64::new(0),
+            streak: AtomicU64::new(0),
             last_ok: Mutex::new(None),
             last_err: Mutex::new(None),
          }),
@@ -218,6 +230,7 @@ impl ClearanceGate {
 
    pub(crate) fn mark_ok(&self, session_id: i64) {
       self.inner.successes.fetch_add(1, Ordering::Relaxed);
+      self.inner.streak.store(0, Ordering::Relaxed);
       *self
          .inner
          .last_ok
@@ -231,15 +244,24 @@ impl ClearanceGate {
          .insert(session_id, Instant::now());
    }
 
-   /// Record the failure and trip the breaker. Only the first failure sets the
-   /// reason and timestamp; later ones (if any slip through) just count.
-   pub(crate) fn trip(&self, reason: &str) {
+   /// Count a failure and return the new consecutive-failure streak. `transient`
+   /// failures are also tallied separately. Does not trip; the caller decides.
+   pub(crate) fn record_failure(&self, reason: &str, transient: bool) -> u64 {
       self.inner.failures.fetch_add(1, Ordering::Relaxed);
+      if transient {
+         self.inner.transient.fetch_add(1, Ordering::Relaxed);
+      }
       *self
          .inner
          .last_err
          .lock()
          .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason.to_owned());
+      self.inner.streak.fetch_add(1, Ordering::Relaxed) + 1
+   }
+
+   /// Disable the whole flow until restart. Only the first trip sets the reason
+   /// and timestamp.
+   pub(crate) fn trip(&self, reason: &str) {
       let mut state = self
          .inner
          .state
@@ -300,11 +322,17 @@ impl ClearanceGate {
          attempts: self.inner.attempts.load(Ordering::Relaxed),
          successes: self.inner.successes.load(Ordering::Relaxed),
          failures: self.inner.failures.load(Ordering::Relaxed),
+         transient_failures: self.inner.transient.load(Ordering::Relaxed),
          active_sessions,
          last_ok,
          last_error,
       }
    }
+}
+
+/// Consecutive failures that force a trip even when each looks transient.
+pub(crate) const fn max_failure_streak() -> u64 {
+   MAX_FAILURE_STREAK
 }
 
 /// The clearance flow's state, for the admin dashboard.
@@ -323,6 +351,9 @@ pub struct ClearanceStatus {
    pub attempts:        u64,
    pub successes:       u64,
    pub failures:        u64,
+   /// Transient failures (bad responses, network errors, declined mints) that
+   /// did not trip the breaker — a subset of `failures`.
+   pub transient_failures: u64,
    /// Sessions holding a cookie minted within the TTL.
    pub active_sessions: usize,
    /// Last successful mint (RFC3339).
@@ -341,6 +372,37 @@ pub(crate) struct ClientInfo {
    pub navigator_platform: String,
 }
 
+/// Why a solve failed, and whether it means Cloudflare changed the challenge.
+#[derive(Debug)]
+pub(crate) enum SolveError {
+   /// A one-off: a bad or oversized response, a network error, a timeout, or a
+   /// mint the oneshot declined. The flow keeps running and the session retries.
+   Transient(String),
+   /// The challenge no longer matches the solver — a new encoder, or the
+   /// extractor could not read a script that *is* the challenge. The one-strike
+   /// breaker trips, because every solve would fail the same way.
+   Changed(String),
+}
+
+impl SolveError {
+   pub(crate) fn reason(&self) -> &str {
+      match self {
+         Self::Transient(reason) | Self::Changed(reason) => reason,
+      }
+   }
+
+   pub(crate) const fn is_changed(&self) -> bool {
+      matches!(self, Self::Changed(_))
+   }
+}
+
+/// A request/transport failure (returned as `String`) is transient by default.
+impl From<String> for SolveError {
+   fn from(reason: String) -> Self {
+      Self::Transient(reason)
+   }
+}
+
 /// Solve the challenge for one session's egress and return `cf_clearance`.
 /// Bounded by [`SOLVE_TIMEOUT`].
 pub(crate) async fn solve(
@@ -348,10 +410,10 @@ pub(crate) async fn solve(
    egress: &Egress,
    info: &ClientInfo,
    target: &ClearanceTarget,
-) -> Result<String, String> {
+) -> Result<String, SolveError> {
    match tokio::time::timeout(SOLVE_TIMEOUT, solve_inner(client, egress, info, target)).await {
       Ok(result) => result,
-      Err(_elapsed) => Err("solve timed out".to_owned()),
+      Err(_elapsed) => Err(SolveError::Transient("solve timed out".to_owned())),
    }
 }
 
@@ -360,7 +422,7 @@ async fn solve_inner(
    egress: &Egress,
    info: &ClientInfo,
    target: &ClearanceTarget,
-) -> Result<String, String> {
+) -> Result<String, SolveError> {
    let mut jar: HashMap<String, String> = HashMap::new();
    let token = jsdapi_token();
    let now_secs = OffsetDateTime::now_utc().unix_timestamp();
@@ -406,27 +468,34 @@ async fn solve_inner(
       None,
    )
    .await?;
+   // Not the challenge script: a 200 that is the SPA HTML, a block/interstitial
+   // page, or a proxy error — i.e. this one exit, not a format change. Keep the
+   // flow alive and let another session retry.
    if !main_js.contains("_cf_chl_opt") {
-      return Err(format!(
+      return Err(SolveError::Transient(format!(
          "jsd main.js was not the challenge script (status {main_status}, {} bytes)",
          main_js.len()
-      ));
+      )));
    }
 
    // 2. Deobfuscate: run the script's own string-table decoder in QuickJS to
    //    recover the alphabet and oneshot path, then parse the readable form.
-   //    A script that is already readable is parsed as-is.
+   //    A script that is already readable is parsed as-is. From here a failure
+   //    means the script *is* the challenge but the solver can't read it — a
+   //    real format change, so these trip the breaker.
    let source = readable_main(&main_js).unwrap_or(main_js);
    if !is_payload_encoder_v2(&source) {
-      return Err("jsd encoder is not v2 (challenge changed)".to_owned());
+      return Err(SolveError::Changed(
+         "jsd encoder is not v2 (challenge changed)".to_owned(),
+      ));
    }
    let extracted = extract_modern(&source).ok_or_else(|| {
-      "jsd main.js did not match the modern extractor (challenge changed)".to_owned()
+      SolveError::Changed("jsd main.js did not match the modern extractor (challenge changed)".to_owned())
    })?;
 
    // 3. The device payload, compressed with the v2 encoder.
    let payload = build_payload(cv.t_time, info, cv.api, target);
-   let compressed = compress_v2(&payload, &extracted.alphabet)?;
+   let compressed = compress_v2(&payload, &extracted.alphabet).map_err(SolveError::Changed)?;
 
    // 4. The oneshot. `cf_cv_Object[cf_cvparam]` is the ray (or time) injected.
    let cv_value = if extracted.cf_cvparam == "t" {
@@ -449,9 +518,11 @@ async fn solve_inner(
    )
    .await?;
 
+   // A 200 oneshot that sets no cf_clearance is a declined mint (fingerprint/IP
+   // scored out), not a format change — transient.
    cookie_from_headers(&headers, "cf_clearance")
       .or_else(|| jar.get("cf_clearance").cloned())
-      .ok_or_else(|| format!("oneshot {status} returned no cf_clearance"))
+      .ok_or_else(|| SolveError::Transient(format!("oneshot {status} returned no cf_clearance")))
 }
 
 /// Same-host redirect hops a GET follows, matching the Node solver's browser

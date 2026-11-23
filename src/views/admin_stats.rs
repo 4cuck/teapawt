@@ -929,7 +929,12 @@ fn clearance_card(status: &ClearanceStatus) -> Markup {
             }
             div {
                dt { "Failures" }
-               dd { (status.failures) }
+               dd {
+                  (status.failures)
+                  @if status.transient_failures > 0 {
+                     " (" (status.transient_failures) " transient)"
+                  }
+               }
             }
             @if let Some(at) = &status.last_ok {
                div {
@@ -1654,12 +1659,13 @@ mod tests {
          tripped:         false,
          reason:          None,
          tripped_at:      None,
-         attempts:        3,
-         successes:       3,
-         failures:        0,
-         active_sessions: 3,
-         last_ok:         None,
-         last_error:      None,
+         attempts:           3,
+         successes:          3,
+         failures:           0,
+         transient_failures: 0,
+         active_sessions:    3,
+         last_ok:            None,
+         last_error:         None,
       }
    }
 
