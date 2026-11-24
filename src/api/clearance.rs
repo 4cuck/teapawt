@@ -16,11 +16,11 @@
 //!      frame, an FNV-1a/xorshift XOR stream, then a 6-bit alphabet pack.
 //!   5. POST it to the oneshot URL and read `cf_clearance` off the response.
 //!
-//! The challenge changes often. Any failure here (the script no longer matching
-//! the regexes, a new encoder, no cookie returned) trips [`ClearanceGate`]:
-//! the whole flow is disabled until the process restarts, no further x.com
-//! requests are made for clearance, and search carries on without the cookie.
-//! The dashboard shows the tripped state and the reason.
+//! The challenge changes often. A readable script that no longer matches the
+//! solver trips [`ClearanceGate`] immediately, and a long run of other failures
+//! trips it too. The HTML shell does not: that answer is logged and the session
+//! waits a minute before trying again. Search carries on without the cookie
+//! either way. The dashboard shows the tripped state and the reason.
 
 use std::{
    collections::HashMap,
@@ -145,6 +145,11 @@ struct Inner {
    state:     RwLock<GateState>,
    /// Session id → when its clearance was last minted.
    sessions:  Mutex<HashMap<i64, Instant>>,
+   /// Session id → earliest time it may try to solve again. A failed solve used
+   /// to stay eligible, so the next search retried immediately and one exit
+   /// that kept receiving the HTML shell walked the global streak to the cap
+   /// by itself.
+   retry_after: Mutex<HashMap<i64, Instant>>,
    /// One solve at a time, so a cold start does not stampede x.com.
    solving:   tokio::sync::Mutex<()>,
    attempts:  AtomicU64,
@@ -163,6 +168,8 @@ struct Inner {
 /// Consecutive failures that trip the breaker even when each looks transient:
 /// something is persistently wrong (every exit blocked, say), so stop trying.
 const MAX_FAILURE_STREAK: u64 = 20;
+/// How long a session waits after a failed solve before it may try again.
+const SOLVE_BACKOFF: Duration = Duration::from_secs(60);
 
 enum GateState {
    Armed,
@@ -179,6 +186,7 @@ impl ClearanceGate {
             enabled,
             state: RwLock::new(GateState::Armed),
             sessions: Mutex::new(HashMap::new()),
+            retry_after: Mutex::new(HashMap::new()),
             solving: tokio::sync::Mutex::new(()),
             attempts: AtomicU64::new(0),
             successes: AtomicU64::new(0),
@@ -209,6 +217,18 @@ impl ClearanceGate {
       if !self.active() {
          return false;
       }
+      let retry_after = self
+         .inner
+         .retry_after
+         .lock()
+         .unwrap_or_else(std::sync::PoisonError::into_inner);
+      if retry_after
+         .get(&session_id)
+         .is_some_and(|until| Instant::now() < *until)
+      {
+         return false;
+      }
+      drop(retry_after);
       let sessions = self
          .inner
          .sessions
@@ -217,6 +237,21 @@ impl ClearanceGate {
       sessions
          .get(&session_id)
          .is_none_or(|at| at.elapsed() >= CLEARANCE_TTL)
+   }
+
+   /// Hold this session out of the solver for [`SOLVE_BACKOFF`]. A failed mint
+   /// must not be retried on the very next search.
+   pub(crate) fn defer_retry(&self, session_id: i64) {
+      let mut retry_after = self
+         .inner
+         .retry_after
+         .lock()
+         .unwrap_or_else(std::sync::PoisonError::into_inner);
+      retry_after.insert(session_id, Instant::now() + SOLVE_BACKOFF);
+      if retry_after.len() > 4096 {
+         let now = Instant::now();
+         retry_after.retain(|_, until| *until > now);
+      }
    }
 
    /// Serialise solves: one session mints at a time.
@@ -242,11 +277,18 @@ impl ClearanceGate {
          .lock()
          .unwrap_or_else(std::sync::PoisonError::into_inner)
          .insert(session_id, Instant::now());
+      self.inner
+         .retry_after
+         .lock()
+         .unwrap_or_else(std::sync::PoisonError::into_inner)
+         .remove(&session_id);
    }
 
-   /// Count a failure and return the new consecutive-failure streak. `transient`
-   /// failures are also tallied separately. Does not trip; the caller decides.
-   pub(crate) fn record_failure(&self, reason: &str, transient: bool) -> u64 {
+   /// Count a failure and return the consecutive-failure streak. `transient`
+   /// failures are also tallied separately. `advance_streak` is false for the
+   /// HTML shell: that answer is recorded, but it does not move the breaker.
+   /// Does not trip; the caller decides.
+   pub(crate) fn record_failure(&self, reason: &str, transient: bool, advance_streak: bool) -> u64 {
       self.inner.failures.fetch_add(1, Ordering::Relaxed);
       if transient {
          self.inner.transient.fetch_add(1, Ordering::Relaxed);
@@ -256,7 +298,11 @@ impl ClearanceGate {
          .last_err
          .lock()
          .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason.to_owned());
-      self.inner.streak.fetch_add(1, Ordering::Relaxed) + 1
+      if advance_streak {
+         self.inner.streak.fetch_add(1, Ordering::Relaxed) + 1
+      } else {
+         self.inner.streak.load(Ordering::Relaxed)
+      }
    }
 
    /// Disable the whole flow until restart. Only the first trip sets the reason
@@ -377,7 +423,12 @@ pub(crate) struct ClientInfo {
 pub(crate) enum SolveError {
    /// A one-off: a bad or oversized response, a network error, a timeout, or a
    /// mint the oneshot declined. The flow keeps running and the session retries.
+   /// These advance the consecutive-failure streak.
    Transient(String),
+   /// The exit returned the HTML shell (or another document) where `main.js`
+   /// should have been. This happens in bursts and clears on its own; it must
+   /// not advance the streak, or one busy session walks the breaker to its cap.
+   Shell(String),
    /// The challenge no longer matches the solver — a new encoder, or the
    /// extractor could not read a script that *is* the challenge. The one-strike
    /// breaker trips, because every solve would fail the same way.
@@ -387,12 +438,17 @@ pub(crate) enum SolveError {
 impl SolveError {
    pub(crate) fn reason(&self) -> &str {
       match self {
-         Self::Transient(reason) | Self::Changed(reason) => reason,
+         Self::Transient(reason) | Self::Shell(reason) | Self::Changed(reason) => reason,
       }
    }
 
    pub(crate) const fn is_changed(&self) -> bool {
       matches!(self, Self::Changed(_))
+   }
+
+   /// HTML-shell misses are recorded but do not move the trip streak.
+   pub(crate) const fn counts_streak(&self) -> bool {
+      matches!(self, Self::Transient(_))
    }
 }
 
@@ -472,10 +528,19 @@ async fn solve_inner(
    // page, or a proxy error — i.e. this one exit, not a format change. Keep the
    // flow alive and let another session retry.
    if !main_js.contains("_cf_chl_opt") {
-      return Err(SolveError::Transient(format!(
+      let detail = format!(
          "jsd main.js was not the challenge script (status {main_status}, {} bytes)",
          main_js.len()
-      )));
+      );
+      // The ~313 KB body is the x.com HTML shell. A burst of those, retried on
+      // every search, is what walked the streak to 20 at 13:02. A document is
+      // not a changed script; a javascript body that dropped the marker still
+      // counts, so a real format change keeps tripping.
+      return Err(if looks_like_document(&main_js) {
+         SolveError::Shell(detail)
+      } else {
+         SolveError::Transient(detail)
+      });
    }
 
    // 2. Deobfuscate: run the script's own string-table decoder in QuickJS to
@@ -966,6 +1031,14 @@ fn match_oneshot_tail(js: &str) -> Option<(String, String, String)> {
       }
    }
    None
+}
+
+/// A document where the challenge script should be: the x.com HTML shell, a
+/// block page, or a proxy error page. These start with a tag. A javascript
+/// body that merely dropped `_cf_chl_opt` does not.
+fn looks_like_document(body: &str) -> bool {
+   let head = body.trim_start();
+   head.starts_with('<')
 }
 
 /// The current oneshot encoder is the v2 frame (byte 253, FNV-1a, xorshift,

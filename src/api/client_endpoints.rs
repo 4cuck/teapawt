@@ -2123,6 +2123,102 @@ impl ApiClient {
       })
    }
 
+   /// Accounts this user follows, from the web `Following` query.
+   pub async fn get_following(
+      &self,
+      user_id: &str,
+      cursor: Option<&str>,
+   ) -> Result<PaginatedResult<User>> {
+      snowflake(user_id)?;
+      let data = self
+         .graphql_request::<UserTimelineData>(
+            endpoints::GRAPH_FOLLOWING,
+            &endpoints::following_vars(user_id, cursor),
+            endpoints::GQL_FEATURES,
+            None,
+         )
+         .await?;
+      let instructions = data
+         .user
+         .as_ref()
+         .or(data.user_result.as_ref())
+         .and_then(|nested| nested.result.as_ref())
+         .map(|result| result.instructions())
+         .unwrap_or(&[]);
+      Ok(parser::users_in(instructions))
+   }
+
+   /// `1.1/friends/ids`: numeric ids of accounts this user follows.
+   pub async fn friend_ids(
+      &self,
+      user_id: &str,
+      cursor: Option<&str>,
+      count: u32,
+   ) -> Result<(Vec<String>, Option<String>)> {
+      let body = self
+         .rest_graph::<IdBody>(endpoints::FRIENDS_IDS_PATH, user_id, cursor, count)
+         .await?;
+      let ids = body
+         .ids
+         .iter()
+         .filter_map(|id| match id {
+            serde_json::Value::String(text) if !text.is_empty() => Some(text.clone()),
+            serde_json::Value::Number(number) => Some(number.to_string()),
+            _ => None,
+         })
+         .collect();
+      Ok((ids, open_cursor(body.next_cursor_str, body.next_cursor)))
+   }
+
+   /// `1.1/friends/list`: the same accounts, as user objects.
+   pub async fn friends_list(
+      &self,
+      user_id: &str,
+      cursor: Option<&str>,
+      count: u32,
+   ) -> Result<PaginatedResult<User>> {
+      self.rest_users(endpoints::FRIENDS_LIST_PATH, user_id, cursor, count)
+         .await
+   }
+
+   /// `1.1/followers/list`.
+   pub async fn followers_list(
+      &self,
+      user_id: &str,
+      cursor: Option<&str>,
+      count: u32,
+   ) -> Result<PaginatedResult<User>> {
+      self.rest_users(endpoints::FOLLOWERS_LIST_PATH, user_id, cursor, count)
+         .await
+   }
+
+   async fn rest_users(
+      &self,
+      path: &str,
+      user_id: &str,
+      cursor: Option<&str>,
+      count: u32,
+   ) -> Result<PaginatedResult<User>> {
+      let body = self.rest_graph::<UserBody>(path, user_id, cursor, count).await?;
+      Ok(PaginatedResult {
+         content: body.users.into_iter().filter_map(v1_user).collect(),
+         bottom: open_cursor(body.next_cursor_str, body.next_cursor),
+         ..PaginatedResult::default()
+      })
+   }
+
+   async fn rest_graph<T: serde::de::DeserializeOwned>(
+      &self,
+      path: &str,
+      user_id: &str,
+      cursor: Option<&str>,
+      count: u32,
+   ) -> Result<T> {
+      snowflake(user_id)?;
+      let url = endpoints::rest_graph_url(path, user_id, cursor, count);
+      self.cookie_json_request(path, path, &url).await
+   }
+
    pub async fn get_community(&self, id: &str) -> Result<parser::CommunityInfo> {
       snowflake(id)?;
       let data = self
@@ -2170,6 +2266,72 @@ impl ApiClient {
          .await?;
       parser::parse_community_timeline(&data)
    }
+}
+
+#[derive(Deserialize, Default)]
+struct IdBody {
+   ids:             Vec<serde_json::Value>,
+   next_cursor_str: Option<String>,
+   next_cursor:     Option<i64>,
+}
+
+#[derive(Deserialize, Default)]
+struct UserBody {
+   users:           Vec<V1User>,
+   next_cursor_str: Option<String>,
+   next_cursor:     Option<i64>,
+}
+
+#[derive(Deserialize, Default)]
+struct V1User {
+   id_str:                   Option<String>,
+   id:                       Option<i64>,
+   screen_name:              Option<String>,
+   name:                     Option<String>,
+   description:              Option<String>,
+   location:                 Option<String>,
+   url:                      Option<String>,
+   followers_count:          Option<i64>,
+   friends_count:            Option<i64>,
+   statuses_count:           Option<i64>,
+   favourites_count:         Option<i64>,
+   protected:                Option<bool>,
+   verified:                 Option<bool>,
+   profile_image_url_https:  Option<String>,
+   profile_banner_url:       Option<String>,
+}
+
+fn open_cursor(raw: Option<String>, numeric: Option<i64>) -> Option<String> {
+   let text = raw.or_else(|| numeric.filter(|cursor| *cursor != 0).map(|cursor| cursor.to_string()));
+   text.filter(|cursor| !cursor.is_empty() && cursor != "0")
+}
+
+fn v1_user(raw: V1User) -> Option<User> {
+   let id = raw.id_str.filter(|id| !id.is_empty()).or_else(|| {
+      raw.id.and_then(|id| (id != 0).then(|| id.to_string()))
+   })?;
+   let username = raw.screen_name.filter(|name| !name.is_empty())?;
+   Some(User {
+      id,
+      username,
+      fullname: raw.name.unwrap_or_default(),
+      bio: raw.description.unwrap_or_default(),
+      location: raw.location.unwrap_or_default(),
+      website: raw.url.unwrap_or_default(),
+      user_pic: raw.profile_image_url_https.unwrap_or_default(),
+      banner: raw.profile_banner_url.unwrap_or_default(),
+      followers: raw.followers_count.unwrap_or(0),
+      following: raw.friends_count.unwrap_or(0),
+      tweets: raw.statuses_count.unwrap_or(0),
+      likes: raw.favourites_count.unwrap_or(0),
+      protected: raw.protected.unwrap_or(false),
+      verified_type: if raw.verified.unwrap_or(false) {
+         crate::types::VerifiedType::Blue
+      } else {
+         crate::types::VerifiedType::None
+      },
+      ..User::default()
+   })
 }
 
 pub struct WatchedBroadcast {

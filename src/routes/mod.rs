@@ -26,6 +26,8 @@ mod game;
 pub mod helpers;
 mod import;
 mod intent;
+mod json_api;
+mod json_openapi;
 mod list;
 mod media;
 mod middleware;

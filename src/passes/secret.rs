@@ -38,6 +38,42 @@ pub fn token() -> String {
    HEXLOWER.encode(&random::<32>())
 }
 
+/// `tpk_` plus 256 random bits. The prefix only marks the kind of secret.
+/// Guessing one is a 2^256 search, and a copy of the database holds the
+/// hash, not this string.
+pub fn api_key() -> String {
+   format!("tpk_{}", HEXLOWER.encode(&random::<32>()))
+}
+
+pub fn valid_api_key(key: &str) -> bool {
+   let key = key.trim();
+   let Some((prefix, rest)) = key.split_at_checked(4) else {
+      return false;
+   };
+   prefix.eq_ignore_ascii_case("tpk_")
+      && rest.len() == 64
+      && rest.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Lowercase form, the one that is hashed and stored.
+pub fn canonical_api_key(key: &str) -> Option<String> {
+   valid_api_key(key).then(|| key.trim().to_ascii_lowercase())
+}
+
+/// `tpk_` and the first 8 hex digits. Enough to tell keys apart on the
+/// account page. The other 224 bits are never stored.
+pub fn api_key_label(key: &str) -> Option<String> {
+   let key = canonical_api_key(key)?;
+   Some(key.chars().take(12).collect())
+}
+
+pub fn valid_key_label(label: &str) -> bool {
+   let Some(rest) = label.strip_prefix("tpk_") else {
+      return false;
+   };
+   rest.len() == 8 && rest.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 pub fn valid_token(token: &str) -> bool {
    token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -150,5 +186,25 @@ mod tests {
       assert!(valid_token(&token()));
       assert!(!valid_token("abc"));
       assert_eq!(digest("x").len(), 64);
+   }
+
+   #[test]
+   fn api_keys_are_256_random_bits_and_not_the_stored_hash() {
+      let first = api_key();
+      let second = api_key();
+      assert_ne!(first, second);
+      assert!(valid_api_key(&first));
+      assert_eq!(first.len(), 68);
+      assert!(first.as_bytes()[4..].iter().all(|byte| byte.is_ascii_hexdigit()));
+      let label = api_key_label(&first).unwrap();
+      assert!(valid_key_label(&label));
+      assert!(!valid_api_key(&label));
+      assert_ne!(digest(&first), first);
+      assert!(!valid_api_key("tpk_abcd"));
+      assert!(!valid_api_key(&token()));
+      assert_eq!(
+         canonical_api_key(&first.to_ascii_uppercase()).as_deref(),
+         Some(first.as_str())
+      );
    }
 }

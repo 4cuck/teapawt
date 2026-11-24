@@ -76,6 +76,7 @@ pub fn router() -> Router<AppState> {
       .route("/search-pass/logout", guarded(logout))
       .route("/search-pass/forgot", guarded(forgot).get(forgot_page))
       .route("/search-pass/ips", guarded(addresses))
+      .route("/search-pass/keys", guarded(keys))
       .route("/search-pass/email", guarded(email))
       .route("/search-pass/password", guarded(new_password))
       .route("/search-pass/renewal", guarded(stop_renewal))
@@ -167,6 +168,14 @@ fn note(key: &str) -> Option<Notice> {
          )
       },
       "bad-ip" => (Bad, "That is not a public IPv4 or IPv6 address."),
+      "key-removed" => (Good, "API key revoked."),
+      "key-full" => {
+         (
+            Bad,
+            "This pass has as many API keys as it can hold. Revoke one first.",
+         )
+      },
+      "bad-key" => (Bad, "That API key is not on this pass."),
       "email" => (Good, "Recovery email saved."),
       "no-email" => (Good, "Recovery email removed."),
       "bad-email" => (Bad, "That email address does not look right."),
@@ -324,6 +333,8 @@ fn account_page(
       addresses: &account.addresses,
       current: current.as_deref(),
       max_addresses: passes::MAX_ADDRESSES,
+      keys: &account.keys,
+      max_keys: passes::MAX_KEYS,
       price: &price,
       methods: &methods,
       mail: state.passes.mail_enabled(),
@@ -650,6 +661,43 @@ async fn addresses(
       Ok(Listing::Full) => see_note("full"),
       Err(err) => {
          tracing::warn!("search pass address not added: {err}");
+         see_note("unavailable")
+      },
+   }
+}
+
+#[derive(Deserialize)]
+struct KeyForm {
+   #[serde(default)]
+   action: String,
+   #[serde(default)]
+   label:  String,
+}
+
+async fn keys(State(state): State<AppState>, jar: CookieJar, Form(form): Form<KeyForm>) -> Response {
+   let Some(account_id) = state.passes.signed_in(&jar) else {
+      return see("/search-pass/login");
+   };
+   if form.action == "revoke" {
+      return match state.passes.revoke_key(account_id, form.label.trim()).await {
+         Ok(true) => see_note("key-removed"),
+         Ok(false) => see_note("bad-key"),
+         Err(err) => {
+            tracing::warn!("search pass key not revoked: {err}");
+            see_note("unavailable")
+         },
+      };
+   }
+   if form.action != "create" {
+      return see("/search-pass");
+   }
+   match state.passes.create_key(account_id).await {
+      Ok(passes::Minted::Created(key)) => {
+         render(&state, &jar, "New API key", view::render_new_key(&key))
+      },
+      Ok(passes::Minted::Full) => see_note("key-full"),
+      Err(err) => {
+         tracing::warn!("search pass key not minted: {err}");
          see_note("unavailable")
       },
    }

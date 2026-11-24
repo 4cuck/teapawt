@@ -21,6 +21,10 @@ use std::{
    time::Duration,
 };
 
+use axum::http::{
+   HeaderMap,
+   header,
+};
 use axum_extra::extract::CookieJar;
 use tokio::sync::{
    Mutex,
@@ -59,6 +63,8 @@ pub const SESSION_DAYS: i64 = 180;
 /// before the pass would lapse.
 pub const PASS_DAYS: i64 = 31;
 pub const MAX_ADDRESSES: usize = 5;
+/// Keys one pass can hold. Each is 256 random bits; the table stores the hash.
+pub const MAX_KEYS: usize = 5;
 pub const DAY: i64 = 86_400;
 /// The pass account that issues passes by hand from its own pass page.
 /// Bought logins are always `pass-…`, so no checkout can make this name.
@@ -122,6 +128,13 @@ CREATE TABLE IF NOT EXISTS pass_ips (
    created_at bigint NOT NULL,
    PRIMARY KEY (client_key, account_id)
 );
+CREATE TABLE IF NOT EXISTS pass_keys (
+   key_hash text PRIMARY KEY,
+   account_id bigint NOT NULL REFERENCES pass_accounts (id) ON DELETE CASCADE,
+   label text NOT NULL,
+   created_at bigint NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pass_keys_account ON pass_keys (account_id, created_at);
 ";
 
 #[derive(Debug)]
@@ -194,6 +207,8 @@ pub struct Account {
    pub renews:     bool,
    pub card:       bool,
    pub addresses:  Vec<String>,
+   /// Display prefixes (`tpk_` plus 8 hex digits). The secret is not stored.
+   pub keys:       Vec<String>,
 }
 
 impl Account {
@@ -226,6 +241,13 @@ pub enum Listing {
    AlreadyListed,
 }
 
+/// A new API key, or the cap.
+pub enum Minted {
+   /// The only copy of the secret.
+   Created(String),
+   Full,
+}
+
 /// A pass the operator issued. `password` is `None` when an existing
 /// account on that email was extended instead, which keeps its login.
 pub struct Granted {
@@ -240,6 +262,57 @@ struct Index {
    paid_until: HashMap<i64, i64>,
    sessions:   HashMap<String, i64>,
    addresses:  HashMap<String, Vec<i64>>,
+   /// SHA-256 of an API key, mapped to the pass that minted it.
+   keys:       HashMap<String, i64>,
+}
+
+/// A request that sent a live API key.
+#[derive(Clone, Copy)]
+struct PresentedKey;
+
+tokio::task_local! {
+   static PRESENTED_KEY: PresentedKey;
+}
+
+/// Run `future` as a request that sent a live API key.
+pub async fn scope_presented<F: std::future::Future>(future: F) -> F::Output {
+   PRESENTED_KEY.scope(PresentedKey, future).await
+}
+
+fn presented_key() -> Option<PresentedKey> {
+   PRESENTED_KEY.try_with(|key| *key).ok()
+}
+
+/// Whether this request sent an API key for a pass that is still paid up.
+#[must_use]
+pub fn holds_key() -> bool {
+   presented_key().is_some()
+}
+
+/// A canonical API key from `Authorization: Bearer` or `X-Api-Key`.
+///
+/// Anything that is not `tpk_` plus 64 hex digits is ignored, so a guessed
+/// or truncated value never reaches the hash table.
+#[must_use]
+pub fn presented_api_key(headers: &HeaderMap) -> Option<String> {
+   let bearer = headers
+      .get(header::AUTHORIZATION)
+      .and_then(|value| value.to_str().ok())
+      .map(str::trim)
+      .and_then(|value| {
+         value
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer "))
+            .then(|| value[7..].trim())
+      });
+   let named = headers
+      .get("x-api-key")
+      .and_then(|value| value.to_str().ok())
+      .map(str::trim);
+   bearer
+      .into_iter()
+      .chain(named)
+      .find_map(secret::canonical_api_key)
 }
 
 impl Index {
@@ -254,6 +327,13 @@ impl Index {
       budget::current_client()
          .and_then(|client| self.addresses.get(client.as_str()))
          .is_some_and(|accounts| accounts.iter().any(|id| self.active(*id, now)))
+   }
+
+   /// Whether `hash` is an API key for a pass that is still paid up.
+   fn key_active(&self, hash: &str, now: i64) -> bool {
+      self.keys
+         .get(hash)
+         .is_some_and(|id| self.active(*id, now))
    }
 }
 
@@ -358,6 +438,12 @@ impl PassStore {
                   .or_default()
                   .push(row.get(1));
             }
+            for row in db
+               .query("SELECT key_hash, account_id FROM pass_keys", &[])
+               .await?
+            {
+               index.keys.insert(row.get(0), row.get(1));
+            }
             Ok(index)
          })
          .await;
@@ -367,15 +453,29 @@ impl PassStore {
       }
    }
 
-   /// Whether this request may search without the checkbox: a signed-in pass
-   /// or a whitelisted address, either still paid up.
+   /// Whether this request may search without the checkbox: a signed-in pass,
+   /// an API key, or a whitelisted address, any of them still paid up.
    pub fn admits(&self, jar: &CookieJar) -> bool {
       let now = now();
       let index = self.index.read().unwrap_or_else(PoisonError::into_inner);
       let by_session = session_hash(jar)
          .and_then(|hash| index.sessions.get(&hash).copied())
          .is_some_and(|id| index.active(id, now));
-      by_session || index.address_active(now)
+      let by_key = presented_key().is_some();
+      by_session || by_key || index.address_active(now)
+   }
+
+   /// Whether `key` belongs to a pass that is still paid up.
+   #[must_use]
+   pub fn accept_key(&self, key: &str) -> bool {
+      let Some(canonical) = secret::canonical_api_key(key) else {
+         return false;
+      };
+      let hash = secret::digest(&canonical);
+      self.index
+         .read()
+         .unwrap_or_else(PoisonError::into_inner)
+         .key_active(&hash, now())
    }
 
    /// [`admits`](Self::admits) for callers that send no cookies.
@@ -932,6 +1032,15 @@ impl PassStore {
                .iter()
                .map(|address| address.get(0))
                .collect();
+            let keys = db
+               .query(
+                  "SELECT label FROM pass_keys WHERE account_id = $1 ORDER BY created_at",
+                  &[&id],
+               )
+               .await?
+               .iter()
+               .map(|key| key.get(0))
+               .collect();
             Ok(Some(Account {
                username: row.get(0),
                email: row.get(1),
@@ -939,6 +1048,7 @@ impl PassStore {
                renews: row.get(3),
                card: row.get(4),
                addresses,
+               keys,
             }))
          })
          .await
@@ -978,6 +1088,85 @@ impl PassStore {
          self.reload().await;
       }
       Ok(added)
+   }
+
+   /// Mint a key. The returned string is the only copy; Postgres keeps the hash.
+   pub async fn create_key(&self, account_id: i64) -> Result<Minted, PassError> {
+      let now = now();
+      let created = self
+         .with(async |db| {
+            let tx = db.transaction().await?;
+            tx.execute("SELECT 1 FROM pass_accounts WHERE id = $1 FOR UPDATE", &[
+               &account_id,
+            ])
+            .await?;
+            let count: i64 = tx
+               .query_one(
+                  "SELECT count(*) FROM pass_keys WHERE account_id = $1",
+                  &[&account_id],
+               )
+               .await?
+               .get(0);
+            if count >= i64::try_from(MAX_KEYS).unwrap_or(i64::MAX) {
+               return Ok(Minted::Full);
+            }
+            let mut tries = 0_u8;
+            let (token, hash, label) = loop {
+               tries += 1;
+               if tries > 8 {
+                  return Err(PassError("could not mint a key".into()));
+               }
+               let token = secret::api_key();
+               let Some(label) = secret::api_key_label(&token) else {
+                  continue;
+               };
+               let hash = secret::digest(&token);
+               let clash = tx
+                  .query_opt(
+                     "SELECT 1 FROM pass_keys WHERE key_hash = $1 OR (account_id = $2 AND label = \
+                      $3)",
+                     &[&hash, &account_id, &label],
+                  )
+                  .await?;
+               if clash.is_none() {
+                  break (token, hash, label);
+               }
+            };
+            tx.execute(
+               "INSERT INTO pass_keys (key_hash, account_id, label, created_at) VALUES ($1, $2, \
+                $3, $4)",
+               &[&hash, &account_id, &label, &now],
+            )
+            .await?;
+            tx.commit().await?;
+            Ok(Minted::Created(token))
+         })
+         .await?;
+      if matches!(created, Minted::Created(_)) {
+         self.reload().await;
+      }
+      Ok(created)
+   }
+
+   /// Drop one key by the label shown on the account page.
+   pub async fn revoke_key(&self, account_id: i64, label: &str) -> Result<bool, PassError> {
+      if !secret::valid_key_label(label) {
+         return Ok(false);
+      }
+      let removed = self
+         .with(async |db| {
+            Ok(db
+               .execute(
+                  "DELETE FROM pass_keys WHERE account_id = $1 AND label = $2",
+                  &[&account_id, &label],
+               )
+               .await?)
+         })
+         .await?;
+      if removed > 0 {
+         self.reload().await;
+      }
+      Ok(removed > 0)
    }
 
    pub async fn remove_address(&self, account_id: i64, key: &str) -> Result<(), PassError> {
@@ -1425,5 +1614,49 @@ mod tests {
    #[test]
    fn dates_read_as_words() {
       assert_eq!(date(1_796_083_200), "December 1, 2026");
+   }
+
+   #[test]
+   fn a_key_admits_only_while_the_pass_is_paid() {
+      let now = 1_000_000;
+      let mut index = Index::default();
+      index.paid_until.insert(1, now + 10);
+      index.paid_until.insert(2, now - 10);
+      index.keys.insert("paid".into(), 1);
+      index.keys.insert("lapsed".into(), 2);
+      assert!(index.key_active("paid", now));
+      assert!(!index.key_active("lapsed", now));
+      assert!(!index.key_active("missing", now));
+   }
+
+   #[test]
+   fn api_keys_come_from_the_bearer_or_header_and_nowhere_else() {
+      let key = secret::api_key();
+      let mut headers = HeaderMap::new();
+      headers.insert(
+         header::AUTHORIZATION,
+         format!("Bearer {key}").parse().unwrap(),
+      );
+      assert_eq!(presented_api_key(&headers).as_deref(), Some(key.as_str()));
+
+      let mut headers = HeaderMap::new();
+      headers.insert("x-api-key", key.to_ascii_uppercase().parse().unwrap());
+      assert_eq!(presented_api_key(&headers).as_deref(), Some(key.as_str()));
+
+      let mut headers = HeaderMap::new();
+      headers.insert("x-api-key", "tpk_abcd".parse().unwrap());
+      assert!(presented_api_key(&headers).is_none());
+      headers.insert(
+         header::AUTHORIZATION,
+         format!("Bearer {key}").parse().unwrap(),
+      );
+      assert_eq!(presented_api_key(&headers).as_deref(), Some(key.as_str()));
+   }
+
+   #[tokio::test]
+   async fn a_presented_key_is_visible_to_the_request_it_scopes() {
+      let seen = scope_presented(async { presented_key().is_some() }).await;
+      assert!(seen);
+      assert!(presented_key().is_none());
    }
 }

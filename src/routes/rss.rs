@@ -95,8 +95,8 @@ fn search_feed_blocked(state: &AppState) -> Response {
    let mut response = (
       StatusCode::PAYMENT_REQUIRED,
       format!(
-         "Search feeds need a search pass ({origin}/search-pass). Sign in, or whitelist this \
-          reader's IP address on the pass page."
+         "Search feeds need a search pass ({origin}/search-pass). Sign in, send an API key, or \
+          whitelist this reader's IP address on the pass page."
       ),
    )
       .into_response();

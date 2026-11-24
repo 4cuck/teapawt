@@ -200,26 +200,26 @@ pub fn parse_list_members(data: &ListMembersData) -> PaginatedResult<User> {
 
 /// Parse retweeters from API response (same structure as list members).
 pub fn parse_retweeters(data: &RetweetersData) -> PaginatedResult<User> {
-   let raw_instructions = data.instructions();
+   users_in(data.instructions())
+}
 
+/// Users and cursors from a Following, Followers, or Retweeters timeline.
+pub fn users_in(instructions: &[crate::api::schema::Instruction]) -> PaginatedResult<User> {
    let mut users = Vec::new();
    let mut top_cursor = None;
    let mut bottom_cursor = None;
 
-   for instruction in raw_instructions {
+   for instruction in instructions {
       if instruction.instruction_type != Some(InstructionType::TimelineAddEntries) {
          continue;
       }
 
       for entry in instruction.entries.as_deref().unwrap_or_default() {
          let entry_id = entry.entry_id_str();
-
-         if entry_id.starts_with("user-") {
-            if let Some(user_result) = entry.user_result()
-               && let Ok(user) = parse_user_object(user_result)
-            {
-               users.push(user);
-            }
+         if let Some(user_result) = entry.user_result()
+            && let Ok(user) = parse_user_object(user_result)
+         {
+            users.push(user);
          } else if entry_id.starts_with("cursor-bottom-") {
             bottom_cursor = entry.cursor_value().map(str::to_owned);
          } else if entry_id.starts_with("cursor-top-") {

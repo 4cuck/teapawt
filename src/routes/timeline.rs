@@ -231,6 +231,7 @@ const RESERVED_PATHS: &[&str] = &[
    "intent",
    "i",
    "about",
+   "api",
    "explore",
    "help",
    "oauth",

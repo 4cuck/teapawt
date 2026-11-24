@@ -344,18 +344,30 @@ fn render_search_tabs(query: &str, active: &str, view: &str) -> Markup {
    reason = "SearchFilters is the canonical name"
 )]
 pub struct SearchFilters {
-   pub media:            bool,
-   pub images:           bool,
-   pub videos:           bool,
-   pub links:            bool,
-   pub news:             bool,
-   pub quote:            bool,
-   pub verified:         bool,
-   pub exclude_replies:  bool,
-   pub exclude_retweets: bool,
-   pub since:            String,
-   pub until:            String,
-   pub min_faves:        String,
+   pub media:                bool,
+   pub images:               bool,
+   pub videos:               bool,
+   pub links:                bool,
+   pub news:                 bool,
+   pub quote:                bool,
+   pub verified:             bool,
+   pub retweets:             bool,
+   pub replies:              bool,
+   pub spaces:               bool,
+   pub native_video:         bool,
+   pub exclude_replies:      bool,
+   pub exclude_retweets:     bool,
+   pub exclude_media:        bool,
+   pub exclude_images:       bool,
+   pub exclude_videos:       bool,
+   pub exclude_links:        bool,
+   pub exclude_news:         bool,
+   pub exclude_quote:        bool,
+   pub exclude_spaces:       bool,
+   pub exclude_native_video: bool,
+   pub since:                String,
+   pub until:                String,
+   pub min_faves:            String,
 }
 
 impl SearchFilters {
@@ -367,8 +379,20 @@ impl SearchFilters {
          || self.news
          || self.quote
          || self.verified
+         || self.retweets
+         || self.replies
+         || self.spaces
+         || self.native_video
          || self.exclude_replies
          || self.exclude_retweets
+         || self.exclude_media
+         || self.exclude_images
+         || self.exclude_videos
+         || self.exclude_links
+         || self.exclude_news
+         || self.exclude_quote
+         || self.exclude_spaces
+         || self.exclude_native_video
          || !self.since.is_empty()
          || !self.until.is_empty()
          || !self.min_faves.is_empty()
@@ -419,21 +443,22 @@ pub fn render_search_panel_with_action(
                            p { (if *prefix == "filter" { "Only show posts containing:" } else { "Hide posts containing:" }) }
                            div class="search-toggles" {
                                @let pfx = &prefix[..1];
+                               @let include = *prefix == "filter";
                                (gen_search_checkbox(
                                   &format!("{pfx}-nativeretweets"),
                                   "Retweets",
-                                  *prefix == "exclude" && filt.exclude_retweets,
+                                  if include { filt.retweets } else { filt.exclude_retweets },
                                ))
-                               (gen_search_checkbox(&format!("{pfx}-media"), "Media", if *prefix == "filter" { filt.media } else { false }))
-                               (gen_search_checkbox(&format!("{pfx}-videos"), "Videos", if *prefix == "filter" { filt.videos } else { false }))
-                               (gen_search_checkbox(&format!("{pfx}-news"), "News", if *prefix == "filter" { filt.news } else { false }))
-                               (gen_search_checkbox(&format!("{pfx}-native_video"), "Native videos", false))
-                               (gen_search_checkbox(&format!("{pfx}-replies"), "Replies", if *prefix == "exclude" { filt.exclude_replies } else { false }))
-                               (gen_search_checkbox(&format!("{pfx}-links"), "Links", if *prefix == "filter" { filt.links } else { false }))
-                               (gen_search_checkbox(&format!("{pfx}-images"), "Images", if *prefix == "filter" { filt.images } else { false }))
-                               (gen_search_checkbox(&format!("{pfx}-quote"), "Quotes", if *prefix == "filter" { filt.quote } else { false }))
-                               (gen_search_checkbox(&format!("{pfx}-spaces"), "Spaces", false))
-                               @if *prefix == "filter" {
+                               (gen_search_checkbox(&format!("{pfx}-media"), "Media", if include { filt.media } else { filt.exclude_media }))
+                               (gen_search_checkbox(&format!("{pfx}-videos"), "Videos", if include { filt.videos } else { filt.exclude_videos }))
+                               (gen_search_checkbox(&format!("{pfx}-news"), "News", if include { filt.news } else { filt.exclude_news }))
+                               (gen_search_checkbox(&format!("{pfx}-native_video"), "Native videos", if include { filt.native_video } else { filt.exclude_native_video }))
+                               (gen_search_checkbox(&format!("{pfx}-replies"), "Replies", if include { filt.replies } else { filt.exclude_replies }))
+                               (gen_search_checkbox(&format!("{pfx}-links"), "Links", if include { filt.links } else { filt.exclude_links }))
+                               (gen_search_checkbox(&format!("{pfx}-images"), "Images", if include { filt.images } else { filt.exclude_images }))
+                               (gen_search_checkbox(&format!("{pfx}-quote"), "Quotes", if include { filt.quote } else { filt.exclude_quote }))
+                               (gen_search_checkbox(&format!("{pfx}-spaces"), "Spaces", if include { filt.spaces } else { filt.exclude_spaces }))
+                               @if include {
                                    (gen_search_checkbox("f-verified", "Verified", filt.verified))
                                }
                            }
@@ -497,7 +522,7 @@ pub fn render_turnstile_prompt(
                p { "This search needs the checkbox. Turn JavaScript on for this page." }
            }
            p class="turnstile-pass" {
-               "A " a href="/search-pass" { "search pass" } " skips this check, on search and search RSS. "
+               "A " a href="/search-pass" { "search pass" } " skips this check, on search, search RSS, and the API. An API key from the pass page does too. "
                a href="/search-pass/login" { "Log in" } " if you have one."
            }
            script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer {}

@@ -53,6 +53,7 @@ const WEB_OPERATIONS: &[&str] = &[
    "TweetDetail",
    "TweetEditHistory",
    "Retweeters",
+   "Following",
    "SearchTimeline",
    "ExplorePage",
    "GenericTimelineById",

@@ -66,11 +66,17 @@ pub const GRAPH_USER_TWEETS_AND_REPLIES_V2: &str =
    "BDX77Xzqypdt11-mDfgdpQ/UserWithProfileTweetsAndRepliesQueryV2";
 pub const GRAPH_TWEET_EDIT_HISTORY: &str = "upS9teTSG45aljmP9oTuXA/TweetEditHistory";
 pub const GRAPH_RETWEETERS: &str = "tj-dlOvzRKjw69iy4z3LzQ/Retweeters";
+/// Accounts a user follows. The web client refreshes this id; the compiled
+/// one covers the gap before that read.
+pub const GRAPH_FOLLOWING: &str = "eDqlbOS46zda8jDT8dEQ_Q/Following";
 pub const GRAPH_ABOUT_ACCOUNT: &str = "XRqGa7EeokUU5kppkh13EA/AboutAccountQuery";
 pub const GRAPH_AUDIO_SPACE: &str = "xpwpkJD3FetGBaSq7zH4Lw/AudioSpaceById";
 pub const GRAPH_COMMUNITY: &str = "-ElI1vg3dYbttVMhBhGdLw/CommunityQuery";
 pub const GRAPH_COMMUNITY_TWEETS: &str = "EwftYyqQemkckQ0wzGM6uw/CommunityTweetsTimeline";
 pub const GRAPH_COMMUNITY_MEDIA: &str = "ESJtwnI_apuGesbJncpc0Q/CommunityMediaTimeline";
+pub const FRIENDS_IDS_PATH: &str = "/i/api/1.1/friends/ids.json";
+pub const FRIENDS_LIST_PATH: &str = "/i/api/1.1/friends/list.json";
+pub const FOLLOWERS_LIST_PATH: &str = "/i/api/1.1/followers/list.json";
 pub const BROADCAST_SHOW_PATH: &str = "/i/api/1.1/broadcasts/show.json";
 pub const LIVE_VIDEO_STREAM_PATH: &str = "/i/api/1.1/live_video_stream/status/";
 
@@ -338,6 +344,30 @@ pub fn live_stream_url(media_key: &str) -> String {
 
 pub fn community_vars(community_id: &str) -> String {
    vars(json!({ "communityId": community_id }))
+}
+
+pub fn following_vars(user_id: &str, cursor: Option<&str>) -> String {
+   vars(json!({
+      "userId": user_id,
+      "count": 20,
+      "includePromotedContent": false,
+      "withGrokTranslatedBio": false,
+      "cursor": cursor,
+   }))
+}
+
+/// `friends/ids`, `friends/list`, and `followers/list`. `cursor` is the
+/// previous `next_cursor_str`. Ids are strings so a snowflake is not rounded.
+pub fn rest_graph_url(path: &str, user_id: &str, cursor: Option<&str>, count: u32) -> String {
+   let mut url = format!("https://x.com{path}?user_id={user_id}&count={count}&skip_status=true&include_user_entities=false&stringify_ids=true");
+   if let Some(cursor) = cursor.filter(|cursor| !cursor.is_empty()) {
+      url.push_str("&cursor=");
+      url.push_str(
+         &percent_encoding::utf8_percent_encode(cursor, percent_encoding::NON_ALPHANUMERIC)
+            .to_string(),
+      );
+   }
+   url
 }
 
 pub fn community_tweets_vars(

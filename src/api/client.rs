@@ -1268,7 +1268,7 @@ impl ApiClient {
             // Cloudflare changed the challenge: every solve would fail the same
             // way, so disable the whole flow until restart (one strike).
             let reason = err.reason();
-            self.clearance.record_failure(reason, false);
+            self.clearance.record_failure(reason, false, true);
             self.clearance.trip(reason);
             tracing::warn!(
                session_id = session.id,
@@ -1280,8 +1280,21 @@ impl ApiClient {
             // A one-off (bad response, network blip, declined mint): keep the
             // flow alive and let another session retry. Only a long streak of
             // these trips the breaker, so a persistent fault stops hammering.
+            // The HTML shell is the exception: it arrives in bursts and must
+            // not move the streak, and this session waits out a backoff so the
+            // next search does not immediately fetch it again.
+            self.clearance.defer_retry(session.id);
             let reason = err.reason();
-            let streak = self.clearance.record_failure(reason, true);
+            if !err.counts_streak() {
+               self.clearance.record_failure(reason, true, false);
+               tracing::info!(
+                  session_id = session.id,
+                  reason = %reason,
+                  "cf_clearance solve skipped (html shell); flow stays enabled"
+               );
+               return;
+            }
+            let streak = self.clearance.record_failure(reason, true, true);
             if streak >= super::clearance::max_failure_streak() {
                self.clearance.trip(&format!(
                   "{streak} consecutive clearance failures; last: {reason}"

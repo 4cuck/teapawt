@@ -26,6 +26,7 @@ pub fn router(indexnow_key: &str) -> Router<AppState> {
       .merge(super::redirect::router())
       .merge(super::intent::router())
       .merge(super::search::router())
+      .merge(super::json_api::router())
       .merge(super::explore::router())
       .merge(super::preferences::router())
       .merge(super::embed::router())

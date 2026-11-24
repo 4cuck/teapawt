@@ -268,6 +268,7 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
       crate::views::anti_ddos::gate_notice(check_minutes)
    });
    let price = crate::donations::format_usd(state.passes.price_cents());
+   let api_note = api_announcement(&price);
    let search_pass_note = search_pass_pool_announcement(&price);
    let search_note = state
       .config
@@ -275,6 +276,7 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
       .guards_search()
       .then(|| search_announcement(&price));
    let notice = Some(html! {
+       (api_note)
        (search_pass_note)
        @if let Some(search_note) = search_note { (search_note) }
        @if let Some(gate_note) = gate_note { (gate_note) }
@@ -303,6 +305,24 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
    // shared or CDN cache must not store one visitor's copy for everyone else.
    no_store(response.headers_mut());
    response
+}
+
+fn api_announcement(price: &str) -> maud::Markup {
+   html! {
+       aside class="home-announce" {
+           strong { "Search pass holders now have an API" }
+           p {
+               "A "
+               a href="/search-pass" { "search pass" }
+               " (" (price) " a month) can call the "
+               a href="/api" { "JSON API" }
+               " for search, profiles, posts, lists, communities, and follows. "
+               "Create a key on the pass page. The description is "
+               a href="/api/openapi.json" { "OpenAPI" }
+               "."
+           }
+       }
+   }
 }
 
 fn search_pass_pool_announcement(price: &str) -> maud::Markup {
@@ -415,6 +435,10 @@ async fn about(State(state): State<AppState>, jar: CookieJar) -> impl IntoRespon
                li { "Uses Twitter's unofficial API (no developer account required)" }
                li { "Lightweight" }
                li { "RSS feeds" }
+               li {
+                   a href="/api" { "JSON API" }
+                   " for search, profiles, and posts (search pass)"
+               }
                li { "Themes" }
                li { "Mobile support (responsive design)" }
                li { "AGPLv3 licensed, no proprietary instances permitted" }
@@ -512,6 +536,17 @@ mod tests {
       assert!(html.contains("href=\"/search-pass\""));
       assert!(html.contains("$15 a month"));
       assert!(html.contains("5 minutes after the checkbox."));
+   }
+
+   #[test]
+   fn front_page_announces_the_search_pass_api() {
+      let html = api_announcement("$15").into_string();
+      assert!(html.contains("Search pass holders now have an API"));
+      assert!(html.contains("href=\"/api\""));
+      assert!(html.contains("href=\"/api/openapi.json\""));
+      assert!(html.contains("href=\"/search-pass\""));
+      assert!(html.contains("$15 a month"));
+      assert!(html.contains("Create a key on the pass page."));
    }
 
    #[test]

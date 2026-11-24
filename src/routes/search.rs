@@ -82,7 +82,7 @@ fn search_description(query: &str, host: &str, kind: &str) -> String {
 
 /// One card per original tweet. Latest search otherwise lists every retweet
 /// of a viral post as its own row.
-fn dedup_search_tweets(tweets: Vec<Tweet>) -> Vec<Tweet> {
+pub(crate) fn dedup_search_tweets(tweets: Vec<Tweet>) -> Vec<Tweet> {
    let mut order = Vec::new();
    let mut best = std::collections::HashMap::new();
    for tweet in tweets {
@@ -138,6 +138,34 @@ pub struct SearchQuery {
    /// older name and still accepted.
    #[serde(rename = "e-nativeretweets", alias = "e-retweets")]
    pub e_nativeretweets: Option<String>,
+   #[serde(rename = "f-replies")]
+   pub f_replies:        Option<String>,
+   #[serde(rename = "f-spaces")]
+   pub f_spaces:         Option<String>,
+   #[serde(rename = "f-native_video")]
+   pub f_native_video:   Option<String>,
+   #[serde(rename = "f-nativeretweets")]
+   pub f_nativeretweets: Option<String>,
+   #[serde(rename = "e-media")]
+   pub e_media:          Option<String>,
+   #[serde(rename = "e-images")]
+   pub e_images:         Option<String>,
+   #[serde(rename = "e-videos")]
+   pub e_videos:        Option<String>,
+   #[serde(rename = "e-links")]
+   pub e_links:          Option<String>,
+   #[serde(rename = "e-news")]
+   pub e_news:           Option<String>,
+   #[serde(rename = "e-quote")]
+   pub e_quote:          Option<String>,
+   #[serde(rename = "e-spaces")]
+   pub e_spaces:         Option<String>,
+   #[serde(rename = "e-native_video")]
+   pub e_native_video:   Option<String>,
+   /// Comma-separated include filters for the API, such as `images,links`.
+   pub filters:          Option<String>,
+   /// Comma-separated exclude filters for the API, such as `replies`.
+   pub exclude:          Option<String>,
    /// AJAX infinite-scroll request — return a timeline fragment, not a page.
    pub scroll:           Option<String>,
    /// Checkbox token. Stripped before the search runs.
@@ -149,15 +177,27 @@ impl SearchQuery {
    /// Convert URL parameters to `SearchFilters` for form rendering.
    pub fn to_filters(&self) -> search_view::SearchFilters {
       search_view::SearchFilters {
-         media:            self.f_media.as_deref() == Some("on"),
-         images:           self.f_images.as_deref() == Some("on"),
-         videos:           self.f_videos.as_deref() == Some("on"),
-         links:            self.f_links.as_deref() == Some("on"),
-         news:             self.f_news.as_deref() == Some("on"),
-         quote:            self.f_quote.as_deref() == Some("on"),
-         verified:         self.f_verified.as_deref() == Some("on"),
-         exclude_replies:  self.e_replies.as_deref() == Some("on"),
-         exclude_retweets: self.e_nativeretweets.as_deref() == Some("on"),
+         media:                 selected(&self.f_media),
+         images:                selected(&self.f_images),
+         videos:                selected(&self.f_videos),
+         links:                 selected(&self.f_links),
+         news:                  selected(&self.f_news),
+         quote:                 selected(&self.f_quote),
+         verified:              selected(&self.f_verified),
+         retweets:              selected(&self.f_nativeretweets),
+         replies:               selected(&self.f_replies),
+         spaces:                selected(&self.f_spaces),
+         native_video:          selected(&self.f_native_video),
+         exclude_replies:       selected(&self.e_replies),
+         exclude_retweets:      selected(&self.e_nativeretweets),
+         exclude_media:         selected(&self.e_media),
+         exclude_images:        selected(&self.e_images),
+         exclude_videos:        selected(&self.e_videos),
+         exclude_links:         selected(&self.e_links),
+         exclude_news:          selected(&self.e_news),
+         exclude_quote:         selected(&self.e_quote),
+         exclude_spaces:        selected(&self.e_spaces),
+         exclude_native_video:  selected(&self.e_native_video),
          since:            self.since.clone().unwrap_or_default(),
          until:            self.until.clone().unwrap_or_default(),
          min_faves:        self.min_faves.clone().unwrap_or_default(),
@@ -165,7 +205,7 @@ impl SearchQuery {
    }
 
    /// Convert URL parameters to `Query` struct.
-   fn to_query(&self) -> Query {
+   pub(crate) fn to_query(&self) -> Query {
       let raw_query = self.query.as_deref().unwrap_or("");
 
       // Determine query kind from 'f' parameter
@@ -208,33 +248,31 @@ impl SearchQuery {
          query.min_likes.clone_from(min);
       }
 
-      // Add filter toggles (data-driven to avoid repetition)
-      let filter_toggles: &[(&Option<String>, &str)] = &[
-         (&self.f_media, "media"),
-         (&self.f_images, "images"),
-         (&self.f_videos, "videos"),
-         (&self.f_links, "links"),
-         (&self.f_news, "news"),
-         (&self.f_quote, "quote"),
-         (&self.f_verified, "verified"),
+      // Include toggles. Checking both include and exclude keeps the exclude.
+      let filter_toggles: &[(&Option<String>, &Option<String>, &str)] = &[
+         (&self.f_media, &self.e_media, "media"),
+         (&self.f_images, &self.e_images, "images"),
+         (&self.f_videos, &self.e_videos, "videos"),
+         (&self.f_links, &self.e_links, "links"),
+         (&self.f_news, &self.e_news, "news"),
+         (&self.f_quote, &self.e_quote, "quote"),
+         (&self.f_replies, &self.e_replies, "replies"),
+         (&self.f_spaces, &self.e_spaces, "spaces"),
+         (&self.f_native_video, &self.e_native_video, "native_video"),
+         (&self.f_nativeretweets, &self.e_nativeretweets, "nativeretweets"),
       ];
-      for &(param, name) in filter_toggles {
-         if param.as_deref() == Some("on") && !query.filters.iter().any(|filter| filter == name) {
-            query.filters.push((*name).to_owned());
+      for &(include, exclude, name) in filter_toggles {
+         if selected(exclude) {
+            push_unique(&mut query.excludes, name);
+         } else if selected(include) {
+            push_unique(&mut query.filters, name);
          }
       }
-
-      // Add exclude toggles. Retweets use `nativeretweets` so a profile
-      // search can skip the forced `include:nativeretweets`.
-      let exclude_toggles: &[(&Option<String>, &str)] = &[
-         (&self.e_replies, "replies"),
-         (&self.e_nativeretweets, "nativeretweets"),
-      ];
-      for &(param, name) in exclude_toggles {
-         if param.as_deref() == Some("on") && !query.excludes.iter().any(|excl| excl == name) {
-            query.excludes.push((*name).to_owned());
-         }
+      if selected(&self.f_verified) {
+         push_unique(&mut query.filters, "verified");
       }
+      push_filter_list(&self.filters, &mut query.filters);
+      push_filter_list(&self.exclude, &mut query.excludes);
 
       query
    }
@@ -273,6 +311,35 @@ impl SearchQuery {
    }
 }
 
+fn selected(value: &Option<String>) -> bool {
+   value.as_deref().is_some_and(|value| {
+      matches!(
+         value.trim().to_ascii_lowercase().as_str(),
+         "on" | "true" | "1" | "yes"
+      )
+   })
+}
+
+fn push_unique(list: &mut Vec<String>, name: &str) {
+   if !list.iter().any(|item| item == name) {
+      list.push(name.to_owned());
+   }
+}
+
+/// Names from `filters=` / `exclude=`. Unknown names are left out; the API
+/// rejects those before this runs.
+fn push_filter_list(raw: &Option<String>, into: &mut Vec<String>) {
+   let Some(raw) = raw else {
+      return;
+   };
+   for name in raw.split(|ch: char| ch == ',' || ch.is_whitespace()) {
+      let name = name.trim();
+      if crate::types::VALID_FILTERS.contains(&name) {
+         push_unique(into, name);
+      }
+   }
+}
+
 fn is_scroll_request(params: &SearchQuery) -> bool {
    params.scroll.as_deref() == Some("true")
 }
@@ -304,12 +371,34 @@ pub fn search_fields(params: &SearchQuery) -> Vec<(&'static str, &str)> {
    push_field(&mut fields, "f-news", params.f_news.as_ref());
    push_field(&mut fields, "f-quote", params.f_quote.as_ref());
    push_field(&mut fields, "f-verified", params.f_verified.as_ref());
+   push_field(&mut fields, "f-replies", params.f_replies.as_ref());
+   push_field(&mut fields, "f-spaces", params.f_spaces.as_ref());
+   push_field(&mut fields, "f-native_video", params.f_native_video.as_ref());
+   push_field(
+      &mut fields,
+      "f-nativeretweets",
+      params.f_nativeretweets.as_ref(),
+   );
    push_field(&mut fields, "e-replies", params.e_replies.as_ref());
+   push_field(&mut fields, "e-media", params.e_media.as_ref());
+   push_field(&mut fields, "e-images", params.e_images.as_ref());
+   push_field(&mut fields, "e-videos", params.e_videos.as_ref());
+   push_field(&mut fields, "e-links", params.e_links.as_ref());
+   push_field(&mut fields, "e-news", params.e_news.as_ref());
+   push_field(&mut fields, "e-quote", params.e_quote.as_ref());
+   push_field(&mut fields, "e-spaces", params.e_spaces.as_ref());
+   push_field(
+      &mut fields,
+      "e-native_video",
+      params.e_native_video.as_ref(),
+   );
    push_field(
       &mut fields,
       "e-nativeretweets",
       params.e_nativeretweets.as_ref(),
    );
+   push_field(&mut fields, "filters", params.filters.as_ref());
+   push_field(&mut fields, "exclude", params.exclude.as_ref());
    fields
 }
 
@@ -924,6 +1013,37 @@ mod tests {
       assert!(filters.media);
       assert!(filters.exclude_replies);
       assert_eq!(filters.since, "2024-01-01");
+   }
+
+   #[test]
+   fn panel_and_api_filters_reach_the_query() {
+      let query = SearchQuery {
+         f_spaces: Some("true".to_owned()),
+         e_media: Some("1".to_owned()),
+         f_nativeretweets: Some("yes".to_owned()),
+         e_nativeretweets: Some("on".to_owned()),
+         filters: Some("images, links".to_owned()),
+         exclude: Some("replies, not-a-filter".to_owned()),
+         ..SearchQuery::default()
+      };
+      let parsed = query.to_query();
+      assert!(parsed.filters.iter().any(|name| name == "spaces"));
+      assert!(parsed.filters.iter().any(|name| name == "images"));
+      assert!(parsed.filters.iter().any(|name| name == "links"));
+      assert!(parsed.excludes.iter().any(|name| name == "media"));
+      assert!(parsed.excludes.iter().any(|name| name == "replies"));
+      assert!(parsed.excludes.iter().any(|name| name == "nativeretweets"));
+      assert!(!parsed.filters.iter().any(|name| name == "nativeretweets"));
+      let api = parsed.build();
+      assert!(api.contains("filter:spaces"), "{api}");
+      assert!(api.contains("-filter:media"), "{api}");
+      assert!(api.contains("-filter:replies"), "{api}");
+      assert!(!api.contains("not-a-filter"), "{api}");
+      let filters = query.to_filters();
+      assert!(filters.spaces);
+      assert!(filters.exclude_media);
+      assert!(filters.exclude_retweets);
+      assert!(filters.retweets);
    }
 
    #[test]

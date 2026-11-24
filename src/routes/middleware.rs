@@ -69,11 +69,20 @@ pub async fn client_middleware(
       crate::utils::host::origin_from_headers(request.headers(), state.config.url_prefix());
    let client = budget::client_from(peer.ip(), request.headers(), &state.trusted_proxies);
    let jar = CookieJar::from_headers(request.headers());
+   let presented = crate::passes::presented_api_key(request.headers())
+      .is_some_and(|key| state.passes.accept_key(&key));
    crate::utils::host::scope(origin, async move {
       budget::CLIENT
          .scope(client, async move {
-            let has_pass = state.passes.admits(&jar);
-            budget::SEARCH_PASS.scope(has_pass, next.run(request)).await
+            let run = async move {
+               let has_pass = state.passes.admits(&jar);
+               budget::SEARCH_PASS.scope(has_pass, next.run(request)).await
+            };
+            if presented {
+               crate::passes::scope_presented(run).await
+            } else {
+               run.await
+            }
          })
          .await
    })

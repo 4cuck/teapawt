@@ -338,6 +338,45 @@ ul {
   word-break: break-word;
 }
 
+.overlay-panel.api-doc {
+  max-width: 720px;
+}
+
+.api-doc pre {
+  margin: 12px 0 16px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  background: var(--bg_color);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.api-doc pre code {
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
+  white-space: pre;
+}
+
+.api-doc table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0 16px;
+  font-size: 14px;
+}
+
+.api-doc th,
+.api-doc td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.api-doc code {
+  overflow-wrap: anywhere;
+}
+
 .verified-icon {
   display: inline-flex;
   align-items: center;

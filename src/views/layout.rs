@@ -13,7 +13,7 @@ use crate::{
    types::Prefs,
 };
 
-pub const STYLE_CSS: &str = "/css/style.css?teapawt11";
+pub const STYLE_CSS: &str = "/css/style.css?teapawt12";
 pub const CLEAN_CSS: &str = "/css/clean.css?teapawt47";
 pub const FONTELLO_CSS: &str = "/css/fontello.css";
 

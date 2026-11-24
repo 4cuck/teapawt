@@ -76,7 +76,9 @@ async fn explore_tab(
    let Some(slug) = normalize_slug(&raw) else {
       return Err(Error::InvalidUrl("Invalid explore tab".into()));
    };
-   let cursor = cleaned_cursor(query.cursor.clone());
+   // For you has no later pages. A cursor on this path is an old "load more"
+   // link into the video feed, which is not loaded anymore.
+   let cursor = cleaned_cursor(query.cursor.clone()).filter(|_| slug != "for-you");
    if slug == "for-you" || raw != slug {
       let path = page_path(&slug, cursor.as_deref());
       return Ok(Redirect::to(&path).into_response());
@@ -93,6 +95,22 @@ async fn render(
    let prefs = Prefs::from_cookies(&jar, &state.config);
    let cursor = cleaned_cursor(query.cursor);
    let is_scroll = query.scroll.as_deref() == Some("true");
+   // Infinite scroll still asks for the old For you cursor until that page
+   // leaves the cache. Answer with the end of the list instead of the video feed.
+   if slug == "for-you" && cursor.is_some() {
+      if is_scroll {
+         let fragment = explore_view::render_explore_feed(
+            &ExploreFeed::default(),
+            slug,
+            &state.config,
+            &prefs,
+            None,
+            true,
+         );
+         return Ok(Html(fragment.into_string()).into_response());
+      }
+      return Ok(Redirect::to("/explore").into_response());
+   }
    let (feed_res, games) = if slug == "sports" && !is_scroll {
       tokio::join!(
          load_explore(state, slug, cursor.as_deref()),
@@ -194,7 +212,7 @@ async fn load_explore(state: &AppState, slug: &str, cursor: Option<&str>) -> Res
 
 async fn fetch_explore(state: &AppState, slug: &str, cursor: Option<&str>) -> Result<ExploreFeed> {
    if slug == "for-you" {
-      return fetch_for_you(state, cursor).await;
+      return fetch_for_you(state).await;
    }
    let mut feed = state
       .api
@@ -203,7 +221,7 @@ async fn fetch_explore(state: &AppState, slug: &str, cursor: Option<&str>) -> Re
    // The highlights timeline id is accepted, but this account's copy comes
    // back with no rows. The curated headlines live on For you as Today's News.
    if slug == "highlights" && feed.items.is_empty() && cursor.is_none() {
-      if let Ok(home) = fetch_for_you(state, None).await {
+      if let Ok(home) = fetch_for_you(state).await {
          let news = section_named(&home, "news");
          if !news.is_empty() {
             feed.items = news;
@@ -248,31 +266,57 @@ fn section_named(feed: &ExploreFeed, needle: &str) -> Vec<ExploreItem> {
    rows
 }
 
-/// `/explore` is `ExplorePage`. If that answer has no rows, the For you
-/// timeline is the same tab under `GenericTimelineById`.
-async fn fetch_for_you(state: &AppState, cursor: Option<&str>) -> Result<ExploreFeed> {
-   match state.api.explore_page(cursor).await {
-      Ok(feed) if !feed.items.is_empty() || cursor.is_some() => Ok(feed),
+/// `/explore` is Today's News and the topics beside it. The rest of that
+/// timeline is a video feed that comes back empty, so it is not requested.
+/// If `ExplorePage` has no rows, the same tab under `GenericTimelineById`
+/// is the fallback, and posts are dropped there too.
+async fn fetch_for_you(state: &AppState) -> Result<ExploreFeed> {
+   match state.api.explore_page(None).await {
       Ok(feed) => {
+         let news = curated(feed);
+         if !news.items.is_empty() {
+            return Ok(news);
+         }
          match state.api.explore_timeline("for_you", None).await {
             Ok(mut timeline) => {
                if timeline.tabs.is_empty() {
-                  timeline.tabs = feed.tabs;
+                  timeline.tabs = news.tabs;
                }
-               Ok(timeline)
+               Ok(curated(timeline))
             },
-            Err(_) if !feed.tabs.is_empty() || !feed.items.is_empty() => Ok(feed),
+            Err(_) if !news.tabs.is_empty() => Ok(news),
             Err(err) => Err(err),
          }
       },
-      Err(err) => {
-         state
-            .api
-            .explore_timeline("for_you", cursor)
-            .await
-            .or(Err(err))
-      },
+      Err(err) => state
+         .api
+         .explore_timeline("for_you", None)
+         .await
+         .map(curated)
+         .or(Err(err)),
    }
+}
+
+/// Headers and topic rows only. Posts are the video feed, and a header that
+/// only introduced those posts is dropped with them.
+fn curated(mut feed: ExploreFeed) -> ExploreFeed {
+   feed.items
+      .retain(|item| !matches!(item, ExploreItem::Tweet(_)));
+   let mut index = 0;
+   while index < feed.items.len() {
+      let orphan = matches!(feed.items.get(index), Some(ExploreItem::Header(_)))
+         && !feed
+            .items
+            .get(index + 1)
+            .is_some_and(|item| matches!(item, ExploreItem::Trend(_)));
+      if orphan {
+         feed.items.remove(index);
+      } else {
+         index += 1;
+      }
+   }
+   feed.bottom = None;
+   feed
 }
 
 fn store_explore(state: &AppState, key: &str, feed: &ExploreFeed, later_page: bool) {
@@ -344,5 +388,45 @@ fn x_url(slug: &str) -> String {
       "https://x.com/explore".to_owned()
    } else {
       format!("https://x.com/explore/tabs/{}", timeline_name(slug))
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+   use crate::types::Trend;
+
+   fn trend(name: &str) -> ExploreItem {
+      ExploreItem::Trend(Trend {
+         name:     name.to_owned(),
+         category: String::new(),
+         detail:   String::new(),
+         query:    name.to_owned(),
+         image:    String::new(),
+         story_id: String::new(),
+      })
+   }
+
+   #[test]
+   fn for_you_keeps_news_and_drops_posts() {
+      let feed = ExploreFeed {
+         items:  vec![
+            ExploreItem::Header("Today's News".to_owned()),
+            trend("A headline"),
+            ExploreItem::Header("Videos".to_owned()),
+            ExploreItem::Tweet(Box::default()),
+            ExploreItem::Header("Trending".to_owned()),
+            trend("A topic"),
+         ],
+         tabs:   Vec::new(),
+         bottom: Some("CURSOR".to_owned()),
+      };
+      let kept = curated(feed);
+      assert!(kept.bottom.is_none());
+      assert_eq!(kept.items.len(), 4);
+      assert!(matches!(&kept.items[0], ExploreItem::Header(title) if title == "Today's News"));
+      assert!(matches!(&kept.items[1], ExploreItem::Trend(topic) if topic.name == "A headline"));
+      assert!(matches!(&kept.items[2], ExploreItem::Header(title) if title == "Trending"));
+      assert!(matches!(&kept.items[3], ExploreItem::Trend(topic) if topic.name == "A topic"));
    }
 }

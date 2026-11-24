@@ -37,6 +37,10 @@ pub fn list(id: &str) -> String {
    format!("l:{id}")
 }
 
+pub fn list_tweets(id: &str, cursor: Option<&str>) -> String {
+   format!("lt:{id}:{}", cursor.unwrap_or(""))
+}
+
 pub fn list_members(id: &str) -> String {
    format!("lm:{id}")
 }

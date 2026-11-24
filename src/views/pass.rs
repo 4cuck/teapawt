@@ -61,6 +61,8 @@ pub struct AccountPage<'a> {
    pub addresses:     &'a [String],
    pub current:       Option<&'a str>,
    pub max_addresses: usize,
+   pub keys:          &'a [String],
+   pub max_keys:      usize,
    pub price:         &'a str,
    pub methods:       &'a Methods,
    pub mail:          bool,
@@ -239,7 +241,7 @@ pub fn render_buy(page: &BuyPage<'_>) -> Markup {
        section class="pass-hero" {
            span class="pass-eyebrow" { "Search pass" }
            h1 { "Search without the checkbox" }
-           p class="pass-lede" { "Skip the Cloudflare check on search and search RSS feeds, with a dedicated search-pass account pool for better response times and fewer rate limits." }
+           p class="pass-lede" { "Skip the Cloudflare check on search, search RSS, and the JSON API, with a dedicated search-pass account pool for better response times and fewer rate limits." }
            p class="pass-price" { strong { (page.price) } span { "a month" } }
        }
        ul class="pass-perks" {
@@ -250,6 +252,13 @@ pub fn render_buy(page: &BuyPage<'_>) -> Markup {
            li {
                strong { "Feed readers" }
                span { "Whitelist up to " (page.max_addresses) " IP addresses so search RSS works without cookies." }
+           }
+           li {
+               strong { "JSON API" }
+               span {
+                   a href="/api" { "/api" }
+                   " returns search, profiles, and posts as compact JSON. Same pass, far less to download than the HTML pages."
+               }
            }
            li {
                strong { "No sign-up" }
@@ -280,6 +289,7 @@ pub fn render_account(page: &AccountPage<'_>) -> Markup {
       page.admin.as_ref().map(admin_card),
       page.admin.is_none().then(|| add_time(page)),
       Some(addresses(page)),
+      Some(api_keys(page)),
       page.mail.then(|| recovery_email(page)),
       Some(password_card()),
    ];
@@ -308,7 +318,12 @@ fn status(page: &AccountPage<'_>) -> Markup {
            }
            h1 { "Your search pass" }
            p class="pass-lede" { "Signed in as " strong { (page.username) } "." }
-           @if !page.active {
+           @if page.active {
+               p class="pass-hint" {
+                   a href="/api" { "JSON API" }
+                   " for search, profiles, and posts."
+               }
+           } @else {
                p class="pass-lede" { "Add time below to use it again." }
            }
            dl class="pass-facts" {
@@ -409,7 +424,7 @@ fn addresses(page: &AccountPage<'_>) -> Markup {
       title: "Whitelisted IP addresses",
       hint: Some(html! {
           "Requests from these addresses skip the checkbox while the pass is paid up, with no cookies. "
-          "Use it for a feed reader or a script. An IPv6 address covers its whole /64."
+          "Use one for a feed reader, a script, or the JSON API. An IPv6 address covers its whole /64."
       }),
       aside: Some(html! {
           span class="pass-count" { (page.addresses.len()) " / " (page.max_addresses) }
@@ -450,6 +465,53 @@ fn addresses(page: &AccountPage<'_>) -> Markup {
                        "Add this connection " span class="pass-mono" { (current) }
                    }
                }
+           }
+       }
+   })
+}
+
+fn api_keys(page: &AccountPage<'_>) -> Markup {
+   let full = page.keys.len() >= page.max_keys;
+   Card {
+      title: "API keys",
+      hint: Some(html! {
+          "A key skips the search checkbox and calls the "
+          a href="/api" { "JSON API" }
+          ". Send it as "
+          code { "Authorization: Bearer" }
+          " or "
+          code { "X-Api-Key" }
+          ". It is shown once, and only its hash is kept."
+      }),
+      aside: Some(html! {
+          span class="pass-count" { (page.keys.len()) " / " (page.max_keys) }
+      }),
+      ..Card::default()
+   }
+   .wrap(html! {
+       @if page.keys.is_empty() {
+           p class="pass-empty" { "No keys yet." }
+       } @else {
+           ul class="pass-ips" {
+               @for label in page.keys {
+                   li {
+                       code { (label) "…" }
+                       form method="post" action="/search-pass/keys" {
+                           input type="hidden" name="action" value="revoke";
+                           input type="hidden" name="label" value=(label);
+                           button type="submit" class="pass-btn is-ghost is-danger is-small"
+                               aria-label={ "Revoke " (label) } { "Revoke" }
+                       }
+                   }
+               }
+           }
+       }
+       @if full {
+           p class="pass-hint" { "This pass has as many keys as it can hold. Revoke one to mint another." }
+       } @else {
+           form method="post" action="/search-pass/keys" {
+               input type="hidden" name="action" value="create";
+               button type="submit" { "Create API key" }
            }
        }
    })
@@ -570,6 +632,26 @@ pub fn render_return(view: &Return<'_>) -> Markup {
       true,
       html! { section class="pass-card pass-center" { (body) } },
    )
+}
+
+pub fn render_new_key(key: &str) -> Markup {
+   shell(true, html! {
+       section class="pass-card" {
+           h1 { "New API key" }
+           p class="pass-notice is-bad" { "Save it now. It is shown once, and cannot be looked up later." }
+           pre class="pass-copy" { (key) }
+           p class="pass-hint" {
+               "Send "
+               code { "Authorization: Bearer " (key) }
+               " or "
+               code { "X-Api-Key: " (key) }
+               ". It skips the search checkbox and calls "
+               a href="/api" { "/api" }
+               " while this pass is paid up."
+           }
+           a class="pass-link" href="/search-pass" { "Back to the pass →" }
+       }
+   })
 }
 
 pub fn render_new_password(username: &str, password: &str) -> Markup {

@@ -47,6 +47,7 @@ pub use search::{
    parse_list_search,
    parse_retweeters,
    parse_user_search,
+   users_in,
 };
 pub use story::{
    parse_trend_story,

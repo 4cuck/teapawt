@@ -1735,6 +1735,7 @@ mod tests {
          "/search",
          "/search/rss",
          "/alice/search",
+         "/api/search",
          "/hashtag/rust",
          "/alice/status/1/quotes",
       ] {

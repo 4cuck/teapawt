@@ -436,6 +436,7 @@ fn safe_resume(resume: &str) -> &str {
 
 pub(super) fn cleared(state: &AppState, jar: &CookieJar) -> bool {
    state.passes.admits(jar)
+      || crate::passes::holds_key()
       || budget::current_client().is_some_and(|client| {
          pass_valid(
             &state.config.config.hmac_key,
