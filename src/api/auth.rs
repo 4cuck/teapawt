@@ -1366,7 +1366,7 @@ impl SessionPool {
             },
             Err(miss) => {
                // Which call found the pool empty, and what the accounts that
-               // serve it looked like at that instant. Without this the 503
+               // serve it looked like at that instant. Without this the 429
                // says only "rate limited", which is equally consistent with a
                // burst, a wave of parked accounts, and an exhausted window.
                let now = time::OffsetDateTime::now_utc().unix_timestamp();

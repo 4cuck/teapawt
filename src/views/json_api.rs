@@ -320,7 +320,7 @@ pub fn render(host: &str, open: bool) -> Markup {
                    tr { td { code { "not_found" } } td { "404" } td { "No such account or post." } }
                    tr { td { code { "suspended" } } td { "403" } td { "The account is suspended." } }
                    tr { td { code { "protected" } } td { "403" } td { "The account's posts are private." } }
-                   tr { td { code { "rate_limited" } } td { "503" } td { "The search accounts are out of calls. Try again shortly." } }
+                   tr { td { code { "rate_limited" } } td { "429" } td { "The search accounts are out of calls. Try again shortly." } }
                    tr { td { code { "unavailable" } } td { "503" } td { "X returned nothing for this call." } }
                }
            }

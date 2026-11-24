@@ -544,7 +544,7 @@ fn components() -> Value {
       },
       "responses": {
          "Error": {
-            "description": "The call did not return results. code is pass_required (401), paused (429), invalid (400), blocked (400), not_found (404), suspended (403), protected (403), rate_limited (503), or unavailable (503).",
+            "description": "The call did not return results. code is pass_required (401), paused (429), invalid (400), blocked (400), not_found (404), suspended (403), protected (403), rate_limited (429), or unavailable (503).",
             "content": {
                "application/json": {
                   "schema": { "$ref": "#/components/schemas/Failure" }

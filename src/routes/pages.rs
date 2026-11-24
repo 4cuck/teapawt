@@ -270,15 +270,9 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
    let price = crate::donations::format_usd(state.passes.price_cents());
    let api_note = api_announcement(&price);
    let search_pass_note = search_pass_pool_announcement(&price);
-   let search_note = state
-      .config
-      .turnstile
-      .guards_search()
-      .then(|| search_announcement(&price));
    let notice = Some(html! {
        (api_note)
        (search_pass_note)
-       @if let Some(search_note) = search_note { (search_note) }
        @if let Some(gate_note) = gate_note { (gate_note) }
        @if let Some(drive) = drive { (drive) }
        @if let Some(firefox_note) = firefox_note { (firefox_note) }
@@ -339,24 +333,6 @@ fn search_pass_pool_announcement(price: &str) -> maud::Markup {
            p {
                "Right now accounts keep getting suspended on X, so keeping a separate pool makes "
                "sure paid users always have a good experience without competing with the public pool."
-           }
-       }
-   }
-}
-
-fn search_announcement(price: &str) -> maud::Markup {
-   html! {
-       aside class="home-announce" {
-           strong { "Search checkbox is staying" }
-           p {
-               "Cloudflare Turnstile on search is staying on. "
-               "Another 300 accounts were added, and then someone flooded the site with search requests."
-           }
-           p {
-               "To scrape the site, buy a "
-               a href="/search-pass" { "search pass" }
-               " (" (price) " a month) and use that. "
-               "A normal search still gets 5 minutes after the checkbox."
            }
        }
    }
@@ -525,17 +501,6 @@ mod tests {
          let announce = mirror_announcement(host).into_string();
          assert!(!announce.contains(excluded), "{host}");
       }
-   }
-
-   #[test]
-   fn front_page_says_search_turnstile_stays_and_scraping_needs_a_pass() {
-      let html = search_announcement("$15").into_string();
-      assert!(html.contains("Cloudflare Turnstile on search is staying on."));
-      assert!(html.contains("Another 300 accounts were added"));
-      assert!(html.contains("flooded the site with search requests."));
-      assert!(html.contains("href=\"/search-pass\""));
-      assert!(html.contains("$15 a month"));
-      assert!(html.contains("5 minutes after the checkbox."));
    }
 
    #[test]

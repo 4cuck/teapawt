@@ -2661,7 +2661,7 @@ impl ApiClient {
                // A bare 429 while the exit is still being served is X
                // refusing this account the call. Refunded, it stayed the
                // fullest account and was picked again about a thousand
-               // times a minute, each pick a visitor's retry and often a 503.
+               // times a minute, each pick a visitor's retry and often a 429.
                if self.client.exit_still_served(&self.egress_for(session)) {
                   self.sessions.disarm_meter(session);
                   let rest_secs = self.sessions.rest_endpoint(session.id, endpoint).await;

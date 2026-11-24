@@ -243,14 +243,14 @@ impl Error {
          },
          Self::ClientBudgetExhausted => {
             (
-               StatusCode::SERVICE_UNAVAILABLE,
+               StatusCode::TOO_MANY_REQUESTS,
                "Slow down",
                client_budget_message(),
             )
          },
          Self::RateLimited | Self::IpThrottled => {
             (
-               StatusCode::SERVICE_UNAVAILABLE,
+               StatusCode::TOO_MANY_REQUESTS,
                "Try again",
                rate_limited_message(),
             )
