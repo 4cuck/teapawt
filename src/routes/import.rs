@@ -42,7 +42,10 @@ use crate::{
    AppState,
    accounts::ImportSummary,
    passes::SESSION_COOKIE,
-   types::Prefs,
+   types::{
+      AccountPool,
+      Prefs,
+   },
    utils::host::current_origin,
    views::import::{
       self as view,
@@ -65,7 +68,7 @@ trait Backend: Clone + Send + Sync + 'static {
    fn csrf_key(&self) -> &str;
    fn theme(&self, jar: &CookieJar) -> String;
    fn origin(&self) -> String;
-   fn upload(&self, text: &str, search: bool)
+   fn upload(&self, text: &str, pool: AccountPool)
    -> impl Future<Output = Option<ImportSummary>> + Send;
    fn on_accounts_imported(&self) {}
 }
@@ -107,8 +110,8 @@ impl Backend for AppState {
       current_origin(self.config.url_prefix())
    }
 
-   async fn upload(&self, text: &str, search: bool) -> Option<ImportSummary> {
-      self.accounts.import_text(text, search).await.ok()
+   async fn upload(&self, text: &str, pool: AccountPool) -> Option<ImportSummary> {
+      self.accounts.import_text(text, pool).await.ok()
    }
 
    fn on_accounts_imported(&self) {
@@ -301,11 +304,10 @@ fn now() -> i64 {
 }
 
 fn pool_selection(pool: Option<&str>) -> &'static str {
-   if pool == Some("search") {
-      "search"
-   } else {
-      "view"
-   }
+   pool
+      .and_then(AccountPool::parse)
+      .unwrap_or(AccountPool::View)
+      .as_str()
 }
 
 fn form<B: Backend>(
@@ -479,16 +481,12 @@ async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Req
          "The form expired or could not be verified. Reload the page and try again.",
       );
    }
-   let search = match pool.as_deref() {
-      Some("view") => false,
-      Some("search") => true,
-      _ => {
-         return error_with_pool(
-            selected_pool,
-            StatusCode::BAD_REQUEST,
-            "Choose an import pool.",
-         );
-      },
+   let Some(target_pool) = pool.as_deref().and_then(AccountPool::parse) else {
+      return error_with_pool(
+         selected_pool,
+         StatusCode::BAD_REQUEST,
+         "Choose an import pool.",
+      );
    };
    let Some(accounts) = accounts.filter(|value| !value.trim().is_empty()) else {
       return error_with_pool(
@@ -504,7 +502,7 @@ async fn upload<B: Backend>(State(state): State<B>, jar: CookieJar, request: Req
          "The account text exceeds the upload limit.",
       );
    }
-   match state.upload(&accounts, search).await {
+   match state.upload(&accounts, target_pool).await {
       Some(counts) => {
          if counts.imported > 0 {
             state.on_accounts_imported();
@@ -551,8 +549,9 @@ mod tests {
 
    #[derive(Clone, Default)]
    struct Fixture {
-      writes: Arc<AtomicUsize>,
-      failed: bool,
+      writes:    Arc<AtomicUsize>,
+      last_pool: Arc<std::sync::Mutex<Option<AccountPool>>>,
+      failed:    bool,
    }
 
    impl Backend for Fixture {
@@ -560,11 +559,12 @@ mod tests {
          (!self.failed).then(|| {
             Snapshot {
                stats:   Stats {
-                  total:    21,
-                  search:   8,
-                  view:     13,
-                  ct0_dead: 0,
-                  rejected: 0,
+                  total:       31,
+                  search:      8,
+                  search_pass: 10,
+                  view:        13,
+                  ct0_dead:    0,
+                  rejected:    0,
                },
                batches: Some(vec![view::Batch {
                   timestamp: 1_700_000_000,
@@ -597,9 +597,9 @@ mod tests {
          ORIGIN.into()
       }
 
-      async fn upload(&self, text: &str, search: bool) -> Option<ImportSummary> {
+      async fn upload(&self, text: &str, pool: AccountPool) -> Option<ImportSummary> {
          assert_eq!(text, SECRET);
-         assert!(search);
+         *self.last_pool.lock().unwrap() = Some(pool);
          self.writes.fetch_add(1, Ordering::Relaxed);
          (!self.failed).then_some(ImportSummary {
             imported:   1,
@@ -639,9 +639,13 @@ mod tests {
    }
 
    fn payload(csrf: &str, accounts: &str) -> String {
+      payload_for_pool(csrf, "search", accounts)
+   }
+
+   fn payload_for_pool(csrf: &str, pool: &str, accounts: &str) -> String {
       form_urlencoded::Serializer::new(String::new())
          .append_pair("csrf", csrf)
-         .append_pair("pool", "search")
+         .append_pair("pool", pool)
          .append_pair("accounts", accounts)
          .finish()
    }
@@ -689,7 +693,8 @@ mod tests {
          assert_eq!(html.contains("every 60s"), dashboard);
          assert!(html.contains("2023-11-14T22:13:50Z"));
          assert!(html.contains("2023-11-14T22:13:20Z"));
-         assert!(html.contains("<dd>21</dd>"));
+         assert!(html.contains("<dd>31</dd>"));
+         assert!(html.contains("<dt>search-pass</dt><dd>10</dd>"));
          assert!(html.contains(">7<") && html.contains("added"));
          assert!(!html.contains("<form"));
          assert_eq!(html.contains("href=\"/admin/import\""), dashboard);
@@ -797,6 +802,7 @@ mod tests {
       }
       assert_eq!(state.writes.load(Ordering::Relaxed), 0);
       let response = app
+         .clone()
          .oneshot(post_request(
             path,
             Some(ADMIN),
@@ -811,6 +817,26 @@ mod tests {
       assert!(html.contains("<option value=\"search\" selected>Search</option>"));
       assert!(!html.contains("synthetic private import input"));
       assert_eq!(state.writes.load(Ordering::Relaxed), 1);
+      assert_eq!(*state.last_pool.lock().unwrap(), Some(AccountPool::Search));
+
+      let response = app
+         .oneshot(post_request(
+            path,
+            Some(ADMIN),
+            ORIGIN,
+            payload_for_pool(csrf, "search-pass", SECRET),
+         ))
+         .await
+         .unwrap();
+      assert_private(&response, StatusCode::OK);
+      let html = body(response).await;
+      assert!(html.contains("Saved: 1 added"));
+      assert!(html.contains("<option value=\"search-pass\" selected>Search-pass</option>"));
+      assert_eq!(state.writes.load(Ordering::Relaxed), 2);
+      assert_eq!(
+         *state.last_pool.lock().unwrap(),
+         Some(AccountPool::SearchPass)
+      );
    }
 
    #[test]

@@ -184,17 +184,28 @@ impl ClientKey {
 tokio::task_local! {
    /// The caller of the request being served, if a trusted proxy named one.
    pub static CLIENT: ClientKey;
+   /// Whether the current request holds an active paid search pass (via its
+   /// signed-in cookie or a whitelisted IP address).
+   pub static SEARCH_PASS: bool;
 }
 
 /// A spawned task starts with an empty task-local scope, so anything reaching
 /// the API from `tokio::spawn` or a `JoinSet` must wrap its future in this or
-/// those calls go unbilled.
+/// those calls go unbilled and lose their search-pass tier.
 pub fn scoped<F>(fut: F) -> impl Future<Output = F::Output>
 where
    F: Future,
 {
    let client = current_client();
+   let search_pass = has_search_pass();
    async move {
+      let fut = async move {
+         if search_pass {
+            SEARCH_PASS.scope(true, fut).await
+         } else {
+            fut.await
+         }
+      };
       match client {
          Some(client) => CLIENT.scope(client, fut).await,
          None => fut.await,
@@ -205,6 +216,12 @@ where
 #[must_use]
 pub fn current_client() -> Option<ClientKey> {
    CLIENT.try_with(Clone::clone).ok()
+}
+
+/// Whether the current request is admitted by a paid search pass.
+#[must_use]
+pub fn has_search_pass() -> bool {
+   SEARCH_PASS.try_with(|pass| *pass).unwrap_or(false)
 }
 
 /// The socket peer is the only address a caller cannot choose, so it wins

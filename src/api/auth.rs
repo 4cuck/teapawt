@@ -57,6 +57,7 @@ use crate::{
       Result,
    },
    types::{
+      AccountPool,
       Headroom,
       RateLimit,
       Session,
@@ -84,11 +85,12 @@ pub struct AccountState {
    pub id:                        i64,
    pub username:                  String,
    pub kind:                      SessionKind,
-   /// Effective runtime pool: `"search"`, `"view"`, `"ct0_dead"`, or
-   /// `"rejected"`.
+   /// Effective runtime pool: `"search"`, `"search-pass"`, `"view"`,
+   /// `"ct0_dead"`, or `"rejected"`.
    pub pool:                      &'static str,
-   /// Underlying active pool (`"search"` or `"view"`) that the account returns
-   /// to if a stale `ct0` is replaced or an operator reinstates it.
+   /// Underlying active pool (`"search"`, `"search-pass"`, or `"view"`) that
+   /// the account returns to if a stale `ct0` is replaced or an operator
+   /// reinstates it.
    pub home_pool:                 &'static str,
    /// Reserved for search once, in the view pool now. A health check that
    /// finds the account alive puts it back.
@@ -254,6 +256,7 @@ pub struct OutBreakdown {
 pub struct OutOperationCounts {
    pub all_out:             usize,
    pub search_timeline:     usize,
+   pub search_pass:         usize,
    pub user_tweets:         usize,
    pub user_by_screen_name: usize,
    pub tweet_detail:        usize,
@@ -280,9 +283,12 @@ pub struct OutAccountsSnapshot {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct PoolCensus {
    pub total:                usize,
-   /// Active accounts reserved for search (excludes `ct0_dead` and `rejected`
-   /// pools).
+   /// Active accounts reserved for public search (excludes `ct0_dead` and
+   /// `rejected` pools).
    pub search:               usize,
+   /// Active accounts reserved for paid search-pass searches (excludes
+   /// `ct0_dead` and `rejected` pools).
+   pub search_pass:          usize,
    /// Active accounts for profile and post reads (excludes `ct0_dead` and
    /// `rejected` pools).
    pub view:                 usize,
@@ -318,7 +324,7 @@ pub struct PoolCensus {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct OperationPool {
    pub operation: String,
-   /// The pool that owns this call: `search` or `view`.
+   /// The pool that owns this call: `search`, `search-pass`, or `view`.
    pub pool:      &'static str,
    /// Accounts in that pool.
    pub accounts:  usize,
@@ -512,6 +518,24 @@ enum Caller {
    Hedge,
    /// A parked call that was woken. It may take the accounts it waited on.
    Queued,
+}
+
+/// Which search pool a `SearchTimeline` scan inspects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchScope {
+   /// Public `search` pool only (`search_only && !search_pass_only`).
+   PublicOnly,
+   /// Dedicated paid `search-pass` pool only (`search_only && search_pass_only`).
+   PassOnly,
+}
+
+impl SearchScope {
+   const fn matches_flags(self, search_only: bool, search_pass_only: bool) -> bool {
+      match self {
+         Self::PublicOnly => search_only && !search_pass_only,
+         Self::PassOnly => search_only && search_pass_only,
+      }
+   }
 }
 
 /// Why one pass over the pool found no account.
@@ -755,6 +779,7 @@ struct SessionSlot {
    /// `write_limits`.
    rejected:                  AtomicBool,
    search_only:               AtomicBool,
+   search_pass_only:          AtomicBool,
    unavailable:               AtomicBool,
    /// Mutable rate-limit and verdict state for this account alone. Never held
    /// across `.await`.
@@ -779,6 +804,7 @@ impl SessionSlot {
    fn new(credentials: SessionCredentials, limits: SessionLimits, max_concurrency: usize) -> Self {
       let rejected = limits.rejected;
       let search_only = limits.search_only;
+      let search_pass_only = limits.search_pass_only;
       let unavailable = limits.ct0_dead || limits.retired;
       Self {
          credentials: Arc::new(credentials),
@@ -791,6 +817,7 @@ impl SessionSlot {
          slow_exit: AtomicBool::new(false),
          rejected: AtomicBool::new(rejected),
          search_only: AtomicBool::new(search_only),
+         search_pass_only: AtomicBool::new(search_pass_only),
          unavailable: AtomicBool::new(unavailable),
          limits: std::sync::RwLock::new(limits),
          search_empty_streak: AtomicU32::new(0),
@@ -851,6 +878,9 @@ impl SessionSlot {
    fn sync_flags(&self, lim: &SessionLimits) {
       self.rejected.store(lim.rejected, Ordering::Relaxed);
       self.search_only.store(lim.search_only, Ordering::Relaxed);
+      self
+         .search_pass_only
+         .store(lim.search_pass_only, Ordering::Relaxed);
       self
          .unavailable
          .store(lim.ct0_dead || lim.retired, Ordering::Relaxed);
@@ -951,7 +981,9 @@ impl SessionPool {
                   // The store says which pool an account is in and which one it
                   // came from; the saved limits only remember what X answered.
                   previous.search_only = current.search_only;
+                  previous.search_pass_only = current.search_pass_only;
                   previous.demoted_from_search = current.demoted_from_search;
+                  previous.demoted_from_search_pass = current.demoted_from_search_pass;
                   *current = previous;
                });
                restored += 1;
@@ -1053,10 +1085,12 @@ impl SessionPool {
          if by_id.contains_key(&session.id) {
             continue;
          }
-         let search_account = session.pool.eq_ignore_ascii_case("search");
+         let pool = AccountPool::from_stored(&session.pool);
          let (creds, mut lims) = session.into_credentials_and_limits();
-         if search_account {
-            lims.reserve_for_search();
+         match pool {
+            AccountPool::Search => lims.reserve_for_search(),
+            AccountPool::SearchPass => lims.reserve_for_search_pass(),
+            AccountPool::View => {},
          }
          by_id.insert(creds.id, base + new_slots.len());
          new_slots.push(Arc::new(SessionSlot::new(
@@ -1169,14 +1203,19 @@ impl SessionPool {
       excluded_ids: &[i64],
    ) -> bool {
       let spec = ApiSpec::new(api);
+      let allow_pass = super::budget::has_search_pass();
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
       self.slots().iter().any(|slot| {
          !excluded_ids.contains(&slot.credentials.id)
             && required_kind.is_none_or(|kind| slot.credentials.kind == kind)
             && !slot.rejected.load(Ordering::Relaxed)
             && !slot.unavailable.load(Ordering::Relaxed)
-            && (spec.self_service || slot.search_only.load(Ordering::Relaxed) == spec.is_search)
-            && Self::serves_visitor_slot(&slot.read_limits(), spec, now)
+            && (spec.self_service
+               || (slot.search_only.load(Ordering::Relaxed) == spec.is_search
+                  && (!spec.is_search
+                     || allow_pass
+                     || !slot.search_pass_only.load(Ordering::Relaxed))))
+            && Self::serves_visitor_slot_for(&slot.read_limits(), spec, allow_pass, now)
       })
    }
 
@@ -1203,8 +1242,19 @@ impl SessionPool {
          && right_pool
    }
 
+   fn serves_visitor_slot_for(
+      lim: &SessionLimits,
+      spec: ApiSpec<'_>,
+      allow_pass: bool,
+      now: i64,
+   ) -> bool {
+      Self::serves_slot(lim, spec, now)
+         && (!spec.is_search
+            || (lim.verified_op(spec.op_name) && (allow_pass || !lim.search_pass_only)))
+   }
+
    fn serves_visitor_slot(lim: &SessionLimits, spec: ApiSpec<'_>, now: i64) -> bool {
-      Self::serves_slot(lim, spec, now) && (!spec.is_search || lim.verified_op(spec.op_name))
+      Self::serves_visitor_slot_for(lim, spec, true, now)
    }
 
    async fn acquire_with_filter<'a>(
@@ -1219,34 +1269,97 @@ impl SessionPool {
 
       let started = Instant::now();
       let label = api_for(required_kind.unwrap_or(SessionKind::Cookie));
+      let prefer_search_pass =
+         ApiSpec::new(label).is_search && super::budget::has_search_pass();
       let note = |outcome| self.queue.record(label, started.elapsed(), outcome);
       let mut parked = None;
       // This call's claim on the accounts it listened on, let go after the
       // next scan so the accounts it did not take go to the next in line.
       let mut claim: Option<Wanted> = None;
+      let mut parked_scope: Option<SearchScope> = None;
       loop {
-         let caller = if claim.is_some() {
-            Caller::Queued
-         } else {
-            Caller::Fresh
-         };
          let mut busy = Vec::new();
+         let mut next_scope = SearchScope::PublicOnly;
          let sessions = self.slots();
-         let pass = self.scan(
-            &sessions,
-            &api_for,
-            required_kind,
-            &accept,
-            caller,
-            Some(&mut busy),
-         );
+         let pass = if prefer_search_pass {
+            let pass_caller = if parked_scope == Some(SearchScope::PassOnly) {
+               Caller::Queued
+            } else {
+               Caller::Fresh
+            };
+            let mut pass_busy = Vec::new();
+            match self.scan(
+               &sessions,
+               &api_for,
+               required_kind,
+               &accept,
+               pass_caller,
+               SearchScope::PassOnly,
+               Some(&mut pass_busy),
+            ) {
+               Ok(lease) => Ok(lease),
+               Err(Miss::Busy) if !Self::should_shed(&sessions, started, &pass_busy) => {
+                  busy = pass_busy;
+                  next_scope = SearchScope::PassOnly;
+                  Err(Miss::Busy)
+               },
+               Err(pass_miss) => {
+                  // When every search-pass account is rate-limited, out of
+                  // rotation, or congested past the shed threshold, fall back
+                  // to the public search pool so paid users keep getting answers.
+                  let pub_caller = if parked_scope == Some(SearchScope::PublicOnly) {
+                     Caller::Queued
+                  } else {
+                     Caller::Fresh
+                  };
+                  let pub_res = self.scan(
+                     &sessions,
+                     &api_for,
+                     required_kind,
+                     &accept,
+                     pub_caller,
+                     SearchScope::PublicOnly,
+                     Some(&mut busy),
+                  );
+                  match (pass_miss, pub_res) {
+                     (_, Ok(lease)) => Ok(lease),
+                     (Miss::Busy, Err(Miss::Busy | Miss::Spent | Miss::Nobody)) => {
+                        if !busy.is_empty() && !Self::should_shed(&sessions, started, &busy) {
+                           Err(Miss::Busy)
+                        } else {
+                           busy.clear();
+                           Err(Miss::Busy)
+                        }
+                     },
+                     (Miss::Spent, Err(Miss::Nobody)) => Err(Miss::Spent),
+                     (_, other) => other,
+                  }
+               },
+            }
+         } else {
+            let caller = if claim.is_some() {
+               Caller::Queued
+            } else {
+               Caller::Fresh
+            };
+            self.scan(
+               &sessions,
+               &api_for,
+               required_kind,
+               &accept,
+               caller,
+               SearchScope::PublicOnly,
+               Some(&mut busy),
+            )
+         };
          drop(claim.take());
          match pass {
             Ok(lease) => {
                note(Outcome::Leased);
                return Ok(lease);
             },
-            Err(Miss::Busy) if !Self::should_shed(&sessions, started, &busy) => {},
+            Err(Miss::Busy)
+               if !busy.is_empty() && !Self::should_shed(&sessions, started, &busy) => {},
             Err(Miss::Busy) => {
                note(Outcome::Shed);
                return Err(Error::TransientUpstream);
@@ -1301,6 +1414,7 @@ impl SessionPool {
          for waiter in &mut waiters {
             waiter.as_mut().enable();
          }
+         parked_scope = Some(next_scope);
          claim = Some(Wanted::claim(Arc::clone(&sessions), busy));
          if claim.as_ref().is_some_and(|claimed| {
             claimed.indices.iter().any(|&index| {
@@ -1362,14 +1476,48 @@ impl SessionPool {
          return Err(Error::NoSessions);
       }
       let started = Instant::now();
-      let pass = self.scan(
-         &self.slots(),
-         &|_| api,
-         required_kind,
-         &|_| true,
-         Caller::Fresh,
-         None,
-      );
+      let sessions = self.slots();
+      let prefer_search_pass = ApiSpec::new(api).is_search && super::budget::has_search_pass();
+      let pass = if prefer_search_pass {
+         match self.scan(
+            &sessions,
+            &|_| api,
+            required_kind,
+            &|_| true,
+            Caller::Fresh,
+            SearchScope::PassOnly,
+            None,
+         ) {
+            Ok(lease) => Ok(lease),
+            Err(pass_miss) => {
+               let pub_res = self.scan(
+                  &sessions,
+                  &|_| api,
+                  required_kind,
+                  &|_| true,
+                  Caller::Fresh,
+                  SearchScope::PublicOnly,
+                  None,
+               );
+               match (pass_miss, pub_res) {
+                  (_, Ok(lease)) => Ok(lease),
+                  (Miss::Busy, Err(_)) => Err(Miss::Busy),
+                  (Miss::Spent, Err(Miss::Nobody)) => Err(Miss::Spent),
+                  (_, other) => other,
+               }
+            },
+         }
+      } else {
+         self.scan(
+            &sessions,
+            &|_| api,
+            required_kind,
+            &|_| true,
+            Caller::Fresh,
+            SearchScope::PublicOnly,
+            None,
+         )
+      };
       match pass {
          Ok(lease) => {
             self.queue.record(api, started.elapsed(), Outcome::Leased);
@@ -1399,13 +1547,29 @@ impl SessionPool {
       if self.is_empty() {
          return None;
       }
-      self
-         .scan(
-            &self.slots(),
+      let sessions = self.slots();
+      let prefer_search_pass = ApiSpec::new(api).is_search && super::budget::has_search_pass();
+      if prefer_search_pass {
+         if let Ok(lease) = self.scan(
+            &sessions,
             &|_| api,
             required_kind,
             &accept,
             Caller::Hedge,
+            SearchScope::PassOnly,
+            None,
+         ) {
+            return Some(lease);
+         }
+      }
+      self
+         .scan(
+            &sessions,
+            &|_| api,
+            required_kind,
+            &accept,
+            Caller::Hedge,
+            SearchScope::PublicOnly,
             None,
          )
          .ok()
@@ -1475,13 +1639,21 @@ impl SessionPool {
    ///
    /// Permanently dead/locked accounts (`rejected` / `retired`) live in the
    /// `rejected` pool and stale-CSRF accounts (`ct0_dead`) live in the
-   /// `ct0_dead` pool, so neither pollutes active `search` or `view` slot
-   /// counts.
+   /// `ct0_dead` pool, so neither pollutes active `search`, `search-pass`, or
+   /// `view` slot counts.
    const fn effective_pool(lim: &SessionLimits) -> &'static str {
       if lim.rejected || lim.retired {
          "rejected"
       } else if lim.ct0_dead {
          "ct0_dead"
+      } else {
+         Self::home_pool(lim)
+      }
+   }
+
+   const fn home_pool(lim: &SessionLimits) -> &'static str {
+      if lim.search_pass_only {
+         "search-pass"
       } else if lim.search_only {
          "search"
       } else {
@@ -1492,13 +1664,12 @@ impl SessionPool {
    /// Every account's marks, and where each pool stands for the calls that
    /// carry most of its traffic, read in one pass for the dashboard.
    pub async fn census(&self) -> PoolCensus {
-      const OPERATIONS: [&str; 4] = [
-         super::endpoints::GRAPH_USER_TWEETS,
-         super::endpoints::GRAPH_USER,
-         super::endpoints::GRAPH_TWEET_DETAIL,
-         super::endpoints::GRAPH_SEARCH_TIMELINE,
+      let view_specs = [
+         ApiSpec::new(super::endpoints::GRAPH_USER_TWEETS),
+         ApiSpec::new(super::endpoints::GRAPH_USER),
+         ApiSpec::new(super::endpoints::GRAPH_TWEET_DETAIL),
       ];
-      let specs = OPERATIONS.map(ApiSpec::new);
+      let search_spec = ApiSpec::new(super::endpoints::GRAPH_SEARCH_TIMELINE);
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
       let slots = self.slots();
       let mut census = PoolCensus {
@@ -1506,14 +1677,31 @@ impl SessionPool {
          parked_calls: self.waiting.load(Ordering::Relaxed),
          ..PoolCensus::default()
       };
-      let mut counts = OPERATIONS.map(|_| PoolCount::default());
-      let mut sizes = [0_usize; OPERATIONS.len()];
+      let mut view_counts = [
+         PoolCount::default(),
+         PoolCount::default(),
+         PoolCount::default(),
+      ];
+      let mut search_count = PoolCount::default();
+      let mut search_pass_count = PoolCount::default();
       for slot in slots.iter() {
          let lim = slot.read_limits();
          let pool = Self::effective_pool(&lim);
          match pool {
-            "search" => census.search += 1,
-            "view" => census.view += 1,
+            "search" => {
+               census.search += 1;
+               Self::count_slot(&mut search_count, slot, &lim, search_spec, now);
+            },
+            "search-pass" => {
+               census.search_pass += 1;
+               Self::count_slot(&mut search_pass_count, slot, &lim, search_spec, now);
+            },
+            "view" => {
+               census.view += 1;
+               for (index, &spec) in view_specs.iter().enumerate() {
+                  Self::count_slot(&mut view_counts[index], slot, &lim, spec, now);
+               }
+            },
             "ct0_dead" => census.ct0_dead_pool += 1,
             _ => census.rejected_pool += 1,
          }
@@ -1528,42 +1716,38 @@ impl SessionPool {
          census.settings_refused += usize::from(lim.filters_failed);
          census.filters_cleared += usize::from(lim.filters_cleared);
          census.globally_limited += usize::from(lim.is_globally_limited_at(now));
-         // Only active `search` and `view` pool accounts are counted in the
-         // GraphQL slot utilization rows; `rejected` and `ct0_dead` stay in
-         // their own pools so active capacity reflects real rotation.
-         if matches!(pool, "search" | "view") {
-            let in_search = pool == "search";
-            for (index, &spec) in specs.iter().enumerate() {
-               if in_search == spec.is_search {
-                  sizes[index] += 1;
-                  Self::count_slot(&mut counts[index], slot, &lim, spec, now);
-               }
-            }
-         }
       }
-      census.operations = OPERATIONS
-         .iter()
-         .zip(counts)
-         .zip(sizes)
-         .map(|((api, count), accounts)| {
-            let operation = operation_name(api);
-            OperationPool {
-               operation: operation.to_owned(),
-               pool: if operation == "SearchTimeline" {
-                  "search"
-               } else {
-                  "view"
-               },
-               accounts,
-               free: count.free,
-               busy: count.busy,
-               held: count.held,
-               resting: count.resting,
-               spent: count.spent,
-               out: count.out,
-            }
-         })
-         .collect();
+      let make_row = |operation: &str, pool: &'static str, accounts: usize, count: PoolCount| {
+         OperationPool {
+            operation: operation.to_owned(),
+            pool,
+            accounts,
+            free: count.free,
+            busy: count.busy,
+            held: count.held,
+            resting: count.resting,
+            spent: count.spent,
+            out: count.out,
+         }
+      };
+      let [user_tweets, user_by_screen_name, tweet_detail] = view_counts;
+      census.operations = vec![
+         make_row("UserTweets", "view", census.view, user_tweets),
+         make_row(
+            "UserByScreenName",
+            "view",
+            census.view,
+            user_by_screen_name,
+         ),
+         make_row("TweetDetail", "view", census.view, tweet_detail),
+         make_row("SearchTimeline", "search", census.search, search_count),
+         make_row(
+            "SearchTimeline",
+            "search-pass",
+            census.search_pass,
+            search_pass_count,
+         ),
+      ];
       census
    }
 
@@ -1621,7 +1805,7 @@ impl SessionPool {
       for slot in slots.iter() {
          let lim = slot.read_limits();
          let slot_pool = Self::effective_pool(&lim);
-         let home_pool = if lim.search_only { "search" } else { "view" };
+         let home_pool = Self::home_pool(&lim);
 
          let scoped_reasons = match slot_pool {
             "rejected" => {
@@ -1668,11 +1852,37 @@ impl SessionPool {
                   counts.all_out += 1;
                }
                match op {
-                  Some("SearchTimeline") => sr.any().then_some(sr),
+                  Some("SearchTimeline") => {
+                     matches!(pool, None | Some("search"))
+                        .then_some(sr)
+                        .filter(OutReasons::any)
+                  },
                   Some(_) => None,
                   None => {
                      match pool {
                         Some("search") | None => sr.any().then_some(sr),
+                        _ => None,
+                     }
+                  },
+               }
+            },
+            "search-pass" => {
+               let sr = Self::out_reasons_for_spec(&lim, search_timeline, now);
+               if sr.any() {
+                  counts.search_timeline += 1;
+                  counts.search_pass += 1;
+                  counts.all_out += 1;
+               }
+               match op {
+                  Some("SearchTimeline") => {
+                     matches!(pool, None | Some("search-pass"))
+                        .then_some(sr)
+                        .filter(OutReasons::any)
+                  },
+                  Some(_) => None,
+                  None => {
+                     match pool {
+                        Some("search-pass") | None => sr.any().then_some(sr),
                         _ => None,
                      }
                   },
@@ -1861,6 +2071,10 @@ impl SessionPool {
    /// Scans read-only across per-slot locks and keeps the top [`SCAN_TOP_K`]
    /// candidates so concurrent callers can claim different accounts in
    /// parallel without a global write lock.
+   #[expect(
+      clippy::too_many_arguments,
+      reason = "internal pool scan passes pre-acquired slice, filter, caller mode, and search scope"
+   )]
    fn scan<'a>(
       &self,
       sessions: &[Arc<SessionSlot>],
@@ -1868,6 +2082,7 @@ impl SessionPool {
       required_kind: Option<SessionKind>,
       accept: &impl Fn(i64) -> bool,
       caller: Caller,
+      search_scope: SearchScope,
       mut busy_out: Option<&mut Vec<usize>>,
    ) -> StdResult<SessionLease, Miss> {
       let prefer_warm = caller == Caller::Hedge;
@@ -1920,10 +2135,12 @@ impl SessionPool {
                SessionKind::OAuth => oauth_spec,
             };
             let is_search_account = slot.search_only.load(Ordering::Relaxed);
-            if spec.is_search && !is_search_account {
-               continue;
-            }
-            if !spec.is_search && is_search_account {
+            let is_pass_account = slot.search_pass_only.load(Ordering::Relaxed);
+            if spec.is_search {
+               if !search_scope.matches_flags(is_search_account, is_pass_account) {
+                  continue;
+               }
+            } else if is_search_account {
                continue;
             }
             // Permanently dead/retired view accounts are always `Blocked`
@@ -1949,8 +2166,12 @@ impl SessionPool {
             if lim.rejected {
                continue;
             }
-            // Only the background audit may try unchecked search accounts.
-            if spec.is_search && (!lim.search_only || !lim.verified_op(spec.op_name)) {
+            // Only the background audit may try unchecked search accounts, and
+            // public searches never see search-pass accounts.
+            if spec.is_search
+               && (!search_scope.matches_flags(lim.search_only, lim.search_pass_only)
+                  || !lim.verified_op(spec.op_name))
+            {
                continue;
             }
             // A search account is not a candidate for anything else. `refuses`
@@ -2142,7 +2363,10 @@ impl SessionPool {
                SessionKind::OAuth => oauth_spec,
             };
             let claim = |lim: &mut SessionLimits| {
-               if spec.is_search && (!lim.search_only || !lim.verified_op(spec.op_name)) {
+               if spec.is_search
+                  && (!search_scope.matches_flags(lim.search_only, lim.search_pass_only)
+                     || !lim.verified_op(spec.op_name))
+               {
                   return Spend::Denied;
                }
                if !spec.is_search && lim.search_only {
@@ -2473,6 +2697,7 @@ impl SessionPool {
          }
          let already_suspended = lim.suspended;
          let in_search = lim.search_only;
+         let was_search_pass = lim.search_pass_only;
          // A view account refused on a real call has nothing left: it cannot
          // search, and the pool kept for it does not work either.
          let retire = already_suspended && !in_search;
@@ -2481,10 +2706,14 @@ impl SessionPool {
          }
          if in_search {
             lim.demoted_from_search = true;
+            if was_search_pass {
+               lim.demoted_from_search_pass = true;
+            }
          }
          lim.suspended = true;
          lim.search_banned = true;
          lim.search_only = false;
+         lim.search_pass_only = false;
          // The settings write is never spent on this account again: the refusal
          // it would report is the one that was just recorded.
          lim.filters_failed = true;
@@ -2528,12 +2757,23 @@ impl SessionPool {
       let Some(slot) = self.slot(session_id) else {
          return false;
       };
-      let store_is_search = match &self.account_store {
-         Some(store) => store.is_search_account(session_id).await,
-         None => false,
+      let store_pool = match &self.account_store {
+         Some(store) => store.origin_pool(session_id).await,
+         None => AccountPool::View,
       };
-      let Some(search_account) = slot.write_limits(|lim| {
-         let search_account = store_is_search || lim.demoted_from_search || lim.search_only;
+      let Some(target_pool) = slot.write_limits(|lim| {
+         let target_pool = if store_pool == AccountPool::SearchPass
+            || lim.search_pass_only
+            || lim.demoted_from_search_pass
+         {
+            AccountPool::SearchPass
+         } else if store_pool == AccountPool::Search || lim.demoted_from_search || lim.search_only {
+            AccountPool::Search
+         } else {
+            AccountPool::View
+         };
+         let want_search = target_pool.is_search();
+         let want_search_pass = target_pool == AccountPool::SearchPass;
          let anything_to_clear = lim.suspended
             || lim.retired
             || lim.rejected
@@ -2543,7 +2783,9 @@ impl SessionPool {
             || lim.profile_strikes > 0
             || lim.limited
             || lim.demoted_from_search
-            || lim.search_only != search_account
+            || lim.demoted_from_search_pass
+            || lim.search_only != want_search
+            || lim.search_pass_only != want_search_pass
             || lim.filters_failed
             || lim.search_404_at.is_some()
             || !lim.refused_ops.is_empty();
@@ -2560,13 +2802,15 @@ impl SessionPool {
          lim.limited = false;
          lim.limited_at = 0;
          lim.demoted_from_search = false;
-         lim.search_only = search_account;
+         lim.demoted_from_search_pass = false;
+         lim.search_only = want_search;
+         lim.search_pass_only = want_search_pass;
          lim.filters_failed = false;
          lim.filters_retry_at = 0;
          lim.refused_ops.clear();
          lim.search_404_at = None;
          lim.resting.clear();
-         Some(search_account)
+         Some(target_pool)
       }) else {
          return false;
       };
@@ -2576,14 +2820,14 @@ impl SessionPool {
          .lock()
          .unwrap_or_else(std::sync::PoisonError::into_inner) = SearchFailureState::default();
       self.persist_soon(session_id);
-      if search_account {
+      if target_pool.is_search() {
          self.writes.cancel_demotion(session_id);
       }
       // The store is what a restart reads, so it has to agree with the slot.
       if let Some(store) = &self.account_store
-         && search_account
+         && target_pool.is_search()
       {
-         if let Err(err) = store.restore_to_search(session_id).await {
+         if let Err(err) = store.set_pool(session_id, target_pool).await {
             tracing::warn!(session_id, "could not restore the pool assignment: {err}");
          }
       }
@@ -2595,7 +2839,7 @@ impl SessionPool {
       );
       tracing::info!(
          session_id,
-         search = search_account,
+         pool = target_pool.as_str(),
          "account reinstated by probe"
       );
       true
@@ -2618,11 +2862,16 @@ impl SessionPool {
       };
       let in_search = slot.write_limits(|lim| {
          let in_search = lim.search_only;
+         let was_search_pass = lim.search_pass_only;
          if in_search {
             lim.demoted_from_search = true;
+            if was_search_pass {
+               lim.demoted_from_search_pass = true;
+            }
          }
          lim.search_banned = true;
          lim.search_only = false;
+         lim.search_pass_only = false;
          lim.refuse("SearchTimeline");
          in_search
       });
@@ -2635,11 +2884,12 @@ impl SessionPool {
       }
    }
 
-   /// Operator override moving a loaded account into `search` or `view`.
+   /// Operator override moving a loaded account into `search`, `search-pass`,
+   /// or `view`.
    pub async fn set_account_pool(
       &self,
       session_id: i64,
-      to_search: bool,
+      pool: AccountPool,
    ) -> crate::error::Result<bool> {
       let Some(slot) = self.slot(session_id) else {
          return Err(crate::error::Error::NotFound(format!(
@@ -2648,23 +2898,25 @@ impl SessionPool {
       };
       self.writes.cancel_demotion(session_id);
       if let Some(store) = &self.account_store {
-         if to_search {
-            store.restore_to_search(session_id).await?;
-         } else {
-            store.move_to_view(session_id).await?;
-         }
+         store.set_pool(session_id, pool).await?;
       }
+      let want_search = pool.is_search();
+      let want_search_pass = pool == AccountPool::SearchPass;
       let changed = slot.write_limits(|lim| {
-         if to_search {
+         if want_search {
             let changed = !lim.search_only
+               || lim.search_pass_only != want_search_pass
                || lim.demoted_from_search
+               || lim.demoted_from_search_pass
                || lim.search_banned
                || lim.suspended
                || lim.retired
                || lim.refused_ops.contains_key("SearchTimeline")
                || lim.search_404_at.is_some();
             lim.search_only = true;
+            lim.search_pass_only = want_search_pass;
             lim.demoted_from_search = false;
+            lim.demoted_from_search_pass = false;
             lim.search_banned = false;
             lim.suspended = false;
             lim.retired = false;
@@ -2673,13 +2925,18 @@ impl SessionPool {
             lim.resting.clear();
             changed
          } else {
-            let changed = lim.search_only || lim.demoted_from_search;
+            let changed = lim.search_only
+               || lim.search_pass_only
+               || lim.demoted_from_search
+               || lim.demoted_from_search_pass;
             lim.search_only = false;
+            lim.search_pass_only = false;
             lim.demoted_from_search = false;
+            lim.demoted_from_search_pass = false;
             changed
          }
       });
-      if to_search {
+      if want_search {
          slot.has_search_failures.store(false, Ordering::Release);
          *slot
             .search_failures
@@ -2690,16 +2947,16 @@ impl SessionPool {
          self.persist_soon(session_id);
          self.record_restriction(
             session_id,
-            if to_search {
+            if want_search {
                crate::stats::Restriction::Reinstated
             } else {
                crate::stats::Restriction::SearchOnly
             },
             "admin",
-            if to_search {
-               "Operator moved account to the search pool"
-            } else {
-               "Operator moved account to the view pool"
+            match pool {
+               AccountPool::SearchPass => "Operator moved account to the search-pass pool",
+               AccountPool::Search => "Operator moved account to the search pool",
+               AccountPool::View => "Operator moved account to the view pool",
             },
          );
       }
@@ -2759,11 +3016,12 @@ impl SessionPool {
       if let Some(slot) = self.slot(session_id) {
          slot.write_limits(|lim| {
             lim.demoted_from_search = false;
+            lim.demoted_from_search_pass = false;
          });
       }
       self.persist_soon(session_id);
       if let Some(store) = &self.account_store {
-         let _ = store.move_to_view(session_id).await;
+         let _ = store.set_pool(session_id, AccountPool::View).await;
       }
    }
 
@@ -2919,7 +3177,7 @@ impl SessionPool {
          username:                  slot.credentials.username.clone(),
          kind:                      slot.credentials.kind,
          pool:                      Self::effective_pool(lim),
-         home_pool:                 if lim.search_only { "search" } else { "view" },
+         home_pool:                 Self::home_pool(lim),
          demoted_from_search:       lim.demoted_from_search,
          available:                 !(lim.rejected || lim.ct0_dead || lim.retired),
          has_auth_token:            !slot.credentials.auth_token.is_empty(),
@@ -3309,7 +3567,7 @@ impl SessionPool {
    /// hundreds of healthy accounts that never got a settings write at all.
    pub async fn pending_filter_sync_ids(&self) -> Vec<i64> {
       let now = time::OffsetDateTime::now_utc().unix_timestamp();
-      let mut pending: Vec<((bool, bool), i64)> = self
+      let mut pending: Vec<((bool, bool, bool), i64)> = self
          .slots()
          .iter()
          .filter(|slot| {
@@ -3333,7 +3591,11 @@ impl SessionPool {
                return None;
             }
             Some((
-               (lim.search_only, !lim.verified_ops.is_empty()),
+               (
+                  lim.search_pass_only,
+                  lim.search_only,
+                  !lim.verified_ops.is_empty(),
+               ),
                slot.credentials.id,
             ))
          })
@@ -5126,14 +5388,27 @@ mod tests {
       assert!(pool.demoted_search_candidates(10).await.is_empty());
 
       assert!(matches!(
-         pool.set_account_pool(999, true).await,
+         pool.set_account_pool(999, super::AccountPool::Search).await,
          Err(Error::NotFound(_))
       ));
-      assert!(!pool.set_account_pool(3, false).await.unwrap());
-      assert!(pool.set_account_pool(3, true).await.unwrap());
+      assert!(!pool.set_account_pool(3, super::AccountPool::View).await.unwrap());
+      assert!(pool.set_account_pool(3, super::AccountPool::Search).await.unwrap());
       assert_eq!(pool.account_state(3).await.unwrap().pool, "search");
-      assert!(!pool.set_account_pool(3, true).await.unwrap());
-      assert!(pool.set_account_pool(3, false).await.unwrap());
+      assert!(!pool.set_account_pool(3, super::AccountPool::Search).await.unwrap());
+      assert!(
+         pool
+            .set_account_pool(3, super::AccountPool::SearchPass)
+            .await
+            .unwrap()
+      );
+      assert_eq!(pool.account_state(3).await.unwrap().pool, "search-pass");
+      assert!(
+         !pool
+            .set_account_pool(3, super::AccountPool::SearchPass)
+            .await
+            .unwrap()
+      );
+      assert!(pool.set_account_pool(3, super::AccountPool::View).await.unwrap());
       assert_eq!(pool.account_state(3).await.unwrap().pool, "view");
 
       fs::remove_file(path).await.unwrap();
@@ -5835,5 +6110,194 @@ mod tests {
          pool.search_audit_ids("ph2f/SearchTimeline").await,
          vec![10]
       );
+   }
+
+   #[tokio::test]
+   async fn search_pass_pool_is_isolated_from_public_and_falls_back_when_rate_limited() {
+      let pool = SessionPool::empty(2);
+      let api = "ph2f/SearchTimeline";
+      let reset = time::OffsetDateTime::now_utc().unix_timestamp() + 900;
+      let sessions = vec![
+         crate::types::Session {
+            id: 1,
+            username: "pub_search_1".to_owned(),
+            kind: SessionKind::Cookie,
+            auth_token: "a1".to_owned(),
+            ct0: "c1".to_owned(),
+            pool: "search".to_owned(),
+            ..crate::types::Session::default()
+         },
+         crate::types::Session {
+            id: 2,
+            username: "pass_search_1".to_owned(),
+            kind: SessionKind::Cookie,
+            auth_token: "a2".to_owned(),
+            ct0: "c2".to_owned(),
+            pool: "search-pass".to_owned(),
+            ..crate::types::Session::default()
+         },
+         crate::types::Session {
+            id: 3,
+            username: "pass_search_2".to_owned(),
+            kind: SessionKind::Cookie,
+            auth_token: "a3".to_owned(),
+            ct0: "c3".to_owned(),
+            pool: "search-pass".to_owned(),
+            ..crate::types::Session::default()
+         },
+         crate::types::Session {
+            id: 4,
+            username: "viewer".to_owned(),
+            kind: SessionKind::Cookie,
+            auth_token: "a4".to_owned(),
+            ct0: "c4".to_owned(),
+            ..crate::types::Session::default()
+         },
+      ];
+      assert_eq!(pool.append_sessions(sessions).await, 4);
+      for id in [1, 2, 3] {
+         pool.mark_verified(id, api).await;
+      }
+      // Give the public account higher remaining quota than search-pass accounts
+      // to prove paid requests still choose search-pass first, and public
+      // requests never touch search-pass accounts.
+      pool.update_session_limit(1, api, 187, 150, reset).await;
+      pool.update_session_limit(2, api, 187, 40, reset).await;
+      pool.update_session_limit(3, api, 187, 30, reset).await;
+
+      // View requests never touch search or search-pass accounts.
+      let view_lease = pool.acquire("x/UserTweets", None).await.unwrap();
+      assert_eq!(view_lease.id, 4);
+      drop(view_lease);
+
+      // Public search always uses public search (#1) and never touches #2 or #3.
+      let pub_lease = pool.acquire(api, None).await.unwrap();
+      assert_eq!(pub_lease.id, 1);
+      drop(pub_lease);
+
+      // Paid search-pass always picks from the search-pass pool (#2 before #3),
+      // even though public #1 has more remaining calls.
+      let pass_lease = crate::api::budget::SEARCH_PASS
+         .scope(true, pool.acquire(api, None))
+         .await
+         .unwrap();
+      assert_eq!(pass_lease.id, 2);
+      drop(pass_lease);
+
+      // Exhaust the public pool: public search gets RateLimited and MUST NOT
+      // touch search-pass accounts #2 or #3.
+      pool.update_session_limit(1, api, 187, 0, reset).await;
+      assert!(!pool.has_unlimited_excluding(api, None, &[]).await);
+      assert!(matches!(
+         pool.acquire(api, None).await,
+         Err(Error::RateLimited)
+      ));
+      // Paid search-pass STILL works on its dedicated pool while public is exhausted!
+      assert!(
+         crate::api::budget::SEARCH_PASS
+            .scope(true, pool.has_unlimited_excluding(api, None, &[]))
+            .await
+      );
+      let pass_lease = crate::api::budget::SEARCH_PASS
+         .scope(true, pool.acquire(api, None))
+         .await
+         .unwrap();
+      assert!(matches!(pass_lease.id, 2 | 3));
+      drop(pass_lease);
+
+      // Add a fresh public search account (#5) and exhaust ALL search-pass
+      // accounts (#2 spent, #3 resting).
+      assert_eq!(
+         pool
+            .append_sessions(vec![crate::types::Session {
+               id: 5,
+               username: "pub_search_2".to_owned(),
+               kind: SessionKind::Cookie,
+               auth_token: "a5".to_owned(),
+               ct0: "c5".to_owned(),
+               pool: "search".to_owned(),
+               ..crate::types::Session::default()
+            }])
+            .await,
+         1
+      );
+      pool.mark_verified(5, api).await;
+      pool.update_session_limit(5, api, 187, 50, reset).await;
+      pool.update_session_limit(2, api, 187, 0, reset).await;
+      pool.rest_endpoint(3, api).await;
+
+      // Paid search-pass sees public #5 is available and falls back to it!
+      assert!(
+         crate::api::budget::SEARCH_PASS
+            .scope(true, pool.has_unlimited_excluding(api, None, &[2, 3]))
+            .await
+      );
+      let fallback_lease = crate::api::budget::SEARCH_PASS
+         .scope(true, pool.acquire(api, None))
+         .await
+         .unwrap();
+      assert_eq!(fallback_lease.id, 5);
+      drop(fallback_lease);
+
+      // When BOTH search-pass and public pools are rate-limited, paid search
+      // returns RateLimited.
+      pool.update_session_limit(5, api, 187, 0, reset).await;
+      assert!(matches!(
+         crate::api::budget::SEARCH_PASS
+            .scope(true, pool.acquire(api, None))
+            .await,
+         Err(Error::RateLimited)
+      ));
+
+      // Demoting a search-pass account and reinstating it returns it to search-pass.
+      pool.demote_to_view(2, None, "search refused").await;
+      let demoted = pool.account_state(2).await.unwrap();
+      assert_eq!(demoted.pool, "view");
+      assert!(demoted.demoted_from_search);
+      assert!(pool.reinstate(2).await);
+      let reinstated = pool.account_state(2).await.unwrap();
+      assert_eq!(reinstated.pool, "search-pass");
+      assert_eq!(reinstated.home_pool, "search-pass");
+      assert!(!reinstated.demoted_from_search);
+
+      // Census separates search and search-pass cleanly.
+      let census = pool.census().await;
+      assert_eq!(census.search, 2);
+      assert_eq!(census.search_pass, 2);
+      assert_eq!(census.view, 1);
+      let pass_op = census
+         .operations
+         .iter()
+         .find(|op| op.operation == "SearchTimeline" && op.pool == "search-pass")
+         .unwrap();
+      assert_eq!(pass_op.accounts, 2);
+
+      // When only search-pass accounts exist and all are rate-limited (no public
+      // search accounts at all), paid search still reports RateLimited, not NoSessions.
+      let pass_only_pool = SessionPool::empty(2);
+      assert_eq!(
+         pass_only_pool
+            .append_sessions(vec![crate::types::Session {
+               id: 10,
+               username: "solo_pass".to_owned(),
+               kind: SessionKind::Cookie,
+               auth_token: "a10".to_owned(),
+               ct0: "c10".to_owned(),
+               pool: "search-pass".to_owned(),
+               ..crate::types::Session::default()
+            }])
+            .await,
+         1
+      );
+      pass_only_pool.mark_verified(10, api).await;
+      pass_only_pool
+         .update_session_limit(10, api, 187, 0, reset)
+         .await;
+      assert!(matches!(
+         crate::api::budget::SEARCH_PASS
+            .scope(true, pass_only_pool.acquire(api, None))
+            .await,
+         Err(Error::RateLimited)
+      ));
    }
 }

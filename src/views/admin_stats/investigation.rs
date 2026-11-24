@@ -145,6 +145,7 @@ pub(crate) fn restrictions(
                   select name="pool" {
                      option value="" { "All pools" }
                      option value="search" selected[query.pool.as_deref() == Some("search")] { "Search pool" }
+                     option value="search-pass" selected[query.pool.as_deref() == Some("search-pass")] { "Search-pass pool" }
                      option value="view" selected[query.pool.as_deref() == Some("view")] { "View pool" }
                      option value="ct0_dead" selected[query.pool.as_deref() == Some("ct0_dead")] { "Stale ct0 pool" }
                      option value="rejected" selected[query.pool.as_deref() == Some("rejected")] { "Rejected pool" }

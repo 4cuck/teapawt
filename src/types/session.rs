@@ -21,6 +21,65 @@ pub enum SessionKind {
    Cookie,
 }
 
+/// Active pool assignment for an account.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccountPool {
+   /// Shared profile and tweet read pool.
+   #[default]
+   View,
+   /// Public search pool.
+   Search,
+   /// Dedicated search pool for paid search-pass holders.
+   SearchPass,
+}
+
+impl AccountPool {
+   #[must_use]
+   pub const fn as_str(self) -> &'static str {
+      match self {
+         Self::View => "view",
+         Self::Search => "search",
+         Self::SearchPass => "search-pass",
+      }
+   }
+
+   /// Value stored in `account_sessions.body->>'pool'`.
+   #[must_use]
+   pub const fn stored(self) -> &'static str {
+      match self {
+         Self::View => "",
+         Self::Search => "search",
+         Self::SearchPass => "search-pass",
+      }
+   }
+
+   #[must_use]
+   pub fn parse(value: &str) -> Option<Self> {
+      match value.trim() {
+         "view" => Some(Self::View),
+         "search" => Some(Self::Search),
+         "search-pass" => Some(Self::SearchPass),
+         _ => None,
+      }
+   }
+
+   #[must_use]
+   pub fn from_stored(value: &str) -> Self {
+      if value.eq_ignore_ascii_case("search-pass") {
+         Self::SearchPass
+      } else if value.eq_ignore_ascii_case("search") {
+         Self::Search
+      } else {
+         Self::View
+      }
+   }
+
+   #[must_use]
+   pub const fn is_search(self) -> bool {
+      matches!(self, Self::Search | Self::SearchPass)
+   }
+}
+
 /// Immutable session credentials, loaded once and `Arc`-shared.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionCredentials {
@@ -84,16 +143,26 @@ pub struct SessionLimits {
    /// or when it was imported as a search account. View calls never take it,
    /// so a search suspension cannot spread through profile traffic.
    #[serde(default)]
-   pub search_only:         bool,
+   pub search_only:              bool,
+   /// Reserved for paid search-pass holders. Always paired with `search_only`:
+   /// public searches never use this account, and view calls never take it.
+   #[serde(default)]
+   pub search_pass_only:         bool,
    /// X will not serve this account search, and waiting does not change it.
    /// It stays in the pool for profile reads and stops being tried for search.
    #[serde(default)]
-   pub search_banned:       bool,
-   /// This account was reserved for search and has been moved to the view
-   /// pool. Remembered so that a verdict later shown to be wrong can be
-   /// undone: without it nothing says which pool the account came from.
+   pub search_banned:            bool,
+   /// This account was reserved for search (public or search-pass) and has
+   /// been moved to the view pool. Remembered so that a verdict later shown to
+   /// be wrong can be undone: without it nothing says which pool the account
+   /// came from.
    #[serde(default)]
-   pub demoted_from_search: bool,
+   pub demoted_from_search:      bool,
+   /// This account was reserved specifically for the search-pass pool before
+   /// being moved to the view pool, so reinstatement returns it to
+   /// `search-pass`.
+   #[serde(default)]
+   pub demoted_from_search_pass: bool,
    /// X refused the account itself with a 403 the settings write also gets
    /// ("not permitted to access this feature"). The account is out of search,
    /// and the view pool gets exactly one attempt to show it can still read
@@ -483,6 +552,12 @@ impl SessionLimits {
       self.search_only = true;
    }
 
+   /// Keep this account for paid search-pass requests alone.
+   pub fn reserve_for_search_pass(&mut self) {
+      self.search_only = true;
+      self.search_pass_only = true;
+   }
+
    /// Spend one local call against `api` when its window is known.
    ///
    /// The decrement happens before the request is handed out, so the next
@@ -592,13 +667,14 @@ pub struct Session {
    // Cookie credentials
    pub auth_token:   String,
    pub ct0:          String,
-   /// `"search"` keeps this account out of profile and tweet reads. Absent
-   /// means the shared view pool, which is every account already on disk.
+   /// `"search"` or `"search-pass"` keeps this account out of profile and
+   /// tweet reads. Absent means the shared view pool, which is every account
+   /// already on disk.
    #[serde(default)]
    pub pool:         String,
-   /// `"search"` when this account was reserved for search and a verdict
-   /// moved it to the view pool. Written with the move and removed when the
-   /// account goes back, so the move can be undone.
+   /// `"search"` or `"search-pass"` when this account was reserved for search
+   /// and a verdict moved it to the view pool. Written with the move and
+   /// removed when the account goes back, so the move can be undone.
    #[serde(default)]
    pub demoted_from: String,
 }
@@ -606,6 +682,8 @@ pub struct Session {
 impl Session {
    /// Split into immutable credentials and mutable rate-limit state.
    pub fn into_credentials_and_limits(self) -> (SessionCredentials, SessionLimits) {
+      let pool = AccountPool::from_stored(&self.pool);
+      let demoted_from = AccountPool::from_stored(&self.demoted_from);
       (
          SessionCredentials {
             id:           self.id,
@@ -617,26 +695,27 @@ impl Session {
             ct0:          self.ct0,
          },
          SessionLimits {
-            limited:             self.limited,
-            limited_at:          self.limited_at,
-            rejected:            false,
-            filters_cleared:     false,
-            filters_failed:      false,
-            filters_retry_at:    0,
-            apis:                self.apis,
-            refused_ops:         HashMap::new(),
-            verified_ops:        HashMap::new(),
-            profile_strikes:     0,
-            profile_banned:      false,
-            search_404_at:       None,
-            search_only:         self.pool.eq_ignore_ascii_case("search"),
-            search_banned:       false,
-            demoted_from_search: self.demoted_from.eq_ignore_ascii_case("search")
-               && !self.pool.eq_ignore_ascii_case("search"),
-            suspended:           false,
-            retired:             false,
-            ct0_dead:            false,
-            resting:             HashMap::new(),
+            limited:                  self.limited,
+            limited_at:               self.limited_at,
+            rejected:                 false,
+            filters_cleared:          false,
+            filters_failed:           false,
+            filters_retry_at:         0,
+            apis:                     self.apis,
+            refused_ops:              HashMap::new(),
+            verified_ops:             HashMap::new(),
+            profile_strikes:          0,
+            profile_banned:           false,
+            search_404_at:            None,
+            search_only:              pool.is_search(),
+            search_pass_only:         pool == AccountPool::SearchPass,
+            search_banned:            false,
+            demoted_from_search:      demoted_from.is_search() && !pool.is_search(),
+            demoted_from_search_pass: demoted_from == AccountPool::SearchPass && !pool.is_search(),
+            suspended:                false,
+            retired:                  false,
+            ct0_dead:                 false,
+            resting:                  HashMap::new(),
          },
       )
    }
@@ -724,8 +803,39 @@ mod tests {
       };
       let (_, limits) = session.into_credentials_and_limits();
       assert!(limits.search_only);
+      assert!(!limits.search_pass_only);
       assert!(limits.refuses("x/UserTweets"));
       assert!(!limits.refuses("ph2f/SearchTimeline"));
+   }
+
+   #[test]
+   fn an_imported_search_pass_account_starts_search_pass_only() {
+      let session = Session {
+         id: 10,
+         pool: "search-pass".to_owned(),
+         ..Session::default()
+      };
+      let (_, limits) = session.into_credentials_and_limits();
+      assert!(limits.search_only);
+      assert!(limits.search_pass_only);
+      assert!(limits.refuses("x/UserTweets"));
+      assert!(!limits.refuses("account/settings"));
+      assert!(!limits.refuses("ph2f/SearchTimeline"));
+   }
+
+   #[test]
+   fn demoted_search_pass_account_remembers_its_origin_pool() {
+      let session = Session {
+         id: 11,
+         pool: String::new(),
+         demoted_from: "search-pass".to_owned(),
+         ..Session::default()
+      };
+      let (_, limits) = session.into_credentials_and_limits();
+      assert!(!limits.search_only);
+      assert!(!limits.search_pass_only);
+      assert!(limits.demoted_from_search);
+      assert!(limits.demoted_from_search_pass);
    }
 
    #[test]

@@ -44,6 +44,7 @@ pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Marku
       @if let Some(acct) = runtime {
          @let quarantined = matches!(acct.pool, "ct0_dead" | "rejected");
          @let in_search = acct.pool == "search";
+         @let in_search_pass = acct.pool == "search-pass";
          @let in_clean_view = acct.pool == "view" && !acct.demoted_from_search;
          @let is_cookie = acct.kind == SessionKind::Cookie;
          section class="admin-stats-panel admin-actions-card" data-session=(id) {
@@ -79,6 +80,16 @@ pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Marku
                   disabled[in_search || quarantined]
                {
                   "Move to Search Pool"
+               }
+               button
+                  id="move-pool-search-pass"
+                  class="admin-btn"
+                  type="button"
+                  data-session=(id)
+                  data-pool="search-pass"
+                  disabled[in_search_pass || quarantined]
+               {
+                  "Move to Search-Pass Pool"
                }
                button
                   id="move-pool-view"

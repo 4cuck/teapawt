@@ -40,9 +40,9 @@ use error::{
 
 const USAGE: &str = "Usage:
   import-accounts migrate
-  import-accounts import <file> <search|view>
+  import-accounts import <file> <search|search-pass|view>
   import-accounts stats
-  import-accounts <file> [search|view]  (legacy syntax; default: view)
+  import-accounts <file> [search|search-pass|view]  (legacy syntax; default: view)
 
 Migration reads TEAPOT_SESSIONS_FILE (default: sessions.jsonl) and
 TEAPOT_COOKIES_FILE (default: session-cookies.json).
@@ -53,22 +53,15 @@ Import does not validate accounts against X; provide both auth_token and ct0.";
 enum Command {
    Help,
    Migrate,
-   Import { path: PathBuf, pool: Pool },
+   Import { path: PathBuf, pool: types::AccountPool },
    Stats,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum Pool {
-   Search,
-   View,
-}
-
-fn parse_pool(pool: &OsString) -> std::result::Result<Pool, &'static str> {
-   match pool.to_str() {
-      Some("search") => Ok(Pool::Search),
-      Some("view") => Ok(Pool::View),
-      _ => Err("use search or view for the pool"),
-   }
+fn parse_pool(pool: &OsString) -> std::result::Result<types::AccountPool, &'static str> {
+   pool
+      .to_str()
+      .and_then(types::AccountPool::parse)
+      .ok_or("use search, search-pass, or view for the pool")
 }
 
 fn parse_command(args: &[OsString]) -> std::result::Result<Command, &'static str> {
@@ -89,7 +82,7 @@ fn parse_command(args: &[OsString]) -> std::result::Result<Command, &'static str
       [path, ..] if path.to_str().is_some_and(|path| path.starts_with('-')) => {
          Err("unexpected option")
       },
-      [path] => Ok(import(path, Pool::View)),
+      [path] => Ok(import(path, types::AccountPool::View)),
       [path, pool] => Ok(import(path, parse_pool(pool)?)),
       _ => Err("missing or unexpected arguments"),
    }
@@ -109,8 +102,8 @@ fn legacy_path(variable: &'static str, default: &str) -> Result<String> {
 
 fn print_stats(stats: Stats) {
    println!(
-      "total={} search={} view={} ct0_dead={} rejected={}",
-      stats.total, stats.search, stats.view, stats.ct0_dead, stats.rejected
+      "total={} search={} search_pass={} view={} ct0_dead={} rejected={}",
+      stats.total, stats.search, stats.search_pass, stats.view, stats.ct0_dead, stats.rejected
    );
 }
 
@@ -129,7 +122,7 @@ async fn run(command: Command) -> Result<()> {
             .await
             .map_err(|_| Error::Internal("could not read the UTF-8 import file".to_owned()))?;
          let store = AccountStore::connect().await?;
-         let summary = store.import_text(&text, pool == Pool::Search).await?;
+         let summary = store.import_text(&text, pool).await?;
          println!(
             "imported={} duplicates={} invalid={}",
             summary.imported, summary.duplicates, summary.invalid
@@ -207,11 +200,28 @@ mod tests {
    #[test]
    fn routes_explicit_and_legacy_imports_to_the_expected_pool() {
       for (args, pool) in [
-         (&["import", "input file.txt", "search"][..], Pool::Search),
-         (&["import", "input file.txt", "view"][..], Pool::View),
-         (&["input file.txt", "search"][..], Pool::Search),
-         (&["input file.txt", "view"][..], Pool::View),
-         (&["input file.txt"][..], Pool::View),
+         (
+            &["import", "input file.txt", "search"][..],
+            types::AccountPool::Search,
+         ),
+         (
+            &["import", "input file.txt", "search-pass"][..],
+            types::AccountPool::SearchPass,
+         ),
+         (
+            &["import", "input file.txt", "view"][..],
+            types::AccountPool::View,
+         ),
+         (
+            &["input file.txt", "search"][..],
+            types::AccountPool::Search,
+         ),
+         (
+            &["input file.txt", "search-pass"][..],
+            types::AccountPool::SearchPass,
+         ),
+         (&["input file.txt", "view"][..], types::AccountPool::View),
+         (&["input file.txt"][..], types::AccountPool::View),
       ] {
          assert_eq!(
             parse(args),
@@ -225,7 +235,7 @@ mod tests {
          parse(&["import", "stats", "view"]),
          Ok(Command::Import {
             path: "stats".into(),
-            pool: Pool::View,
+            pool: types::AccountPool::View,
          })
       );
    }
@@ -247,7 +257,7 @@ mod tests {
       }
       assert_eq!(
          parse(&["import", "input.txt", "secret"]),
-         Err("use search or view for the pool")
+         Err("use search, search-pass, or view for the pool")
       );
    }
 }

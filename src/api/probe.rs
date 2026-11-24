@@ -305,7 +305,9 @@ impl ApiClient {
          .sessions
          .account_state(session_id)
          .await
-         .is_some_and(|st| st.home_pool == "search" || st.demoted_from_search);
+         .is_some_and(|st| {
+            matches!(st.home_pool, "search" | "search-pass") || st.demoted_from_search
+         });
 
       if wants_search {
          return match self.probe_search_capable(session_id).await {

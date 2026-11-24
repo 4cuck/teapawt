@@ -1610,7 +1610,14 @@ impl ApiClient {
    where
       T: DeserializeOwned,
    {
-      let key = Self::inflight_key(endpoint, variables, field_toggles);
+      let key = if endpoint.ends_with("/SearchTimeline") && budget::has_search_pass() {
+         format!(
+            "pass\0{}",
+            Self::inflight_key(endpoint, variables, field_toggles)
+         )
+      } else {
+         Self::inflight_key(endpoint, variables, field_toggles)
+      };
       let guard = match self.join_or_lead(key) {
          InflightTicket::Follower(mut rx) => {
             if rx.changed().await.is_ok()
@@ -3135,9 +3142,20 @@ mod tests {
          ".x.com\tTRUE\t/\tTRUE\t0\tct0\timported-ct0\n",
          ".x.com\tTRUE\t/\tTRUE\t0\tguest_id\timported-guest\n",
       );
-      assert_eq!(store.import_text(export, true).await.unwrap().imported, 1);
       assert_eq!(
-         store.import_text(export, false).await.unwrap().duplicates,
+         store
+            .import_text(export, crate::types::AccountPool::Search)
+            .await
+            .unwrap()
+            .imported,
+         1
+      );
+      assert_eq!(
+         store
+            .import_text(export, crate::types::AccountPool::View)
+            .await
+            .unwrap()
+            .duplicates,
          1
       );
       assert_eq!(

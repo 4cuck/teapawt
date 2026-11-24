@@ -104,6 +104,13 @@ fn scope_heading(query: &OutAccountsQuery) -> (&'static str, &'static str) {
                    SearchTimeline (excludes ct0_dead and rejected pools).",
                )
             },
+            Some("search-pass") => {
+               (
+                  "Search-pass pool — Out / unverified",
+                  "Active search-pass pool accounts currently out of rotation or unverified for \
+                   SearchTimeline (excludes ct0_dead and rejected pools).",
+               )
+            },
             Some("view") => {
                (
                   "View pool — Out / unverified",
@@ -199,13 +206,19 @@ pub(crate) fn out_accounts(
    let active_reason = query.reason.as_deref();
    let active_sort = query.sort.as_deref().unwrap_or("priority");
 
-   let tabs: [(&str, Option<&str>, Option<&str>, usize); 8] = [
+   let tabs: [(&str, Option<&str>, Option<&str>, usize); 9] = [
       ("Active out", None, None, data.counts.all_out),
       (
          "SearchTimeline",
          Some("SearchTimeline"),
          None,
          data.counts.search_timeline,
+      ),
+      (
+         "Search-pass",
+         None,
+         Some("search-pass"),
+         data.counts.search_pass,
       ),
       (
          "UserTweets (view)",
@@ -245,8 +258,8 @@ pub(crate) fn out_accounts(
       ),
    ];
 
-   let search_mode_default =
-      op == Some("SearchTimeline") || pool == Some("demoted") || pool == Some("search");
+   let search_mode_default = op == Some("SearchTimeline")
+      || matches!(pool, Some("demoted" | "search" | "search-pass"));
 
    frame(theme, heading, "out", None, html! {
       header class="admin-page-header" {
@@ -402,12 +415,14 @@ fn account_row(row: &OutAccountRow, search_mode_default: bool) -> Markup {
    let is_cookie = entry.kind == SessionKind::Cookie;
    let can_export = is_cookie && entry.has_auth_token;
    let quarantined = matches!(entry.pool, "ct0_dead" | "rejected");
-   let quick_probe_mode =
-      if search_mode_default || entry.home_pool == "search" || entry.demoted_from_search {
-         "search"
-      } else {
-         "health"
-      };
+   let quick_probe_mode = if search_mode_default
+      || matches!(entry.home_pool, "search" | "search-pass")
+      || entry.demoted_from_search
+   {
+      "search"
+   } else {
+      "health"
+   };
    let quick_probe_label = if quick_probe_mode == "search" {
       "Search Probe"
    } else {
@@ -672,6 +687,7 @@ mod tests {
          counts:         OutOperationCounts {
             all_out:             15,
             search_timeline:     3,
+            search_pass:         0,
             user_tweets:         12,
             user_by_screen_name: 12,
             tweet_detail:        12,

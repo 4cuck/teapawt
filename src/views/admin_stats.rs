@@ -964,6 +964,7 @@ fn clearance_card(status: &ClearanceStatus) -> Markup {
 pub(super) fn pool_badge_class(pool: &str) -> &'static str {
    match pool {
       "search" => "admin-badge admin-badge--search",
+      "search-pass" => "admin-badge admin-badge--ok",
       "ct0_dead" => "admin-badge admin-badge--warn",
       "rejected" => "admin-badge admin-badge--bad",
       _ => "admin-badge admin-badge--view",
@@ -978,14 +979,14 @@ fn pools_section(
 ) -> Markup {
    let pool_value = stored_pool
       .map(|(search, view)| format!("{search} / {view}"))
-      .unwrap_or_else(|| format!("{} / {}", census.search, census.view));
+      .unwrap_or_else(|| format!("{} / {}", census.search + census.search_pass, census.view));
 
    html! {
       section id="stats-pools" class="admin-section" aria-labelledby="stats-pool-title" {
          div class="admin-section-heading" {
             div {
                h2 id="stats-pool-title" { "Live account pools & operation capacity" }
-               p { "Real-time slot states across active search and view pools. Permanently rejected/locked and stale-ct0 accounts are separated into their own pools so active utilization stays accurate." }
+               p { "Real-time slot states across active search, search-pass, and view pools. Permanently rejected/locked and stale-ct0 accounts are separated into their own pools so active utilization stays accurate." }
             }
             a class="admin-btn" href="/admin/import" { "Import accounts" }
          }
@@ -996,9 +997,10 @@ fn pools_section(
                "Active search / view",
                Some(pool_value),
                &format!(
-                  "{} loaded ({} search · {} view · {} ct0_dead · {} rejected)",
+                  "{} loaded ({} search · {} search-pass · {} view · {} ct0_dead · {} rejected)",
                   census.total,
                   census.search,
+                  census.search_pass,
                   census.view,
                   census.ct0_dead_pool,
                   census.rejected_pool
@@ -1145,7 +1147,11 @@ fn operation_row(op: &OperationPool) -> Markup {
       cursor_x = (cursor_x + width).min(100.0);
    }
 
-   let out_href = format!("/admin/stats/out?op={}", op.operation);
+   let out_href = if op.pool == "search-pass" {
+      "/admin/stats/out?pool=search-pass".to_owned()
+   } else {
+      format!("/admin/stats/out?op={}", op.operation)
+   };
    let out_rect = (op.out > 0).then(|| {
       let raw_width = (op.out as f64 * 100.0 / total).clamp(0.0, 100.0);
       let width = raw_width.max(3.0).min(100.0);
@@ -1153,11 +1159,7 @@ fn operation_row(op: &OperationPool) -> Markup {
       (format!("{x:.2}"), format!("{width:.2}"))
    });
 
-   let pool_badge = if op.pool == "search" {
-      "admin-badge admin-badge--search"
-   } else {
-      "admin-badge admin-badge--view"
-   };
+   let pool_badge = pool_badge_class(op.pool);
 
    html! {
       tr {

@@ -67,6 +67,7 @@ use crate::{
       SearchAccountSummary,
    },
    types::{
+      AccountPool,
       Prefs,
       operation_name,
    },
@@ -309,7 +310,7 @@ impl OutAccountsQuery {
             },
             "pool" => {
                parsed.pool = match trimmed {
-                  "search" | "view" | "demoted" | "ct0_dead" | "rejected" => {
+                  "search" | "search-pass" | "view" | "demoted" | "ct0_dead" | "rejected" => {
                      Some(trimmed.to_owned())
                   },
                   _ => None,
@@ -569,8 +570,8 @@ async fn snapshot(state: &AppState, minutes: i32) -> Option<Dashboard> {
       let data = data.ok()?;
       let pool = pool
          .ok()
-         .map(|stats| (stats.search, stats.view))
-         .or_else(|| Some((census.search as i64, census.view as i64)));
+         .map(|stats| (stats.search + stats.search_pass, stats.view))
+         .or_else(|| Some(((census.search + census.search_pass) as i64, census.view as i64)));
       let search_accounts = build_search_account_rows(
          state,
          search_summaries.unwrap_or_default(),
@@ -828,7 +829,12 @@ async fn investigation(state: &AppState, query: &InvestigationQuery) -> Option<I
    let pool = query
       .pool
       .as_deref()
-      .filter(|pool| matches!(*pool, "search" | "view" | "ct0_dead" | "rejected"));
+      .filter(|pool| {
+         matches!(
+            *pool,
+            "search" | "search-pass" | "view" | "ct0_dead" | "rejected"
+         )
+      });
    let status = query
       .status
       .as_deref()
@@ -1456,27 +1462,23 @@ async fn set_pool(
    let Ok(payload) = serde_json::from_slice::<PoolUpdateRequest>(&body) else {
       return (
          StatusCode::BAD_REQUEST,
-         "Expected JSON {\"pool\": \"search\" | \"view\"}.",
+         "Expected JSON {\"pool\": \"search\" | \"search-pass\" | \"view\"}.",
       )
          .into_response();
    };
-   let to_search = match payload.pool.trim() {
-      "search" => true,
-      "view" => false,
-      _ => {
-         return (
-            StatusCode::BAD_REQUEST,
-            "Pool must be \"search\" or \"view\".",
-         )
-            .into_response();
-      },
+   let Some(target_pool) = AccountPool::parse(&payload.pool) else {
+      return (
+         StatusCode::BAD_REQUEST,
+         "Pool must be \"search\", \"search-pass\", or \"view\".",
+      )
+         .into_response();
    };
-   match state.api.sessions.set_account_pool(id, to_search).await {
+   match state.api.sessions.set_account_pool(id, target_pool).await {
       Ok(changed) => {
-         if to_search {
+         if target_pool.is_search() {
             state.api.wake_search_check();
          }
-         let fallback_pool = if to_search { "search" } else { "view" };
+         let fallback_pool = target_pool.as_str();
          let after_pool = state
             .api
             .sessions

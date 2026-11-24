@@ -57,7 +57,8 @@ pub async fn snowflake_guard(
 }
 
 /// Bind the caller to the request so the API client can bill upstream calls to
-/// it without every route having to thread it through.
+/// it and route paid search-pass requests to the dedicated pool without every
+/// route having to thread it through.
 pub async fn client_middleware(
    State(state): State<AppState>,
    ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -67,8 +68,14 @@ pub async fn client_middleware(
    let origin =
       crate::utils::host::origin_from_headers(request.headers(), state.config.url_prefix());
    let client = budget::client_from(peer.ip(), request.headers(), &state.trusted_proxies);
+   let jar = CookieJar::from_headers(request.headers());
    crate::utils::host::scope(origin, async move {
-      budget::CLIENT.scope(client, next.run(request)).await
+      budget::CLIENT
+         .scope(client, async move {
+            let has_pass = state.passes.admits(&jar);
+            budget::SEARCH_PASS.scope(has_pass, next.run(request)).await
+         })
+         .await
    })
    .await
 }

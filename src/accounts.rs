@@ -52,6 +52,7 @@ use crate::{
       Result,
    },
    types::{
+      AccountPool,
       Session,
       SessionKind,
    },
@@ -61,6 +62,7 @@ const DEFAULT_URL: &str = "host=/var/run/postgresql user=teapot dbname=teapot";
 const LOCK_KEY: i64 = 0x7465_6170_6163_6374;
 const MIGRATION: &str = "legacy-v1";
 const SEARCH: &str = "search";
+const SEARCH_PASS: &str = "search-pass";
 const AUTH: &str = "auth_token";
 const CSRF: &str = "ct0";
 const STATS_CACHE_TTL: Duration = Duration::from_secs(5);
@@ -110,11 +112,12 @@ type CachedStats = Option<(Instant, Stats)>;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Stats {
-   pub total:    i64,
-   pub search:   i64,
-   pub view:     i64,
-   pub ct0_dead: i64,
-   pub rejected: i64,
+   pub total:       i64,
+   pub search:      i64,
+   pub search_pass: i64,
+   pub view:        i64,
+   pub ct0_dead:    i64,
+   pub rejected:    i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -350,8 +353,8 @@ impl AccountStore {
       client
          .execute(
             "UPDATE account_sessions
-          SET body = body || '{\"pool\":\"\",\"demoted_from\":\"search\"}'::jsonb
-          WHERE id = $1 AND lower(body->>'pool') = 'search'",
+          SET body = body || jsonb_build_object('pool', '', 'demoted_from', lower(body->>'pool'))
+          WHERE id = $1 AND lower(body->>'pool') IN ('search', 'search-pass')",
             &[&id],
          )
          .await
@@ -360,54 +363,49 @@ impl AccountStore {
       Ok(())
    }
 
-   /// Whether this account was imported into the search pool or demoted from
-   /// it.
+   /// The active pool this account was imported for (or demoted from).
    ///
    /// Read from the store rather than the live slot, because the slot's limits
    /// are what a probe is trying to correct.
-   pub async fn is_search_account(&self, id: i64) -> bool {
+   pub async fn origin_pool(&self, id: i64) -> AccountPool {
       let client = self.client.lock().await;
-      client
+      let Ok(Some(row)) = client
          .query_opt(
-            "SELECT 1 FROM account_sessions
-          WHERE id = $1
-            AND (lower(body->>'pool') = 'search' OR lower(body->>'demoted_from') = 'search')",
-            &[&id],
-         )
-         .await
-         .ok()
-         .flatten()
-         .is_some()
-   }
-
-   /// Put an account back into the pool it was imported for.
-   pub async fn restore_to_search(&self, id: i64) -> Result<()> {
-      let client = self.client.lock().await;
-      require_migration(&*client).await?;
-      client
-         .execute(
-            "UPDATE account_sessions
-          SET body = (body - 'demoted_from') || '{\"pool\":\"search\"}'::jsonb
+            "SELECT lower(COALESCE(body->>'pool', '')), lower(COALESCE(body->>'demoted_from', ''))
+          FROM account_sessions
           WHERE id = $1",
             &[&id],
          )
          .await
-         .map_err(db_error)?;
-      self.invalidate_stats_cache();
-      Ok(())
+      else {
+         return AccountPool::View;
+      };
+      let pool: String = row.try_get(0).unwrap_or_default();
+      let demoted_from: String = row.try_get(1).unwrap_or_default();
+      if pool == SEARCH_PASS {
+         AccountPool::SearchPass
+      } else if pool == SEARCH {
+         AccountPool::Search
+      } else if demoted_from == SEARCH_PASS {
+         AccountPool::SearchPass
+      } else if demoted_from == SEARCH {
+         AccountPool::Search
+      } else {
+         AccountPool::View
+      }
    }
 
-   /// Explicitly move an account into the view pool, clearing any demotion
-   /// marker.
-   pub async fn move_to_view(&self, id: i64) -> Result<()> {
+   /// Explicitly assign an account to `pool`, clearing any demotion marker.
+   pub async fn set_pool(&self, id: i64, pool: AccountPool) -> Result<()> {
       let client = self.client.lock().await;
       require_migration(&*client).await?;
+      let stored = pool.stored();
       client
          .execute(
             "UPDATE account_sessions
-          SET body = (body - 'demoted_from') || '{\"pool\":\"\"}'::jsonb
+          SET body = (body - 'demoted_from') || jsonb_build_object('pool', $2::text)
           WHERE id = $1",
-            &[&id],
+            &[&id, &stored],
          )
          .await
          .map_err(db_error)?;
@@ -435,7 +433,7 @@ impl AccountStore {
       tx.commit().await.map_err(db_error)
    }
 
-   pub async fn import_text(&self, text: &str, search: bool) -> Result<ImportSummary> {
+   pub async fn import_text(&self, text: &str, pool: AccountPool) -> Result<ImportSummary> {
       let (accounts, mut summary) = parse_import(text);
       let mut client = self.client.lock().await;
       let tx = client.transaction().await.map_err(db_error)?;
@@ -452,6 +450,7 @@ impl AccountStore {
             .map_err(db_error)?;
          let insert_account = tx.prepare(INSERT_ACCOUNT).await.map_err(db_error)?;
          let insert_cookie = tx.prepare(INSERT_COOKIE).await.map_err(db_error)?;
+         let pool_name = pool.stored();
          for (mut session, jar) in accounts {
             if tx
                .query_opt(&exists, &[&Secret(&session.auth_token)])
@@ -466,8 +465,8 @@ impl AccountStore {
                .checked_add(1)
                .ok_or_else(|| store_error("account IDs are exhausted"))?;
             session.id = max_id;
-            if search {
-               SEARCH.clone_into(&mut session.pool);
+            if !pool_name.is_empty() {
+               pool_name.clone_into(&mut session.pool);
             }
             let body = session_body(&session)?;
             tx.execute(&insert_account, &[&session.id, &Secret(body)])
@@ -672,6 +671,12 @@ impl AccountStore {
                          AND NOT COALESCE((l.body->>'retired')::boolean, false)
                          AND NOT COALESCE((l.body->>'ct0_dead')::boolean, false)
                          AND lower(COALESCE(s.body->>'pool', '')) = 'search'
+                   ),
+                   count(*) FILTER (
+                      WHERE NOT COALESCE((l.body->>'rejected')::boolean, false)
+                         AND NOT COALESCE((l.body->>'retired')::boolean, false)
+                         AND NOT COALESCE((l.body->>'ct0_dead')::boolean, false)
+                         AND lower(COALESCE(s.body->>'pool', '')) = 'search-pass'
                    )
                 FROM account_sessions s
                 LEFT JOIN session_limits l ON l.id = s.id",
@@ -683,28 +688,35 @@ impl AccountStore {
          let rejected: i64 = row.try_get(1).map_err(db_error)?;
          let ct0_dead: i64 = row.try_get(2).map_err(db_error)?;
          let search: i64 = row.try_get(3).map_err(db_error)?;
+         let search_pass: i64 = row.try_get(4).map_err(db_error)?;
          Stats {
             total,
             search,
-            view: total - rejected - ct0_dead - search,
+            search_pass,
+            view: total - rejected - ct0_dead - search - search_pass,
             ct0_dead,
             rejected,
          }
       } else {
          let row = client
             .query_one(
-               "SELECT count(*), count(*) FILTER (WHERE lower(body->>'pool') = 'search') FROM \
-                account_sessions",
+               "SELECT
+                   count(*),
+                   count(*) FILTER (WHERE lower(body->>'pool') = 'search'),
+                   count(*) FILTER (WHERE lower(body->>'pool') = 'search-pass')
+                FROM account_sessions",
                &[],
             )
             .await
             .map_err(db_error)?;
-         let total = row.try_get(0).map_err(db_error)?;
-         let search = row.try_get(1).map_err(db_error)?;
+         let total: i64 = row.try_get(0).map_err(db_error)?;
+         let search: i64 = row.try_get(1).map_err(db_error)?;
+         let search_pass: i64 = row.try_get(2).map_err(db_error)?;
          Stats {
             total,
             search,
-            view: total - search,
+            search_pass,
+            view: total - search - search_pass,
             ct0_dead: 0,
             rejected: 0,
          }
@@ -998,10 +1010,18 @@ fn is_hex(field: &str, length: usize) -> bool {
 }
 
 fn parse_export(line: &str) -> Option<Session> {
-   let fields: Vec<_> = line
-      .split(if line.contains("----") { "----" } else { ":" })
-      .map(str::trim)
-      .collect();
+   for separator in ["----", "|", ":"] {
+      if line.contains(separator)
+         && let Some(session) = parse_export_with(line, separator)
+      {
+         return Some(session);
+      }
+   }
+   None
+}
+
+fn parse_export_with(line: &str, separator: &str) -> Option<Session> {
+   let fields: Vec<_> = line.split(separator).map(str::trim).collect();
    let username = *fields.first()?;
    let credentials = fields.get(1..)?;
    let auth_token = credentials
@@ -1100,13 +1120,18 @@ mod tests {
       let ct0 = "b".repeat(160);
       let text = format!(
          "# comment\n \
-          first:pass:mail:extra:{ct0}:{auth}\nsecond----pass----mail----{auth}----{ct0}\nmissing:\
+          first:pass:mail:extra:{ct0}:{auth}\nsecond----pass----mail----{auth}----{ct0}\n\
+          third|p:a*s|mail@example.com|{auth}|{ct0}|3PUPQYSOGDNPMODH\n\
+          fourth:p|ass:mail@example.com:{auth}:{ct0}\nmissing:\
           pass:{auth}\n"
       );
       let (accounts, summary) = parse_import(&text);
       assert_eq!(summary.invalid, 1);
-      assert_eq!(accounts.len(), 2);
-      for ((session, jar), name) in accounts.iter().zip(["first", "second"]) {
+      assert_eq!(accounts.len(), 4);
+      for ((session, jar), name) in accounts
+         .iter()
+         .zip(["first", "second", "third", "fourth"])
+      {
          assert_eq!(session.username, name);
          assert_eq!(session.auth_token, auth);
          assert_eq!(session.ct0, ct0);

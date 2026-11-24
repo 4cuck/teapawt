@@ -239,7 +239,7 @@ pub fn render_buy(page: &BuyPage<'_>) -> Markup {
        section class="pass-hero" {
            span class="pass-eyebrow" { "Search pass" }
            h1 { "Search without the checkbox" }
-           p class="pass-lede" { "Skip the Cloudflare check on search and on search RSS feeds." }
+           p class="pass-lede" { "Skip the Cloudflare check on search and search RSS feeds, with a dedicated search-pass account pool for better response times and fewer rate limits." }
            p class="pass-price" { strong { (page.price) } span { "a month" } }
        }
        ul class="pass-perks" {

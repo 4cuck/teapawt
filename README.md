@@ -122,7 +122,7 @@ This reads `TEAPOT_SESSIONS_FILE` (default: `sessions.jsonl`) and optional `TEAP
 
 `import-accounts import` (and the live admin upload form at `/admin/import`) accepts:
 
-- `username:...:ct0:auth_token` or `username----...----auth_token----ct0` lines (40-hex `auth_token`, 160-hex `ct0`)
+- `username:...:ct0:auth_token`, `username|...|auth_token|ct0|...`, or `username----...----auth_token----ct0` lines (40-hex `auth_token`, 160-hex `ct0`)
 - `Cookie: auth_token=...; ct0=...` headers (or bare semicolon-separated cookie pairs)
 - JSON objects or arrays (`{ "auth_token": "...", "ct0": "..." }`, `{ "cookies": ... }`, or browser cookie-editor JSON exports)
 - Netscape HTTP cookie files

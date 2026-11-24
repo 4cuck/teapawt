@@ -167,6 +167,7 @@ async fn pool_counts(State(state): State<AppState>) -> impl IntoResponse {
             [(header::CACHE_CONTROL, "public, max-age=60")],
             Json(serde_json::json!({
                "search": stats.search,
+               "search_pass": stats.search_pass,
                "view": stats.view,
                "ct0_dead": stats.ct0_dead,
                "rejected": stats.rejected,
@@ -209,6 +210,10 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
        @if let Some(stats) = pool_counts {
            section class="pool-counter" aria-label="Account inventory" {
                span class="pool-counter-item" title="Accounts in the search pool" { (stats.search) " search" }
+               @if stats.search_pass > 0 {
+                   span class="pool-counter-sep" aria-hidden="true" { "·" }
+                   span class="pool-counter-item" title="Accounts in the search-pass pool" { (stats.search_pass) " search-pass" }
+               }
                span class="pool-counter-sep" aria-hidden="true" { "·" }
                span class="pool-counter-item" title="Accounts in the view pool" { (stats.view) " view" }
                span class="pool-counter-sep" aria-hidden="true" { "·" }
@@ -262,11 +267,15 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
          .then_some(gate.pass_minutes);
       crate::views::anti_ddos::gate_notice(check_minutes)
    });
-   let search_note = state.config.turnstile.guards_search().then(|| {
-      let price = crate::donations::format_usd(state.passes.price_cents());
-      search_announcement(&price)
-   });
+   let price = crate::donations::format_usd(state.passes.price_cents());
+   let search_pass_note = search_pass_pool_announcement(&price);
+   let search_note = state
+      .config
+      .turnstile
+      .guards_search()
+      .then(|| search_announcement(&price));
    let notice = Some(html! {
+       (search_pass_note)
        @if let Some(search_note) = search_note { (search_note) }
        @if let Some(gate_note) = gate_note { (gate_note) }
        @if let Some(drive) = drive { (drive) }
@@ -294,6 +303,25 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
    // shared or CDN cache must not store one visitor's copy for everyone else.
    no_store(response.headers_mut());
    response
+}
+
+fn search_pass_pool_announcement(price: &str) -> maud::Markup {
+   html! {
+       aside class="home-announce" {
+           strong { "Dedicated account pool for search pass holders" }
+           p {
+               "People who pay for a "
+               a href="/search-pass" { "search pass" }
+               " (" (price) " a month) now get a dedicated search-pass account pool for better "
+               "response times and eventually zero rate limits. If the search-pass pool ever "
+               "hits its rate limit, searches fall back to the public pool automatically."
+           }
+           p {
+               "Right now accounts keep getting suspended on X, so keeping a separate pool makes "
+               "sure paid users always have a good experience without competing with the public pool."
+           }
+       }
+   }
 }
 
 fn search_announcement(price: &str) -> maud::Markup {
@@ -484,5 +512,16 @@ mod tests {
       assert!(html.contains("href=\"/search-pass\""));
       assert!(html.contains("$15 a month"));
       assert!(html.contains("5 minutes after the checkbox."));
+   }
+
+   #[test]
+   fn front_page_announces_dedicated_search_pass_pool() {
+      let html = search_pass_pool_announcement("$15").into_string();
+      assert!(html.contains("Dedicated account pool for search pass holders"));
+      assert!(html.contains("better response times and eventually zero rate limits"));
+      assert!(html.contains("accounts keep getting suspended"));
+      assert!(html.contains("paid users always have a good experience"));
+      assert!(html.contains("href=\"/search-pass\""));
+      assert!(html.contains("$15 a month"));
    }
 }

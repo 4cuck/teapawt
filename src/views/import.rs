@@ -15,9 +15,12 @@ use super::layout::{
    STYLE_CSS,
    theme_stylesheet,
 };
-use crate::accounts::{
-   ImportSummary,
-   Stats,
+use crate::{
+   accounts::{
+      ImportSummary,
+      Stats,
+   },
+   types::AccountPool,
 };
 
 const IMPORT_CSS: &str = "/css/import.css?v=4";
@@ -100,6 +103,7 @@ pub(crate) fn figures(snapshot: Option<&Snapshot>) -> Markup {
          dl class="import-stats" {
             div class="import-stat-card" { dt { "Total" } dd { (snapshot.stats.total) } }
             div class="import-stat-card" { dt { "Search" } dd { (snapshot.stats.search) } }
+            div class="import-stat-card" { dt { "search-pass" } dd { (snapshot.stats.search_pass) } }
             div class="import-stat-card" { dt { "View" } dd { (snapshot.stats.view) } }
             @if snapshot.stats.ct0_dead > 0 {
                div class="import-stat-card" { dt { "Stale ct0" } dd { (snapshot.stats.ct0_dead) } }
@@ -164,7 +168,7 @@ pub(crate) fn admin(
    max_lines: usize,
    notice: Option<&AdminNotice>,
 ) -> Markup {
-   let search_selected = selected_pool == "search";
+   let selected = AccountPool::parse(selected_pool).unwrap_or(AccountPool::View);
    page(theme, "Import accounts", false, html! {
       section class="import-form-section" {
          h2 { "New batch" }
@@ -185,14 +189,15 @@ pub(crate) fn admin(
             div class="import-field" {
                label for="import-pool" { "Pool" }
                select id="import-pool" name="pool" required {
-                  option value="view" selected[!search_selected] { "View" }
-                  option value="search" selected[search_selected] { "Search" }
+                  option value="view" selected[selected == AccountPool::View] { "View" }
+                  option value="search" selected[selected == AccountPool::Search] { "Search" }
+                  option value="search-pass" selected[selected == AccountPool::SearchPass] { "Search-pass" }
                }
             }
             div class="import-field" {
                label for="import-accounts" { "Account data" }
                p class="import-help" id="import-help" {
-                  "Paste a colon- or dash-delimited account export, a Netscape cookie file, "
+                  "Paste a colon-, pipe-, or dash-delimited account export, a Netscape cookie file, "
                   "a JSON cookie export, or one Cookie header per line. Records missing "
                   code { "auth_token" } " or " code { "ct0" } " are skipped. Up to "
                   (max_lines) " lines and 256 KiB. Not shown after submit."
@@ -228,10 +233,17 @@ mod tests {
       let default_form = admin("Teapot", "token", "view", 1024, 10, None).into_string();
       assert!(default_form.contains("<option value=\"view\" selected>View</option>"));
       assert!(default_form.contains("<option value=\"search\">Search</option>"));
+      assert!(default_form.contains("<option value=\"search-pass\">Search-pass</option>"));
 
       let search_form = admin("Teapot", "token", "search", 1024, 10, None).into_string();
       assert!(search_form.contains("<option value=\"view\">View</option>"));
       assert!(search_form.contains("<option value=\"search\" selected>Search</option>"));
+      assert!(search_form.contains("<option value=\"search-pass\">Search-pass</option>"));
+
+      let pass_form = admin("Teapot", "token", "search-pass", 1024, 10, None).into_string();
+      assert!(pass_form.contains("<option value=\"view\">View</option>"));
+      assert!(pass_form.contains("<option value=\"search\">Search</option>"));
+      assert!(pass_form.contains("<option value=\"search-pass\" selected>Search-pass</option>"));
 
       let visitor_page = dashboard("Teapot", None, false).into_string();
       assert!(!visitor_page.contains(ADMIN_PATH));
