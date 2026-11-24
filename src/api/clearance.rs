@@ -480,10 +480,29 @@ async fn solve_inner(
 
    // 2. Deobfuscate: run the script's own string-table decoder in QuickJS to
    //    recover the alphabet and oneshot path, then parse the readable form.
-   //    A script that is already readable is parsed as-is. From here a failure
-   //    means the script *is* the challenge but the solver can't read it — a
-   //    real format change, so these trip the breaker.
-   let source = readable_main(&main_js).unwrap_or(main_js);
+   //    `readable_main` synthesises a script whose v2 markers are literal, so a
+   //    readable script always passes the v2 check below; the check only bites
+   //    the raw script, where the FNV prime is obfuscated (`507215678 ^ salt`)
+   //    and never literal. So deciding "format changed" from the raw script is a
+   //    false positive — which is exactly what tripped the breaker while a dozen
+   //    sibling sessions minted from the same script.
+   let source = if let Some(readable) = readable_main(&main_js) {
+      readable
+   } else if is_payload_encoder_v2(&main_js) {
+      // A script already in the clear (no string-table indirection): use as-is.
+      main_js
+   } else {
+      // The response IS a challenge (it carries `_cf_chl_opt`) but we could not
+      // deobfuscate it this time — a truncated body, a QuickJS hiccup under
+      // load, or a literal the decoder regex missed on this one response.
+      // Concurrent solves on the same script succeed, so this is not a format
+      // change; retry it. A real change fails every solve and still trips the
+      // consecutive-failure breaker.
+      return Err(SolveError::Transient(
+         "jsd main.js could not be deobfuscated this response (transient parse miss)".to_owned(),
+      ));
+   };
+   // A readable script that still fails the v2 check is a genuine format change.
    if !is_payload_encoder_v2(&source) {
       return Err(SolveError::Changed(
          "jsd encoder is not v2 (challenge changed)".to_owned(),
