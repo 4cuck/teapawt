@@ -73,7 +73,8 @@ pub struct Config {
    pub gif_transcoding: GifTranscodingConfig,
    #[serde(default)]
    pub donations:       DonationsConfig,
-   /// Search checkbox. Empty keys leave search open.
+   /// Cloudflare Turnstile keys. The search checkbox is `turnstile.search`;
+   /// Anti-DDoS uses the keys on its own.
    #[serde(default)]
    pub turnstile:       TurnstileConfig,
    /// Paid pass that skips the checkbox. Paid through the donation providers.
@@ -216,6 +217,10 @@ pub struct DonationsConfig {
 
 #[derive(Clone, Deserialize, Default)]
 pub struct TurnstileConfig {
+   /// Checkbox in front of search, search RSS, and quote search.
+   /// Anti-DDoS still uses the keys when this is false.
+   #[serde(default)]
+   pub search:     bool,
    #[serde(default, rename = "siteKey")]
    pub site_key:   String,
    #[serde(default, rename = "secretKey")]
@@ -226,6 +231,12 @@ impl TurnstileConfig {
    #[must_use]
    pub fn configured(&self) -> bool {
       !self.site_key.is_empty() && !self.secret_key.is_empty()
+   }
+
+   /// Search asks for the checkbox only when this is on and both keys are set.
+   #[must_use]
+   pub fn guards_search(&self) -> bool {
+      self.search && self.configured()
    }
 }
 
@@ -394,6 +405,7 @@ impl std::fmt::Debug for TurnstileConfig {
    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
       formatter
          .debug_struct("TurnstileConfig")
+         .field("search", &self.search)
          .field("configured", &self.configured())
          .finish()
    }

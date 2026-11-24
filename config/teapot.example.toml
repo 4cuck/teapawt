@@ -124,9 +124,11 @@ merchantId = 0
 secretKey = ""
 currency = "usd"
 
-# Checkbox shown before a search is sent upstream. Leave both empty to disable.
-# Create a Managed widget so the visitor has to press it. A pass lasts 5 minutes.
+# Checkbox shown before a search is sent upstream. Set search = true and both
+# keys to enable it. Create a Managed widget so the visitor has to press it.
+# A pass lasts 5 minutes. Anti-DDoS uses these keys even when search is false.
 [turnstile]
+search = false
 siteKey = ""
 secretKey = ""
 

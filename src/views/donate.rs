@@ -33,8 +33,7 @@ pub fn render_donate_page(
                "The counter resets on the 23rd. "
                "Viewing profiles and posts is covered by about 2,100 accounts. "
                "Search runs on over a thousand accounts. "
-               "Search asks for a Cloudflare Turnstile checkbox that lasts 5 minutes while the pool is this size. "
-               "Donations are what replace those accounts and turn that check off. "
+               "Donations replace those accounts as they get limited. "
                "Choose an amount from $1 to $10,000."
            }
            (money_meter(progress, false))

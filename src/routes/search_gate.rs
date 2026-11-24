@@ -1,4 +1,7 @@
 //! A five-minute search pass, granted by a checkbox Turnstile.
+//!
+//! Off unless `[turnstile] search = true` and both keys are set. Anti-DDoS
+//! uses the same keys on its own.
 
 use std::{
    collections::HashMap,
@@ -83,7 +86,7 @@ pub async fn admit(
    token: Option<&str>,
    prompt: Prompt<'_>,
 ) -> Result<(), Response> {
-   if !state.config.turnstile.configured() {
+   if !state.config.turnstile.guards_search() {
       return Ok(());
    }
    if pass_valid(&state.config.config.hmac_key, jar) || state.passes.admits(jar) {
@@ -118,7 +121,7 @@ pub async fn admit(
 /// and whitelisted addresses through.
 #[must_use]
 pub fn cleared(state: &AppState, jar: &CookieJar) -> bool {
-   !state.config.turnstile.configured()
+   !state.config.turnstile.guards_search()
       || pass_valid(&state.config.config.hmac_key, jar)
       || state.passes.admits(jar)
 }
@@ -284,6 +287,26 @@ mod tests {
 
    fn jar_with(value: &str) -> CookieJar {
       CookieJar::new().add(Cookie::new(COOKIE, value.to_owned()))
+   }
+
+   #[test]
+   fn search_stays_open_unless_the_checkbox_is_turned_on() {
+      let off = crate::config::TurnstileConfig::default();
+      assert!(!off.guards_search());
+
+      let keys_only = crate::config::TurnstileConfig {
+         search:     false,
+         site_key:   "site".into(),
+         secret_key: "secret".into(),
+      };
+      assert!(keys_only.configured());
+      assert!(!keys_only.guards_search());
+
+      let on = crate::config::TurnstileConfig {
+         search: true,
+         ..keys_only
+      };
+      assert!(on.guards_search());
    }
 
    #[test]

@@ -262,10 +262,13 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
          .then_some(gate.pass_minutes);
       crate::views::anti_ddos::gate_notice(check_minutes)
    });
-   let fingerprint_note = Some(fingerprint_announcement());
+   let search_note = state.config.turnstile.guards_search().then(|| {
+      let price = crate::donations::format_usd(state.passes.price_cents());
+      search_announcement(&price)
+   });
    let notice = Some(html! {
+       @if let Some(search_note) = search_note { (search_note) }
        @if let Some(gate_note) = gate_note { (gate_note) }
-       @if let Some(fingerprint_note) = fingerprint_note { (fingerprint_note) }
        @if let Some(drive) = drive { (drive) }
        @if let Some(firefox_note) = firefox_note { (firefox_note) }
    });
@@ -293,14 +296,19 @@ async fn home(State(state): State<AppState>, jar: CookieJar, headers: HeaderMap)
    response
 }
 
-fn fingerprint_announcement() -> maud::Markup {
+fn search_announcement(price: &str) -> maud::Markup {
    html! {
        aside class="home-announce" {
+           strong { "Search checkbox is staying" }
            p {
-               "Cloudflare Turnstile will remain on until we make more accounts. "
-               "Want to help debug Castle so we can get account creation working? Voluntarily "
-               a href="/admin/fingerprint" { "submit a browser fingerprint" }
-               " — nothing runs until you click submit."
+               "Cloudflare Turnstile on search is staying on. "
+               "Another 300 accounts were added, and then someone flooded the site with search requests."
+           }
+           p {
+               "To scrape the site, buy a "
+               a href="/search-pass" { "search pass" }
+               " (" (price) " a month) and use that. "
+               "A normal search still gets 5 minutes after the checkbox."
            }
        }
    }
@@ -468,9 +476,13 @@ mod tests {
    }
 
    #[test]
-   fn front_page_notice_links_to_fingerprint_capture() {
-      let html = fingerprint_announcement().into_string();
-      assert!(html.contains("Cloudflare Turnstile will remain on until we make more accounts."));
-      assert!(html.contains("href=\"/admin/fingerprint\""));
+   fn front_page_says_search_turnstile_stays_and_scraping_needs_a_pass() {
+      let html = search_announcement("$15").into_string();
+      assert!(html.contains("Cloudflare Turnstile on search is staying on."));
+      assert!(html.contains("Another 300 accounts were added"));
+      assert!(html.contains("flooded the site with search requests."));
+      assert!(html.contains("href=\"/search-pass\""));
+      assert!(html.contains("$15 a month"));
+      assert!(html.contains("5 minutes after the checkbox."));
    }
 }
