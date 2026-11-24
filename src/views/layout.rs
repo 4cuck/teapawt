@@ -14,7 +14,7 @@ use crate::{
 };
 
 pub const STYLE_CSS: &str = "/css/style.css?teapawt12";
-pub const CLEAN_CSS: &str = "/css/clean.css?teapawt47";
+pub const CLEAN_CSS: &str = "/css/clean.css?teapawt48";
 pub const FONTELLO_CSS: &str = "/css/fontello.css";
 
 pub(crate) fn theme_stylesheet(theme: &str) -> Option<String> {
