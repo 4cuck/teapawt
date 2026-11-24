@@ -9,6 +9,7 @@ use std::{
       HashSet,
    },
    env,
+   result::Result as StdResult,
    time::Duration,
 };
 
@@ -17,9 +18,15 @@ use tokio::{
    time::{
       Instant,
       sleep_until,
+      timeout,
    },
 };
-use tokio_postgres::NoTls;
+use tokio_postgres::{
+   Client,
+   Error as PgError,
+   NoTls,
+   Statement,
+};
 
 use crate::{
    error::{
@@ -35,6 +42,8 @@ const FLUSH_EVERY: Duration = Duration::from_secs(2);
 /// Flush before [`FLUSH_EVERY`] elapses once this many distinct accounts are
 /// dirty.
 const MAX_BATCH_SIZE: usize = 512;
+/// How long one attempt to reopen the connection may take.
+const REOPEN_PATIENCE: Duration = Duration::from_secs(5);
 
 const UPSERT: &str = "\
 INSERT INTO session_limits (id, body) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET body = \
@@ -51,20 +60,127 @@ pub struct LimitsDb {
 }
 
 pub struct Connected {
-   client: tokio_postgres::Client,
+   client: Client,
+}
+
+/// A connection, driven until the server or this process closes it.
+async fn open() -> StdResult<Client, PgError> {
+   let url = env::var("TEAPOT_LIMITS_DATABASE_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
+   let (client, connection) = tokio_postgres::connect(&url, NoTls).await?;
+   tokio::spawn(async move {
+      if let Err(err) = connection.await {
+         tracing::warn!("postgres limits connection closed: {err}");
+      }
+   });
+   Ok(client)
+}
+
+/// The writer's connection and the upsert prepared on it. A statement belongs
+/// to the connection that prepared it, so the two are replaced together.
+///
+/// PostgreSQL closes every session when it restarts, and when it recovers
+/// from one crashed backend. The writer used to keep the closed client: after
+/// one such recovery every flush failed, and no account's limits were saved,
+/// until this process was restarted as well.
+struct Writer {
+   client: Client,
+   upsert: Statement,
+}
+
+impl Writer {
+   async fn prepare(client: Client) -> StdResult<Self, PgError> {
+      let upsert = client.prepare(BATCH_UPSERT).await?;
+      Ok(Self { client, upsert })
+   }
+
+   /// A new connection, if the server is giving any out.
+   async fn reopen() -> Option<Self> {
+      let opened = timeout(REOPEN_PATIENCE, async {
+         Self::prepare(open().await?).await
+      })
+      .await;
+      match opened {
+         Ok(Ok(writer)) => {
+            tracing::info!("postgres limits connection reopened");
+            Some(writer)
+         },
+         Ok(Err(err)) => {
+            tracing::warn!("postgres limits connection not reopened: {err}");
+            None
+         },
+         Err(_) => {
+            tracing::warn!("postgres limits connection not reopened: no answer");
+            None
+         },
+      }
+   }
+
+   /// Send one batch. `false` when the connection closed under it, and the
+   /// server may not have it. A batch the server answered with an error is
+   /// not one to send again.
+   async fn send(&self, ids: &[i64], bodies: &[serde_json::Value]) -> bool {
+      if ids.is_empty() {
+         return true;
+      }
+      let Err(err) = self.client.execute(&self.upsert, &[&ids, &bodies]).await else {
+         return true;
+      };
+      tracing::warn!(rows = ids.len(), "postgres session update failed: {err}");
+      !self.client.is_closed()
+   }
+}
+
+/// Gather the accounts to write next into `pending`. `true` once every handle
+/// is dropped and no more will arrive.
+///
+/// With nothing pending this waits for one account, then for the rest until
+/// [`FLUSH_EVERY`] has passed or [`MAX_BATCH_SIZE`] are dirty. After a flush
+/// that did not reach the server (`unsent`) its accounts are pending already:
+/// the whole of `FLUSH_EVERY` then passes before the next attempt, however
+/// many are waiting, and the queue keeps emptying into the set meanwhile.
+async fn collect(
+   rx: &mut mpsc::UnboundedReceiver<i64>,
+   pending: &mut HashSet<i64>,
+   unsent: bool,
+) -> bool {
+   let enough = if unsent { usize::MAX } else { MAX_BATCH_SIZE };
+   if pending.is_empty() {
+      let Some(first) = rx.recv().await else {
+         return true;
+      };
+      pending.insert(first);
+   }
+   // Drain any IDs already buffered before arming the debounce timer.
+   while pending.len() < enough
+      && let Ok(extra) = rx.try_recv()
+   {
+      pending.insert(extra);
+   }
+   if pending.len() >= enough {
+      return false;
+   }
+   let timer = sleep_until(Instant::now() + FLUSH_EVERY);
+   tokio::pin!(timer);
+   while pending.len() < enough {
+      tokio::select! {
+         biased;
+         () = &mut timer => break,
+         next = rx.recv() => match next {
+            Some(id) => {
+               pending.insert(id);
+            },
+            None => return true,
+         },
+      }
+   }
+   false
 }
 
 impl Connected {
    pub async fn connect() -> Result<Self> {
-      let url = env::var("TEAPOT_LIMITS_DATABASE_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
-      let (client, connection) = tokio_postgres::connect(&url, NoTls)
+      let client = open()
          .await
          .map_err(|err| Error::InvalidConfig(format!("postgres: {err}")))?;
-      tokio::spawn(async move {
-         if let Err(err) = connection.await {
-            tracing::warn!("postgres limits connection closed: {err}");
-         }
-      });
       client
          .batch_execute(
             "CREATE TABLE IF NOT EXISTS session_limits (
@@ -138,59 +254,43 @@ impl Connected {
    ) -> LimitsDb {
       let (tx, mut rx) = mpsc::unbounded_channel::<i64>();
       tokio::spawn(async move {
-         let client = self.client;
-         let statement = match client.prepare(BATCH_UPSERT).await {
-            Ok(statement) => statement,
+         let mut writer = match Writer::prepare(self.client).await {
+            Ok(writer) => Some(writer),
             Err(err) => {
-               tracing::warn!("postgres limits writer stopped: {err}");
-               return;
+               tracing::warn!("postgres limits writer not prepared: {err}");
+               None
             },
          };
          let mut pending = HashSet::with_capacity(MAX_BATCH_SIZE);
-         let mut closed = false;
-         while !closed {
-            let Some(first) = rx.recv().await else {
-               break;
-            };
-            pending.insert(first);
-            // Drain any IDs already buffered before arming the debounce timer.
-            while pending.len() < MAX_BATCH_SIZE
-               && let Ok(extra) = rx.try_recv()
-            {
-               pending.insert(extra);
-            }
-            if pending.len() < MAX_BATCH_SIZE {
-               let timer = sleep_until(Instant::now() + FLUSH_EVERY);
-               tokio::pin!(timer);
-               while pending.len() < MAX_BATCH_SIZE {
-                  tokio::select! {
-                     biased;
-                     () = &mut timer => break,
-                     next = rx.recv() => match next {
-                        Some(id) => {
-                           pending.insert(id);
-                        },
-                        None => {
-                           closed = true;
-                           break;
-                        },
-                     },
-                  }
+         // The last flush did not reach the server.
+         let mut unsent = false;
+         loop {
+            let closed = collect(&mut rx, &mut pending, unsent).await;
+            if !pending.is_empty() {
+               if writer
+                  .as_ref()
+                  .is_none_or(|writer| writer.client.is_closed())
+               {
+                  writer = Writer::reopen().await;
                }
+               unsent = if let Some(ref writer) = writer {
+                  // Every response queues its account, so a busy one is
+                  // queued many times over. Coalescing in a set writes its
+                  // row once per flush window, as it is now.
+                  let (batch_ids, batch_bodies) = encode_batch(&mut pending, &snapshot);
+                  let sent = writer.send(&batch_ids, &batch_bodies).await;
+                  if !sent {
+                     // Its accounts wait for the next connection, and are
+                     // written as they are by then.
+                     pending.extend(batch_ids);
+                  }
+                  !sent
+               } else {
+                  true
+               };
             }
-            // Every response queues its account, so a busy one is queued
-            // many times over. Coalescing in a set writes its row once per
-            // flush window, as it is now.
-            let (batch_ids, batch_bodies) = encode_batch(&mut pending, &snapshot);
-            if !batch_ids.is_empty()
-               && let Err(err) = client
-                  .execute(&statement, &[&batch_ids, &batch_bodies])
-                  .await
-            {
-               tracing::warn!(
-                  rows = batch_ids.len(),
-                  "postgres session update failed: {err}"
-               );
+            if closed {
+               break;
             }
          }
       });
@@ -228,7 +328,117 @@ impl LimitsDb {
 
 #[cfg(test)]
 mod tests {
+   use std::{
+      env,
+      sync::{
+         Arc,
+         Mutex,
+         PoisonError,
+      },
+      time::Duration,
+   };
+
+   use tokio::time::{
+      sleep,
+      timeout,
+   };
+   use tokio_postgres::{
+      Client,
+      NoTls,
+   };
+
    use super::*;
+
+   #[tokio::test]
+   #[ignore = "requires an isolated PostgreSQL cluster on a /tmp Unix socket"]
+   async fn a_closed_connection_is_reopened_and_the_batch_is_written() {
+      let url = env::var("TEAPOT_LIMITS_DATABASE_URL").unwrap();
+      assert!(url.starts_with("host=/tmp/teapot-runtime-test-"));
+      let (checker, connection) = tokio_postgres::connect(&url, NoTls).await.unwrap();
+      tokio::spawn(connection);
+      let connected = Connected::connect().await.unwrap();
+      let writer = other_backend(&checker).await;
+      let current = Arc::new(Mutex::new(SessionLimits {
+         suspended: true,
+         ..SessionLimits::default()
+      }));
+      let snapshot = Arc::clone(&current);
+      let db = connected.spawn(move |id| {
+         (id == 7).then(|| {
+            snapshot
+               .lock()
+               .unwrap_or_else(PoisonError::into_inner)
+               .clone()
+         })
+      });
+
+      db.save(7);
+      stored(&checker, true).await;
+
+      checker
+         .batch_execute(&format!("SELECT pg_terminate_backend({writer})"))
+         .await
+         .unwrap();
+      gone(&checker, writer).await;
+      current
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .suspended = false;
+      db.save(7);
+      stored(&checker, false).await;
+   }
+
+   async fn stored(checker: &Client, suspended: bool) {
+      let found = timeout(Duration::from_secs(20), async {
+         loop {
+            let flag = checker
+               .query_opt(
+                  "SELECT (body->>'suspended')::boolean FROM session_limits WHERE id = 7",
+                  &[],
+               )
+               .await
+               .ok()
+               .flatten()
+               .and_then(|row| row.try_get::<_, Option<bool>>(0).ok().flatten());
+            if flag == Some(suspended) {
+               break;
+            }
+            sleep(Duration::from_millis(50)).await;
+         }
+      })
+      .await;
+      assert!(found.is_ok(), "suspended was not {suspended} within 20s");
+   }
+
+   async fn other_backend(checker: &Client) -> i32 {
+      let rows = checker
+         .query(
+            "SELECT pid FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> \
+             pg_backend_pid()",
+            &[],
+         )
+         .await
+         .unwrap();
+      assert_eq!(rows.len(), 1, "expected the writer connection alone");
+      rows[0].get(0)
+   }
+
+   async fn gone(checker: &Client, pid: i32) {
+      let found = timeout(Duration::from_secs(5), async {
+         loop {
+            if let Ok(gone) = checker
+               .query_opt("SELECT 1 FROM pg_stat_activity WHERE pid = $1", &[&pid])
+               .await
+               && gone.is_none()
+            {
+               break;
+            }
+            sleep(Duration::from_millis(20)).await;
+         }
+      })
+      .await;
+      assert!(found.is_ok(), "terminated backend {pid} was still running");
+   }
 
    #[test]
    fn encode_batch_drains_distinct_ids_and_skips_missing_snapshots() {

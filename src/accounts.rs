@@ -13,6 +13,7 @@ use std::{
    sync::{
       Arc,
       Mutex as StdMutex,
+      Weak,
    },
    time::{
       Duration,
@@ -25,11 +26,18 @@ use serde_json::Value;
 use tokio::{
    fs,
    sync::Mutex,
+   time::{
+      sleep,
+      timeout,
+   },
 };
 use tokio_postgres::{
    Client,
+   Connection,
    NoTls,
+   Socket,
    Transaction,
+   tls::NoTlsStream,
    types::{
       IsNull,
       ToSql,
@@ -56,6 +64,13 @@ const SEARCH: &str = "search";
 const AUTH: &str = "auth_token";
 const CSRF: &str = "ct0";
 const STATS_CACHE_TTL: Duration = Duration::from_secs(5);
+/// How long one attempt to reopen the connection may take.
+const REOPEN_PATIENCE: Duration = Duration::from_secs(5);
+/// The wait before each attempt. It doubles after a failure, up to
+/// [`REOPEN_WAIT_MAX`]: recovery from a crashed backend takes a few seconds,
+/// and a server down for longer is then asked, with a line logged, that often.
+const REOPEN_WAIT: Duration = Duration::from_secs(1);
+const REOPEN_WAIT_MAX: Duration = Duration::from_secs(5);
 
 const SCHEMA: &str = "\
    CREATE TABLE IF NOT EXISTS account_sessions (
@@ -184,25 +199,77 @@ async fn require_migration(client: &impl tokio_postgres::GenericClient) -> Resul
    Ok(())
 }
 
+/// Drive `connection`, and open another each time the server closes the one
+/// in use. Ends once the store is dropped.
+///
+/// A restart closes every session, and so does the recovery that follows one
+/// crashed backend. The client left behind fails each operation from then on:
+/// after one such recovery the fresh ct0s and the cookie jars were retried
+/// against it, and none was stored, until this process was restarted as well.
+async fn keep_open(
+   url: String,
+   client: Weak<Mutex<Client>>,
+   mut connection: Connection<Socket, NoTlsStream>,
+) {
+   loop {
+      if connection.await.is_err() {
+         tracing::warn!("account database connection closed");
+      }
+      let Some((reopened, next)) = reopen(&url, &client).await else {
+         return;
+      };
+      let Some(store) = client.upgrade() else {
+         return;
+      };
+      *store.lock().await = reopened;
+      tracing::info!("account database connection reopened");
+      connection = next;
+   }
+}
+
+/// Ask for a connection until the server gives one. `None` once the store is
+/// dropped: that closes its connection too, and leaves nothing to use another.
+///
+/// Every attempt waits first. A server that has just closed its sessions is
+/// still restarting, and one that closes each new session at once would
+/// otherwise be reconnected to without pause.
+async fn reopen(
+   url: &str,
+   client: &Weak<Mutex<Client>>,
+) -> Option<(Client, Connection<Socket, NoTlsStream>)> {
+   let mut wait = REOPEN_WAIT;
+   while client.strong_count() > 0 {
+      sleep(wait).await;
+      if let Ok(Ok(opened)) = timeout(REOPEN_PATIENCE, tokio_postgres::connect(url, NoTls)).await {
+         return Some(opened);
+      }
+      tracing::warn!("account database connection not reopened");
+      wait = (wait * 2).min(REOPEN_WAIT_MAX);
+   }
+   None
+}
+
 impl AccountStore {
    pub async fn connect() -> Result<Self> {
       let url = env::var("TEAPOT_LIMITS_DATABASE_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
-      let (mut client, connection) = tokio_postgres::connect(&url, NoTls).await.map_err(|_| {
+      let (client, connection) = tokio_postgres::connect(&url, NoTls).await.map_err(|_| {
          Error::InvalidConfig("could not connect to the account database".to_owned())
       })?;
-      tokio::spawn(async move {
-         if connection.await.is_err() {
-            tracing::warn!("account database connection closed");
-         }
-      });
+      let store = Self {
+         client:      Arc::new(Mutex::new(client)),
+         stats_cache: Arc::default(),
+      };
+      tokio::spawn(keep_open(url, Arc::downgrade(&store.client), connection));
+      store.create_schema().await?;
+      Ok(store)
+   }
+
+   async fn create_schema(&self) -> Result<()> {
+      let mut client = self.client.lock().await;
       let tx = client.transaction().await.map_err(db_error)?;
       lock(&tx).await?;
       tx.batch_execute(SCHEMA).await.map_err(db_error)?;
-      tx.commit().await.map_err(db_error)?;
-      Ok(Self {
-         client:      Arc::new(Mutex::new(client)),
-         stats_cache: Arc::default(),
-      })
+      tx.commit().await.map_err(db_error)
    }
 
    fn invalidate_stats_cache(&self) {
@@ -1136,5 +1203,42 @@ mod tests {
       let (_, restored_limits) = saved.into_credentials_and_limits();
       assert!(restored_limits.search_only);
       assert!(!restored_limits.demoted_from_search);
+   }
+
+   /// The server process answering the store, if one is.
+   async fn backend(store: &AccountStore) -> Option<i32> {
+      let row = store
+         .client
+         .lock()
+         .await
+         .query_one("SELECT pg_backend_pid()", &[])
+         .await
+         .ok()?;
+      Some(row.get(0))
+   }
+
+   #[tokio::test]
+   #[ignore = "requires an isolated PostgreSQL cluster on a /tmp Unix socket"]
+   async fn a_connection_the_server_closed_is_reopened() {
+      let url = env::var("TEAPOT_LIMITS_DATABASE_URL").unwrap();
+      assert!(url.starts_with("host=/tmp/teapot-runtime-test-"));
+      let store = AccountStore::connect().await.unwrap();
+      let closed = backend(&store).await.unwrap();
+      // What a restart does to every session, and recovery from a crashed
+      // backend with it.
+      let _ = store
+         .client
+         .lock()
+         .await
+         .batch_execute("SELECT pg_terminate_backend(pg_backend_pid())")
+         .await;
+      timeout(Duration::from_secs(10), async {
+         while backend(&store).await.is_none_or(|pid| pid == closed) {
+            sleep(Duration::from_millis(10)).await;
+         }
+      })
+      .await
+      .unwrap();
+      store.recent_import_batches().await.unwrap();
    }
 }

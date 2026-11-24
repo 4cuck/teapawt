@@ -8,6 +8,9 @@ use std::{
    env,
    sync::{
       Arc,
+      PoisonError,
+      RwLock,
+      Weak,
       atomic::{
          AtomicU64,
          Ordering,
@@ -27,12 +30,17 @@ use tokio::{
    time::{
       MissedTickBehavior,
       interval,
+      sleep,
+      timeout,
    },
 };
 use tokio_postgres::{
    Client,
+   Connection,
    Error,
    NoTls,
+   Socket,
+   tls::NoTlsStream,
 };
 
 const DEFAULT_URL: &str = "host=/var/run/postgresql user=teapot dbname=teapot";
@@ -41,6 +49,13 @@ const QUEUE_CAPACITY: usize = 4096;
 const BATCH_CAPACITY: usize = 512;
 const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(3600);
+/// How long one attempt to reopen the connection may take.
+const REOPEN_PATIENCE: Duration = Duration::from_secs(5);
+/// The wait before each attempt. It doubles after a failure, up to
+/// [`REOPEN_WAIT_MAX`]: recovery from a crashed backend takes a few seconds,
+/// and a server down for longer is then asked, with a line logged, that often.
+const REOPEN_WAIT: Duration = Duration::from_secs(1);
+const REOPEN_WAIT_MAX: Duration = Duration::from_secs(5);
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS stats_minute_buckets (
@@ -258,9 +273,70 @@ impl AccountEvent {
 
 #[derive(Clone)]
 pub struct StatsStore {
-   client:         Arc<Client>,
+   link:           Arc<Link>,
    tx:             mpsc::Sender<Event>,
    dropped_events: Arc<AtomicU64>,
+}
+
+/// The connection in use, replaced when PostgreSQL closes it.
+///
+/// A restart closes every session, and so does the recovery that follows one
+/// crashed backend. The client left behind fails each query from then on:
+/// after one such recovery the dashboard stayed unavailable, and every batch
+/// was dropped, until this process was restarted as well.
+struct Link(RwLock<Arc<Client>>);
+
+impl Link {
+   fn new(client: Client) -> Self {
+      Self(RwLock::new(Arc::new(client)))
+   }
+
+   fn client(&self) -> Arc<Client> {
+      Arc::clone(&self.0.read().unwrap_or_else(PoisonError::into_inner))
+   }
+
+   fn replace(&self, client: Client) {
+      *self.0.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(client);
+   }
+}
+
+/// Drive `connection`, and open another each time the server closes the one
+/// in use. Ends once the store is dropped.
+async fn keep_open(url: String, link: Weak<Link>, mut connection: Connection<Socket, NoTlsStream>) {
+   loop {
+      if let Err(error) = connection.await {
+         tracing::warn!(%error, "postgres stats connection closed");
+      }
+      let Some((client, reopened)) = reopen(&url, &link).await else {
+         return;
+      };
+      let Some(store) = link.upgrade() else {
+         return;
+      };
+      store.replace(client);
+      tracing::info!("postgres stats connection reopened");
+      connection = reopened;
+   }
+}
+
+/// Ask for a connection until the server gives one. `None` once the store is
+/// dropped: that closes its connection too, and leaves nothing to use another.
+///
+/// Every attempt waits first. A server that has just closed its sessions is
+/// still restarting, and one that closes each new session at once would
+/// otherwise be reconnected to without pause.
+async fn reopen(url: &str, link: &Weak<Link>) -> Option<(Client, Connection<Socket, NoTlsStream>)> {
+   let mut wait = REOPEN_WAIT;
+   while link.strong_count() > 0 {
+      sleep(wait).await;
+      match timeout(REOPEN_PATIENCE, tokio_postgres::connect(url, NoTls)).await {
+         Ok(Ok(opened)) => return Some(opened),
+         Ok(Err(error)) => tracing::warn!(%error, "postgres stats connection not reopened"),
+         Err(_) => tracing::warn!("postgres stats connection not reopened: no answer"),
+      }
+      wait = (wait * 2).min(REOPEN_WAIT_MAX);
+   }
+   None
 }
 
 /// Begins at `start_unix` (inclusive) and ends at `end_unix` (exclusive).
@@ -365,22 +441,18 @@ impl StatsStore {
          .or_else(|_| env::var("TEAPOT_LIMITS_DATABASE_URL"))
          .unwrap_or_else(|_| DEFAULT_URL.to_owned());
       let (client, connection) = tokio_postgres::connect(&url, NoTls).await?;
-      tokio::spawn(async move {
-         if let Err(error) = connection.await {
-            tracing::warn!(%error, "postgres stats connection closed");
-         }
-      });
-      client.batch_execute(SCHEMA).await?;
-      let client = Arc::new(client);
+      let link = Arc::new(Link::new(client));
+      tokio::spawn(keep_open(url, Arc::downgrade(&link), connection));
+      link.client().batch_execute(SCHEMA).await?;
       let (tx, rx) = mpsc::channel(QUEUE_CAPACITY);
       let dropped_events = Arc::new(AtomicU64::new(0));
       tokio::spawn(run_writer(
-         Arc::clone(&client),
+         Arc::clone(&link),
          rx,
          Arc::clone(&dropped_events),
       ));
       Ok(Self {
-         client,
+         link,
          tx,
          dropped_events,
       })
@@ -424,7 +496,8 @@ impl StatsStore {
       let end_unix = minute(now_unix()) + 60;
       let start_unix = end_unix - i64::from(minutes) * 60;
       self
-         .client
+         .link
+         .client()
          .query(
             "SELECT
                 session_id,
@@ -466,7 +539,8 @@ impl StatsStore {
       let end_unix = minute(now_unix()) + 60;
       let start_unix = end_unix - i64::from(minutes) * 60;
       let row = self
-         .client
+         .link
+         .client()
          .query_opt(
             "SELECT
                 COALESCE(SUM(non_empty), 0)::bigint AS non_empty,
@@ -577,7 +651,8 @@ impl StatsStore {
       params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
    ) -> Result<Vec<AccountEvent>, Error> {
       self
-         .client
+         .link
+         .client()
          .query(sql, params)
          .await?
          .into_iter()
@@ -609,7 +684,8 @@ impl StatsStore {
       let end_unix = minute(now_unix()) + 60;
       let start_unix = end_unix - i64::from(minutes) * 60;
       let rows = self
-         .client
+         .link
+         .client()
          .query(
             "SELECT minute_unix, received, success, empty, rejected, rate_limited, failed, other,
                  challenged, latency_sum_ms, latency_max_ms
@@ -649,7 +725,8 @@ impl StatsStore {
       let suspended = Restriction::Suspended as i16;
       // One latest observation per account and restriction kind is retained.
       let restrictions = self
-         .client
+         .link
+         .client()
          .query(
             "SELECT last_seen_unix / 60 * 60 AS minute_unix,
                  count(*) FILTER (WHERE kind = $3), count(*) FILTER (WHERE kind = $4)
@@ -891,7 +968,7 @@ impl Batch {
 }
 
 async fn run_writer(
-   client: Arc<Client>,
+   link: Arc<Link>,
    mut rx: mpsc::Receiver<Event>,
    dropped_events: Arc<AtomicU64>,
 ) {
@@ -925,7 +1002,7 @@ async fn run_writer(
          || !batch.account_events.is_empty()
          || !batch.search_accounts.is_empty()
       {
-         match batch.write(&client).await {
+         match batch.write(&link.client()).await {
             Ok(()) => last_heartbeat = Some(current_minute),
             Err(error) => {
                dropped_events.fetch_add(batch.events as u64, Ordering::Relaxed);
@@ -944,7 +1021,7 @@ async fn run_writer(
       }
       if last_maintenance.is_none_or(|time: Instant| time.elapsed() >= MAINTENANCE_INTERVAL) {
          last_maintenance = Some(Instant::now());
-         if let Err(error) = prune(&client, now).await {
+         if let Err(error) = prune(&link.client(), now).await {
             tracing::warn!(%error, "could not prune postgres stats");
          }
       }
@@ -1037,7 +1114,7 @@ mod tests {
       let client = Arc::new(client);
       let (tx, _) = mpsc::channel(1);
       let store = StatsStore {
-         client: Arc::clone(&client),
+         link: Arc::new(Link(RwLock::new(Arc::clone(&client)))),
          tx,
          dropped_events: Arc::default(),
       };
@@ -1094,6 +1171,31 @@ mod tests {
       assert_eq!(store.account_search_summary(9999, 15).await.unwrap(), None);
 
       prune(&client, timestamp).await.unwrap();
+   }
+
+   #[tokio::test]
+   #[ignore = "requires a local PostgreSQL account"]
+   async fn a_connection_the_server_closed_is_reopened() {
+      let url = env::var("TEAPOT_STATS_TEST_DATABASE_URL").unwrap();
+      let (client, connection) = tokio_postgres::connect(&url, NoTls).await.unwrap();
+      let link = Arc::new(Link::new(client));
+      tokio::spawn(keep_open(url, Arc::downgrade(&link), connection));
+      let closed = link.client();
+      // What a restart does to every session, and recovery from a crashed
+      // backend with it.
+      let _ = closed
+         .batch_execute("SELECT pg_terminate_backend(pg_backend_pid())")
+         .await;
+      timeout(Duration::from_secs(10), async {
+         while Arc::ptr_eq(&link.client(), &closed) {
+            sleep(Duration::from_millis(10)).await;
+         }
+      })
+      .await
+      .unwrap();
+      assert!(closed.is_closed());
+      let row = link.client().query_one("SELECT 1", &[]).await.unwrap();
+      assert_eq!(row.get::<_, i32>(0), 1);
    }
 
    #[test]

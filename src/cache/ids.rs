@@ -24,6 +24,7 @@ use std::{
       RandomState,
    },
    iter,
+   mem::take,
    pin::pin,
    sync::{
       Arc,
@@ -39,9 +40,16 @@ use std::{
 use futures_core::Stream as _;
 use tokio::{
    sync::mpsc,
-   time::timeout,
+   time::{
+      sleep,
+      timeout,
+   },
 };
-use tokio_postgres::NoTls;
+use tokio_postgres::{
+   Client,
+   NoTls,
+   Statement,
+};
 
 const DEFAULT_URL: &str = "host=/var/run/postgresql user=teapot dbname=teapot";
 
@@ -50,6 +58,14 @@ INSERT INTO user_ids (username, id) VALUES ($1, $2) ON CONFLICT (username) DO UP
                       EXCLUDED.id";
 
 const SELECT_ONE: &str = "SELECT id FROM user_ids WHERE username = $1";
+
+/// How long one attempt to reopen the connection may take.
+const REOPEN_PATIENCE: Duration = Duration::from_secs(5);
+/// The wait before retrying names the server did not store. It doubles after a
+/// failure, up to [`REOPEN_WAIT_MAX`]: recovery from a crashed backend takes a
+/// few seconds, and a server down for longer is then asked that often.
+const REOPEN_WAIT: Duration = Duration::from_secs(1);
+const REOPEN_WAIT_MAX: Duration = Duration::from_secs(5);
 
 /// A read by primary key answers in a fraction of a millisecond. One that
 /// has not answered by now is given up on, and the profile takes the path it
@@ -341,30 +357,123 @@ async fn row_estimate(client: &tokio_postgres::Client) -> usize {
       .unwrap_or(0)
 }
 
-async fn write_new_ids(
-   client: tokio_postgres::Client,
-   mut rx: mpsc::UnboundedReceiver<(String, String)>,
-) {
-   let statement = match client.prepare(UPSERT).await {
-      Ok(statement) => statement,
+/// The connection new ids are written on, and the upsert prepared on it. A
+/// statement belongs to the connection that prepared it, so a fresh connection
+/// replaces both.
+struct IdWriter {
+   client: Client,
+   upsert: Statement,
+}
+
+impl IdWriter {
+   async fn prepare(client: Client) -> Result<Self, tokio_postgres::Error> {
+      let upsert = client.prepare(UPSERT).await?;
+      Ok(Self { client, upsert })
+   }
+
+   /// A new connection, if the server is giving any out.
+   async fn reopen() -> Option<Self> {
+      let url = env::var("TEAPOT_LIMITS_DATABASE_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
+      let opened = timeout(REOPEN_PATIENCE, async {
+         let (client, connection) = tokio_postgres::connect(&url, NoTls).await?;
+         tokio::spawn(async move {
+            if let Err(err) = connection.await {
+               tracing::warn!("postgres user-id connection closed: {err}");
+            }
+         });
+         Self::prepare(client).await
+      })
+      .await;
+      match opened {
+         Ok(Ok(writer)) => {
+            tracing::info!("postgres user-id connection reopened");
+            Some(writer)
+         },
+         Ok(Err(err)) => {
+            tracing::warn!("postgres user-id connection not reopened: {err}");
+            None
+         },
+         Err(_) => {
+            tracing::warn!("postgres user-id connection not reopened: no answer");
+            None
+         },
+      }
+   }
+
+   /// Store every pending name. `false` when the connection closed first: the
+   /// name it was on, and the names not sent yet, stay pending. A name the
+   /// server refused while the connection was still up is dropped, or the same
+   /// refusal would be sent again forever.
+   async fn store(&self, pending: &mut HashMap<String, String>) -> bool {
+      let mut names = take(pending).into_iter();
+      while let Some((username, id)) = names.next() {
+         if let Err(err) = self.client.execute(&self.upsert, &[&username, &id]).await {
+            tracing::warn!(username, "user id was not stored: {err}");
+            if self.client.is_closed() {
+               pending.insert(username, id);
+               pending.extend(names);
+               return false;
+            }
+         }
+      }
+      true
+   }
+}
+
+/// Keep every name the server has not stored yet.
+///
+/// PostgreSQL closes every session when it restarts, and when it recovers
+/// from one crashed backend. The writer used to keep the closed client: after
+/// one such recovery every new id was logged and forgotten, until this
+/// process was restarted as well.
+async fn write_new_ids(client: Client, mut rx: mpsc::UnboundedReceiver<(String, String)>) {
+   let mut writer = match IdWriter::prepare(client).await {
+      Ok(writer) => Some(writer),
       Err(err) => {
-         tracing::warn!("user id writer stopped: {err}");
-         return;
+         tracing::warn!("user id writer not prepared: {err}");
+         None
       },
    };
-   while let Some((username, id)) = rx.recv().await {
-      let mut batch = vec![(username, id)];
-      while let Ok(extra) = rx.try_recv() {
-         batch.push(extra);
+   // One row per name: a handle learned twice in one batch keeps the later id.
+   let mut pending: HashMap<String, String> = HashMap::new();
+   // The last batch did not reach the server.
+   let mut unsent = false;
+   let mut wait = REOPEN_WAIT;
+   loop {
+      if pending.is_empty() {
+         let Some((username, id)) = rx.recv().await else {
+            break;
+         };
+         pending.insert(username, id);
+      } else if unsent {
+         // The server has just closed its sessions, or is still down. Sending
+         // again immediately would reconnect without pause.
+         sleep(wait).await;
       }
-      let mut latest = HashMap::new();
-      for (username, id) in batch {
-         latest.insert(username, id);
+      while let Ok((username, id)) = rx.try_recv() {
+         pending.insert(username, id);
       }
-      for (username, id) in latest {
-         if let Err(err) = client.execute(&statement, &[&username, &id]).await {
-            tracing::warn!(username, "user id was not stored: {err}");
-         }
+      let closed = rx.is_closed();
+      if writer
+         .as_ref()
+         .is_none_or(|current| current.client.is_closed())
+      {
+         writer = IdWriter::reopen().await;
+      }
+      let sent = if let Some(ref current) = writer {
+         current.store(&mut pending).await
+      } else {
+         false
+      };
+      if sent {
+         unsent = false;
+         wait = REOPEN_WAIT;
+      } else {
+         unsent = true;
+         wait = (wait * 2).min(REOPEN_WAIT_MAX);
+      }
+      if closed {
+         break;
       }
    }
 }
@@ -391,13 +500,30 @@ fn adopt(names: Vec<Names>, ids: Vec<Ids>) {
 
 #[cfg(test)]
 mod tests {
-   use std::iter;
+   use std::{
+      env,
+      iter,
+      time::Duration,
+   };
+
+   use tokio::{
+      sync::mpsc,
+      time::{
+         sleep,
+         timeout,
+      },
+   };
+   use tokio_postgres::{
+      Client,
+      NoTls,
+   };
 
    use super::{
       Ids,
       Names,
       SHARDS,
       adopt,
+      connect,
       file_row,
       from_table,
       get,
@@ -405,6 +531,7 @@ mod tests {
       name_shard,
       remember,
       username_for,
+      write_new_ids,
    };
 
    #[test]
@@ -460,6 +587,83 @@ mod tests {
       // The reader is only set while the table loads; without it a miss in
       // the maps is the answer and nothing is asked of Postgres.
       assert_eq!(from_table("NeverStoredAnywhere").await, None);
+   }
+
+   #[tokio::test]
+   #[ignore = "requires an isolated PostgreSQL cluster on a /tmp Unix socket"]
+   async fn a_closed_connection_is_reopened_and_the_id_is_stored() {
+      let url = env::var("TEAPOT_LIMITS_DATABASE_URL").unwrap();
+      assert!(url.starts_with("host=/tmp/teapot-runtime-test-"));
+      let client = connect().await.unwrap();
+      let (tx, rx) = mpsc::unbounded_channel();
+      tokio::spawn(write_new_ids(client, rx));
+      let (checker, connection) = tokio_postgres::connect(&url, NoTls).await.unwrap();
+      tokio::spawn(connection);
+      let writer = other_backend(&checker).await;
+
+      tx.send(("reopenprobe".to_owned(), "1".to_owned())).unwrap();
+      stored(&checker, "1").await;
+
+      checker
+         .batch_execute(&format!("SELECT pg_terminate_backend({writer})"))
+         .await
+         .unwrap();
+      gone(&checker, writer).await;
+      tx.send(("reopenprobe".to_owned(), "2".to_owned())).unwrap();
+      stored(&checker, "2").await;
+   }
+
+   /// The id currently stored for `reopenprobe`, once it is `want`.
+   async fn stored(checker: &Client, want: &str) {
+      let found = timeout(Duration::from_secs(20), async {
+         loop {
+            let id = checker
+               .query_opt("SELECT id FROM user_ids WHERE username = 'reopenprobe'", &[
+               ])
+               .await
+               .ok()
+               .flatten()
+               .and_then(|row| row.try_get::<_, String>(0).ok());
+            if id.as_deref() == Some(want) {
+               break;
+            }
+            sleep(Duration::from_millis(50)).await;
+         }
+      })
+      .await;
+      assert!(found.is_ok(), "user id was not {want} within 20s");
+   }
+
+   async fn other_backend(checker: &Client) -> i32 {
+      let rows = checker
+         .query(
+            "SELECT pid FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> \
+             pg_backend_pid()",
+            &[],
+         )
+         .await
+         .unwrap();
+      assert_eq!(rows.len(), 1, "expected the writer connection alone");
+      rows[0].get(0)
+   }
+
+   /// `pg_terminate_backend` has been carried out: that session is gone, and
+   /// this connection, which was not the one terminated, still answers.
+   async fn gone(checker: &Client, pid: i32) {
+      let found = timeout(Duration::from_secs(5), async {
+         loop {
+            if let Ok(gone) = checker
+               .query_opt("SELECT 1 FROM pg_stat_activity WHERE pid = $1", &[&pid])
+               .await
+               && gone.is_none()
+            {
+               break;
+            }
+            sleep(Duration::from_millis(20)).await;
+         }
+      })
+      .await;
+      assert!(found.is_ok(), "terminated backend {pid} was still running");
    }
 
    #[test]
