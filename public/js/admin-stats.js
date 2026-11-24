@@ -1278,7 +1278,7 @@
 
   function snapshotAccountButtons() {
     const buttons = document.querySelectorAll(
-      '#run-probe, #run-search-probe, #move-pool-search, #move-pool-view, #save-ct0, #save-ct0-probe, #save-ct0-search-probe, .admin-out-probe, .admin-ct0-submit, [data-page="account"] button[data-pool], .admin-actions-card button[data-pool]'
+      '#run-probe, #run-search-probe, #move-pool-search, #move-pool-view, #save-ct0, #save-ct0-probe, #save-ct0-search-probe, #resurrect-ct0, #resurrect-all-ct0, .admin-resurrect-ct0, .admin-resurrect-all-ct0, .admin-out-probe, .admin-ct0-submit, [data-page="account"] button[data-pool], .admin-actions-card button[data-pool]'
     );
     const priorDisabled = new Map();
     for (const btn of buttons) {
@@ -1484,6 +1484,95 @@
       if (pageBanner && pageBanner !== statusTarget) {
         setStatusBanner(pageBanner, `Account #${id}: ${message}`, 'error');
       }
+    } finally {
+      restoreAccountButtons(priorDisabled);
+      accountActionInFlight = false;
+    }
+  }
+
+  async function handleResurrectCt0(button) {
+    if (accountActionInFlight) return;
+    const id = resolveSessionId(button);
+    const statusTarget = getAccountStatusElement(button);
+    const pageBanner =
+      document.getElementById('ct0-status') ||
+      document.getElementById('account-action-status') ||
+      document.getElementById('out-status');
+    if (!id) {
+      setStatusBanner(statusTarget, 'Could not determine account session ID.', 'error');
+      return;
+    }
+
+    accountActionInFlight = true;
+    const priorDisabled = snapshotAccountButtons();
+    const pending = 'Asking account settings for a ct0, then turning search safety off...';
+    setStatusBanner(statusTarget, pending, 'warn');
+    if (pageBanner && pageBanner !== statusTarget) {
+      setStatusBanner(pageBanner, `Account #${id}: ${pending}`, 'warn');
+    }
+
+    try {
+      const response = await fetch(`/admin/stats/sessions/${encodeURIComponent(id)}/ct0/resurrect`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { 'Accept': 'application/json' }
+      });
+      if (!response.ok) {
+        const errMsg = await readErrorMessage(response, `Could not resurrect ct0 (HTTP ${response.status}).`);
+        throw new Error(errMsg);
+      }
+      const result = await response.json();
+      const message = result.detail || (result.ok ? 'ct0 resurrected.' : 'ct0 was not resurrected.');
+      const display = getMain(document)?.dataset.page === 'out' ? `Account #${id}: ${message}` : message;
+      const tone = result.ok ? 'ok' : 'error';
+      await refreshMain(window.location.href);
+      const freshBanner =
+        document.getElementById('ct0-status') ||
+        document.getElementById('account-action-status') ||
+        document.getElementById('out-status');
+      setStatusBanner(freshBanner, display, tone);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not resurrect ct0.';
+      setStatusBanner(statusTarget, message, 'error');
+      if (pageBanner && pageBanner !== statusTarget) {
+        setStatusBanner(pageBanner, `Account #${id}: ${message}`, 'error');
+      }
+    } finally {
+      restoreAccountButtons(priorDisabled);
+      accountActionInFlight = false;
+    }
+  }
+
+  async function handleResurrectAllCt0(button) {
+    if (accountActionInFlight) return;
+    const statusTarget =
+      document.getElementById('stats-status') ||
+      document.getElementById('out-status') ||
+      document.getElementById('probe-status');
+    accountActionInFlight = true;
+    const priorDisabled = snapshotAccountButtons();
+    setStatusBanner(statusTarget, 'Starting resurrection of every dead ct0...', 'warn');
+    try {
+      const response = await fetch('/admin/stats/ct0/resurrect', {
+        method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { 'Accept': 'application/json' }
+      });
+      if (!response.ok) {
+        const errMsg = await readErrorMessage(response, `Could not start resurrection (HTTP ${response.status}).`);
+        throw new Error(errMsg);
+      }
+      const result = await response.json();
+      const started = Number(result.started) || 0;
+      const message = started === 0
+        ? 'No dead ct0 accounts to resurrect.'
+        : `Resurrecting ${started} dead ct0 account${started === 1 ? '' : 's'} from account settings. This continues in the background.`;
+      setStatusBanner(statusTarget, message, started === 0 ? 'warn' : 'ok');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not start resurrection.';
+      setStatusBanner(statusTarget, message, 'error');
     } finally {
       restoreAccountButtons(priorDisabled);
       accountActionInFlight = false;
@@ -1796,6 +1885,20 @@
     if (ct0SubmitBtn) {
       event.preventDefault();
       void handleSaveCt0(ct0SubmitBtn);
+      return;
+    }
+
+    const resurrectAllBtn = target.closest('#resurrect-all-ct0, .admin-resurrect-all-ct0');
+    if (resurrectAllBtn) {
+      event.preventDefault();
+      void handleResurrectAllCt0(resurrectAllBtn);
+      return;
+    }
+
+    const resurrectBtn = target.closest('#resurrect-ct0, .admin-resurrect-ct0');
+    if (resurrectBtn) {
+      event.preventDefault();
+      void handleResurrectCt0(resurrectBtn);
       return;
     }
 

@@ -165,6 +165,16 @@ pub(crate) fn account(theme: &str, id: i64, data: Option<&AccountData>) -> Marku
                   {
                      "Save ct0 & Search Probe"
                   }
+                  @if acct.ct0_dead || !acct.ct0_present {
+                     button
+                        id="resurrect-ct0"
+                        class="admin-btn admin-resurrect-ct0"
+                        type="button"
+                        data-session=(id)
+                     {
+                        "Resurrect CT0"
+                     }
+                  }
                }
                p id="ct0-status" class="admin-notice admin-inline-ct0-status" role="status" hidden {}
             }
@@ -510,6 +520,7 @@ mod tests {
       assert!(markup.contains("Save ct0 &amp; Health Probe"));
       assert!(markup.contains("Save ct0 &amp; Search Probe"));
       assert!(markup.contains("Run Search Probe"));
+      assert!(markup.contains("Resurrect CT0"));
       assert!(markup.contains("Copy Cookie-Editor JSON"));
       assert!(markup.contains("href=\"/admin/stats/out\""));
    }

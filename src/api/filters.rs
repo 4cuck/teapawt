@@ -11,6 +11,10 @@
 
 use std::{
    collections::BTreeMap,
+   sync::atomic::{
+      AtomicBool,
+      Ordering,
+   },
    time::Duration,
 };
 
@@ -52,10 +56,27 @@ const SEARCH_SAFETY_BODY: &str = r#"{"optInFiltering":false,"optInBlocking":fals
 /// twelve at once is a pattern no browser makes.
 const GAP: Duration = Duration::from_secs(5);
 
+/// What one settings resurrection finished.
+pub struct Resurrected {
+   /// Both hiding settings were written, including `searchSafety`.
+   pub filters_cleared: bool,
+}
+
 /// Accounts written per batch. Small enough that a batch finishes in a couple
 /// of minutes and logs a line, so a long backlog is visible while it drains
 /// and a fresh import is picked up by the next batch rather than after hours.
 const BATCH: usize = 25;
+
+/// One operator sweep of the stale-ct0 pool at a time.
+static RESURRECTING: AtomicBool = AtomicBool::new(false);
+
+struct ResurrectGuard;
+
+impl Drop for ResurrectGuard {
+   fn drop(&mut self) {
+      RESURRECTING.store(false, Ordering::Release);
+   }
+}
 
 /// How often to look for accounts whose settings still need writing.
 ///
@@ -429,29 +450,27 @@ impl ApiClient {
 
    /// The signed-in account's own id, from the session's own credentials.
    async fn own_user_id(&self, session_id: i64) -> Option<String> {
+      let before = self.sessions.ct0(session_id);
       let session = self
          .sessions
          .acquire_id(session_id, endpoints::VERIFY_CREDENTIALS)
          .await
          .ok()?;
-      let path = "/1.1/account/verify_credentials.json";
-      let headers = self
-         .settings_headers(&session, "GET", path, "application/x-www-form-urlencoded")
-         .await
-         .ok()?;
-      let response = self
-         .client
-         .get_on(
-            endpoints::VERIFY_CREDENTIALS_URL,
-            &headers,
-            Some(&self.egress_for(&session)),
-         )
-         .await
-         .ok()?;
-      let (bytes, _) = self
-         .account_response(&session, endpoints::VERIFY_CREDENTIALS, response)
-         .await
-         .ok()?;
+      let first = self.verify_credentials(&session).await?;
+      let parsed = self
+         .account_response(&session, endpoints::VERIFY_CREDENTIALS, first)
+         .await;
+      let (bytes, _) = match parsed {
+         Err(Error::TransientUpstream) if self.ct0_issued(session.id, before.as_deref()) => {
+            let retry = self.verify_credentials(&session).await?;
+            self
+               .account_response(&session, endpoints::VERIFY_CREDENTIALS, retry)
+               .await
+               .ok()?
+         },
+         Ok(body) => body,
+         Err(_) => return None,
+      };
 
       #[derive(Deserialize)]
       struct OwnAccount {
@@ -462,11 +481,54 @@ impl ApiClient {
          .then_some(own.id_str)
    }
 
+   async fn verify_credentials(&self, session: &SessionLease) -> Option<super::http::Response> {
+      let path = "/1.1/account/verify_credentials.json";
+      let headers = self
+         .settings_headers(session, "GET", path, "application/x-www-form-urlencoded")
+         .await
+         .ok()?;
+      self
+         .client
+         .get_on(
+            endpoints::VERIFY_CREDENTIALS_URL,
+            &headers,
+            Some(&self.egress_for(session)),
+         )
+         .await
+         .ok()
+   }
+
    async fn post_account_settings(
       &self,
       session: &SessionLease,
       form: &'static str,
    ) -> Result<Bytes> {
+      let before = self.sessions.ct0(session.id);
+      let response = self.post_settings_request(session, form).await?;
+      let parsed = self
+         .account_response(session, endpoints::ACCOUNT_SETTINGS, response)
+         .await;
+      // A missing ct0 makes X answer 353 and issue the cookie on that same
+      // response. The token is stored before the error returns, so the write
+      // is sent again with it instead of waiting out a refusal.
+      let (bytes, _) = match parsed {
+         Err(Error::TransientUpstream) if self.ct0_issued(session.id, before.as_deref()) => {
+            let retry = self.post_settings_request(session, form).await?;
+            self
+               .account_response(session, endpoints::ACCOUNT_SETTINGS, retry)
+               .await?
+         },
+         other => other?,
+      };
+      Self::check_api_errors(&bytes)?;
+      Ok(bytes)
+   }
+
+   async fn post_settings_request(
+      &self,
+      session: &SessionLease,
+      form: &'static str,
+   ) -> Result<super::http::Response> {
       let path = "/1.1/account/settings.json";
       let mut headers = self
          .settings_headers(session, "POST", path, "application/x-www-form-urlencoded")
@@ -475,7 +537,7 @@ impl ApiClient {
          header::REFERER,
          header::HeaderValue::from_static("https://x.com/settings/content_you_see"),
       );
-      let response = self
+      self
          .client
          .post_on(
             endpoints::ACCOUNT_SETTINGS_URL,
@@ -483,12 +545,135 @@ impl ApiClient {
             Bytes::from_static(form.as_bytes()),
             Some(&self.egress_for(session)),
          )
-         .await?;
-      let (bytes, _) = self
-         .account_response(session, endpoints::ACCOUNT_SETTINGS, response)
-         .await?;
-      Self::check_api_errors(&bytes)?;
-      Ok(bytes)
+         .await
+   }
+
+   /// True when this call stored a csrf token the account did not already hold.
+   fn ct0_issued(&self, session_id: i64, before: Option<&str>) -> bool {
+      self
+         .sessions
+         .ct0(session_id)
+         .is_some_and(|ct0| !ct0.is_empty() && before != Some(ct0.as_str()))
+   }
+
+   /// Ask `account/settings` for a csrf cookie, then turn search safety off.
+   ///
+   /// This is the operator path for the stale pool. It posts the settings form
+   /// the filter sync already uses. It does not request the x.com front page.
+   /// A 353 carries the replacement `ct0` in `Set-Cookie`; that token is
+   /// stored, the account leaves the stale pool, and the safety writes
+   /// continue.
+   pub async fn resurrect_ct0(&self, session_id: i64) -> Result<Resurrected> {
+      let Some(credentials) = self.sessions.credentials(session_id) else {
+         return Err(Error::NotFound(format!(
+            "Account {session_id} is not loaded"
+         )));
+      };
+      if credentials.kind != SessionKind::Cookie || credentials.auth_token.is_empty() {
+         return Err(Error::InvalidConfig(
+            "ct0 can only be resurrected for a cookie account with auth_token".into(),
+         ));
+      }
+      let was_dead = self.sessions.is_ct0_dead(session_id);
+      let before = self.sessions.ct0(session_id);
+      let (status, fresh, body) = {
+         let session = self.sessions.probe_lease(session_id).await?;
+         let response = self
+            .post_settings_request(&session, DISPLAY_SENSITIVE_BODY)
+            .await?;
+         let status = response.status();
+         let fresh = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .find_map(super::client::ct0_cookie);
+         let body = response.text().await.unwrap_or_default();
+         (status, fresh, body)
+      };
+
+      let code = super::client::twitter_error_code(&body);
+      if status.as_u16() == 401 || code == Some(326) || code == Some(89) {
+         self.sessions.mark_rejected(session_id).await;
+         return Err(Error::SessionRejected(format!(
+            "Status {status}: credentials rejected"
+         )));
+      }
+
+      let issued = fresh.filter(|ct0| !ct0.is_empty() && Some(ct0) != before.as_ref());
+      let adopted = issued.is_some() || status.is_success();
+      if let Some(ct0) = issued {
+         self.sessions.hold_ct0(session_id, ct0);
+      }
+      if was_dead && adopted {
+         self.sessions.clear_ct0_dead(session_id).await;
+         self.sessions.record_event(
+            crate::stats::AccountEvent::new(
+               session_id,
+               crate::stats::Restriction::Reinstated,
+               "account/settings",
+               "Resurrected ct0 from the settings response",
+            )
+            .upstream(status.as_u16(), code),
+         );
+      }
+      if !adopted {
+         return Err(Error::TwitterApi(format!(
+            "Status {status}: settings did not return a ct0 cookie"
+         )));
+      }
+
+      let filters_cleared = self.clear_session_filters(session_id).await?;
+      if filters_cleared {
+         self.sessions.mark_filters_cleared(session_id).await;
+      }
+      tracing::info!(
+         session_id,
+         was_dead,
+         filters_cleared,
+         "resurrected ct0 from account settings"
+      );
+      Ok(Resurrected { filters_cleared })
+   }
+
+   /// Walk the stale-ct0 pool once. Returns how many accounts were queued.
+   ///
+   /// A second click while the walk is still going is refused. Each account is
+   /// the same settings request as one resurrection, paced like the filter sync
+   /// so a full pool is not a burst.
+   pub fn start_resurrect_dead_ct0(&self) -> std::result::Result<usize, &'static str> {
+      if RESURRECTING.swap(true, Ordering::AcqRel) {
+         return Err("A resurrection of dead ct0 cookies is already running.");
+      }
+      let ids = self.sessions.ct0_dead_ids();
+      let started = ids.len();
+      if started == 0 {
+         RESURRECTING.store(false, Ordering::Release);
+         return Ok(0);
+      }
+      let client = self.clone();
+      tokio::spawn(async move {
+         let _reset = ResurrectGuard;
+         for id in ids {
+            if !client.sessions.is_ct0_dead(id) {
+               continue;
+            }
+            match client.resurrect_ct0(id).await {
+               Ok(done) => {
+                  tracing::info!(
+                     session_id = id,
+                     filters_cleared = done.filters_cleared,
+                     "resurrected a dead ct0"
+                  )
+               },
+               Err(err) => {
+                  tracing::info!(session_id = id, "could not resurrect ct0: {err}");
+               },
+            }
+            sleep(GAP).await;
+         }
+         tracing::info!("finished resurrecting dead ct0 cookies");
+      });
+      Ok(started)
    }
 
    async fn set_display_sensitive_media(&self, session: &SessionLease) -> Result<()> {
@@ -511,6 +696,28 @@ impl ApiClient {
    }
 
    async fn set_search_safety(&self, session: &SessionLease, user_id: &str) -> Result<()> {
+      let before = self.sessions.ct0(session.id);
+      let response = self.search_safety_request(session, user_id).await?;
+      let parsed = self
+         .account_response(session, endpoints::SEARCH_SAFETY, response)
+         .await;
+      let _ = match parsed {
+         Err(Error::TransientUpstream) if self.ct0_issued(session.id, before.as_deref()) => {
+            let retry = self.search_safety_request(session, user_id).await?;
+            self
+               .account_response(session, endpoints::SEARCH_SAFETY, retry)
+               .await?
+         },
+         other => other?,
+      };
+      Ok(())
+   }
+
+   async fn search_safety_request(
+      &self,
+      session: &SessionLease,
+      user_id: &str,
+   ) -> Result<super::http::Response> {
       let path = format!("/i/api/1.1/strato/column/User/{user_id}/search/searchSafety");
       let url = format!("https://x.com{path}");
       let mut headers = self
@@ -520,7 +727,7 @@ impl ApiClient {
          header::REFERER,
          header::HeaderValue::from_static("https://x.com/settings/search"),
       );
-      let response = self
+      self
          .client
          .post_on(
             &url,
@@ -528,11 +735,7 @@ impl ApiClient {
             Bytes::from_static(SEARCH_SAFETY_BODY.as_bytes()),
             Some(&self.egress_for(session)),
          )
-         .await?;
-      let _ = self
-         .account_response(session, endpoints::SEARCH_SAFETY, response)
-         .await?;
-      Ok(())
+         .await
    }
 
    /// The headers a cookie session uses for its own settings writes, which go
@@ -567,17 +770,7 @@ impl ApiClient {
          "x-twitter-auth-type",
          header::HeaderValue::from_static("OAuth2Session"),
       );
-      headers.insert(
-         "x-csrf-token",
-         ct0.parse()
-            .map_err(|_| Error::Internal("invalid ct0 header value".into()))?,
-      );
-      headers.insert(
-         header::COOKIE,
-         format!("auth_token={}; ct0={ct0}", session.auth_token)
-            .parse()
-            .map_err(|_| Error::Internal("invalid cookie header value".into()))?,
-      );
+      super::client::install_csrf(&mut headers, &session.auth_token, &ct0)?;
       headers.insert(
          header::ORIGIN,
          header::HeaderValue::from_static("https://x.com"),

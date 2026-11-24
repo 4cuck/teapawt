@@ -525,7 +525,8 @@ enum Caller {
 enum SearchScope {
    /// Public `search` pool only (`search_only && !search_pass_only`).
    PublicOnly,
-   /// Dedicated paid `search-pass` pool only (`search_only && search_pass_only`).
+   /// Dedicated paid `search-pass` pool only (`search_only &&
+   /// search_pass_only`).
    PassOnly,
 }
 
@@ -1269,8 +1270,7 @@ impl SessionPool {
 
       let started = Instant::now();
       let label = api_for(required_kind.unwrap_or(SessionKind::Cookie));
-      let prefer_search_pass =
-         ApiSpec::new(label).is_search && super::budget::has_search_pass();
+      let prefer_search_pass = ApiSpec::new(label).is_search && super::budget::has_search_pass();
       let note = |outcome| self.queue.record(label, started.elapsed(), outcome);
       let mut parked = None;
       // This call's claim on the accounts it listened on, let go after the
@@ -1733,12 +1733,7 @@ impl SessionPool {
       let [user_tweets, user_by_screen_name, tweet_detail] = view_counts;
       census.operations = vec![
          make_row("UserTweets", "view", census.view, user_tweets),
-         make_row(
-            "UserByScreenName",
-            "view",
-            census.view,
-            user_by_screen_name,
-         ),
+         make_row("UserByScreenName", "view", census.view, user_by_screen_name),
          make_row("TweetDetail", "view", census.view, tweet_detail),
          make_row("SearchTimeline", "search", census.search, search_count),
          make_row(
@@ -1841,8 +1836,7 @@ impl SessionPool {
                   refused_operations:   Vec::new(),
                };
                let matches_scope = op.is_none()
-                  && (pool == Some("ct0_dead")
-                     || (pool.is_none() && reason == Some("ct0_dead")));
+                  && (pool == Some("ct0_dead") || (pool.is_none() && reason == Some("ct0_dead")));
                matches_scope.then_some(reasons)
             },
             "search" => {
@@ -2073,7 +2067,8 @@ impl SessionPool {
    /// parallel without a global write lock.
    #[expect(
       clippy::too_many_arguments,
-      reason = "internal pool scan passes pre-acquired slice, filter, caller mode, and search scope"
+      reason = "internal pool scan passes pre-acquired slice, filter, caller mode, and search \
+                scope"
    )]
    fn scan<'a>(
       &self,
@@ -3650,6 +3645,30 @@ impl SessionPool {
    /// one loaded from the account store.
    pub fn ct0(&self, session_id: i64) -> Option<String> {
       Some(self.slot(session_id)?.ct0())
+   }
+
+   /// Whether this account is quarantined until an operator resurrects its csrf
+   /// token. A 353 on a later call does not lift this.
+   pub fn is_ct0_dead(&self, session_id: i64) -> bool {
+      self
+         .slot(session_id)
+         .is_some_and(|slot| slot.read_limits().ct0_dead)
+   }
+
+   /// Cookie accounts sitting in the stale-ct0 pool, for an operator sweep.
+   pub fn ct0_dead_ids(&self) -> Vec<i64> {
+      let mut ids: Vec<i64> = self
+         .slots()
+         .iter()
+         .filter(|slot| {
+            slot.credentials.kind == SessionKind::Cookie
+               && !slot.credentials.auth_token.is_empty()
+               && slot.read_limits().ct0_dead
+         })
+         .map(|slot| slot.credentials.id)
+         .collect();
+      ids.sort_unstable();
+      ids
    }
 
    /// Keep a `ct0` x.com just issued and write it back for the next start.
@@ -5391,10 +5410,25 @@ mod tests {
          pool.set_account_pool(999, super::AccountPool::Search).await,
          Err(Error::NotFound(_))
       ));
-      assert!(!pool.set_account_pool(3, super::AccountPool::View).await.unwrap());
-      assert!(pool.set_account_pool(3, super::AccountPool::Search).await.unwrap());
+      assert!(
+         !pool
+            .set_account_pool(3, super::AccountPool::View)
+            .await
+            .unwrap()
+      );
+      assert!(
+         pool
+            .set_account_pool(3, super::AccountPool::Search)
+            .await
+            .unwrap()
+      );
       assert_eq!(pool.account_state(3).await.unwrap().pool, "search");
-      assert!(!pool.set_account_pool(3, super::AccountPool::Search).await.unwrap());
+      assert!(
+         !pool
+            .set_account_pool(3, super::AccountPool::Search)
+            .await
+            .unwrap()
+      );
       assert!(
          pool
             .set_account_pool(3, super::AccountPool::SearchPass)
@@ -5408,7 +5442,12 @@ mod tests {
             .await
             .unwrap()
       );
-      assert!(pool.set_account_pool(3, super::AccountPool::View).await.unwrap());
+      assert!(
+         pool
+            .set_account_pool(3, super::AccountPool::View)
+            .await
+            .unwrap()
+      );
       assert_eq!(pool.account_state(3).await.unwrap().pool, "view");
 
       fs::remove_file(path).await.unwrap();
@@ -6086,7 +6125,12 @@ mod tests {
       assert_eq!(s11.filters_retry_at, i64::MAX);
 
       assert!(pool.pending_filter_sync_ids().await.is_empty());
-      assert!(pool.search_audit_ids("ph2f/SearchTimeline").await.is_empty());
+      assert!(
+         pool
+            .search_audit_ids("ph2f/SearchTimeline")
+            .await
+            .is_empty()
+      );
       assert!(pool.cookie_header().is_none());
       assert!(matches!(
          pool.acquire_id(10, "ph2f/SearchTimeline").await,
@@ -6106,10 +6150,7 @@ mod tests {
       assert!(!reinstated.filters_failed);
       assert_eq!(reinstated.filters_retry_at, 0);
       assert_eq!(pool.pending_filter_sync_ids().await, vec![10]);
-      assert_eq!(
-         pool.search_audit_ids("ph2f/SearchTimeline").await,
-         vec![10]
-      );
+      assert_eq!(pool.search_audit_ids("ph2f/SearchTimeline").await, vec![10]);
    }
 
    #[tokio::test]
@@ -6273,7 +6314,8 @@ mod tests {
       assert_eq!(pass_op.accounts, 2);
 
       // When only search-pass accounts exist and all are rate-limited (no public
-      // search accounts at all), paid search still reports RateLimited, not NoSessions.
+      // search accounts at all), paid search still reports RateLimited, not
+      // NoSessions.
       let pass_only_pool = SessionPool::empty(2);
       assert_eq!(
          pass_only_pool

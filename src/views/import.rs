@@ -199,7 +199,8 @@ pub(crate) fn admin(
                p class="import-help" id="import-help" {
                   "Paste a colon-, pipe-, or dash-delimited account export, a Netscape cookie file, "
                   "a JSON cookie export, or one Cookie header per line. Records missing "
-                  code { "auth_token" } " or " code { "ct0" } " are skipped. Up to "
+                  code { "auth_token" } " are skipped. A record with no "
+                  code { "ct0" } " is kept; the settings write collects one from X. Up to "
                   (max_lines) " lines and 256 KiB. Not shown after submit."
                }
                textarea id="import-accounts" name="accounts" rows="12" maxlength=(max_chars)

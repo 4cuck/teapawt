@@ -874,6 +874,38 @@ pub(super) fn ct0_cookie(value: &header::HeaderValue) -> Option<String> {
    (name.trim() == "ct0" && !cookie.trim().is_empty()).then(|| cookie.trim().to_owned())
 }
 
+/// Put `auth_token` and, when this account has one, `ct0` on a cookie request.
+///
+/// An account imported with only `auth_token` sends that cookie alone. X then
+/// answers 403 code 353 and issues a `ct0` in `Set-Cookie`. Sending an empty
+/// `ct0=` pair is not that request: X treats it as a csrf cookie that does
+/// not match.
+pub(super) fn install_csrf(
+   headers: &mut header::HeaderMap,
+   auth_token: &str,
+   ct0: &str,
+) -> Result<()> {
+   if !ct0.is_empty() {
+      headers.insert(
+         "x-csrf-token",
+         ct0.parse()
+            .map_err(|_| Error::Internal("invalid ct0 header value".into()))?,
+      );
+   }
+   let cookie = if ct0.is_empty() {
+      format!("auth_token={auth_token}")
+   } else {
+      format!("auth_token={auth_token}; ct0={ct0}")
+   };
+   headers.insert(
+      header::COOKIE,
+      cookie
+         .parse()
+         .map_err(|_| Error::Internal("invalid cookie header value".into()))?,
+   );
+   Ok(())
+}
+
 pub(super) fn twitter_error_code(body: &str) -> Option<i64> {
    #[derive(Deserialize)]
    struct ErrorCheck {
@@ -1038,31 +1070,31 @@ impl Drop for InflightGuard {
 /// Twitter/X API client.
 #[derive(Clone)]
 pub struct ApiClient {
-   pub(crate) client:        HttpClient,
-   pub(crate) sessions:      SessionPool,
-   proxies:                  Option<Arc<ProxyPool>>,
-   tid:                      TidClient,
-   operations:               Operations,
-   budget:                   ClientBudget,
+   pub(crate) client:              HttpClient,
+   pub(crate) sessions:            SessionPool,
+   proxies:                        Option<Arc<ProxyPool>>,
+   tid:                            TidClient,
+   operations:                     Operations,
+   budget:                         ClientBudget,
    /// Retweeter lists per caller, on whatever `clientBudget` says.
-   list_budget:              ClientBudget,
-   pub(crate) tid_enabled:   bool,
-   denylist:                 super::search_denylist::SearchDenylist,
-   latency:                  Arc<Latency>,
-   hedges:                   Arc<Semaphore>,
+   list_budget:                    ClientBudget,
+   pub(crate) tid_enabled:         bool,
+   denylist:                       super::search_denylist::SearchDenylist,
+   latency:                        Arc<Latency>,
+   hedges:                         Arc<Semaphore>,
    /// Which call served each first profile page, reported every minute.
-   timeline_routes:          Arc<TimelineRoutes>,
+   timeline_routes:                Arc<TimelineRoutes>,
    /// How far the minute's fallback share is past the flood trigger. The
    /// Anti-DDoS gate reads it on every request.
-   pressure:                 Arc<Pressure>,
+   pressure:                       Arc<Pressure>,
    /// Coalesces identical concurrent in-flight GraphQL calls; entries live
    /// only while the upstream request is in flight and are removed on drop.
-   inflight:                 Arc<InflightCoalescer>,
-   telemetry:                Option<crate::stats::StatsStore>,
+   inflight:                       Arc<InflightCoalescer>,
+   telemetry:                      Option<crate::stats::StatsStore>,
    /// Cloudflare JSD solver + the circuit breaker that disables it after one
    /// failure. Search attaches the `cf_clearance` it mints.
-   clearance:                super::clearance::ClearanceGate,
-   pub(crate) cookies:       Arc<Jar>,
+   clearance:                      super::clearance::ClearanceGate,
+   pub(crate) cookies:             Arc<Jar>,
    /// Set when accounts arrive through `/import`, so their filters are turned
    /// off as soon as they are in the pool instead of on the next rescan.
    pub(crate) filter_wakeup:       Arc<tokio::sync::Notify>,
@@ -2721,19 +2753,22 @@ impl ApiClient {
          if status.as_u16() == 403 && twitter_error_code(&body) == Some(353) {
             // The ct0 this account holds is no longer the one x.com accepts.
             // The rejection itself carries the replacement in its set-cookie,
-            // so the account recovers on this call: no page load of x.com, and
-            // no second request. Only an account X answers without a token is
-            // taken out of rotation.
+            // so an account still in rotation recovers on this call: no page
+            // load of x.com, and no second request. Only an account X answers
+            // without a token is taken out of rotation.
+            //
+            // An account already in the stale pool stays there. Adopting the
+            // cookie here would put it back into rotation on the next
+            // accidental 353. An operator resurrects it from settings instead.
             let current_ct0 = self
                .sessions
                .ct0(session.id)
                .unwrap_or_else(|| session.ct0.clone());
-            match fresh_ct0.filter(|ct0| ct0 != &current_ct0) {
-               Some(ct0) => {
-                  self.sessions.hold_ct0(session.id, ct0);
-                  self.sessions.clear_ct0_dead(session.id).await;
-               },
-               None => self.sessions.mark_ct0_dead(session.id).await,
+            if !self.sessions.is_ct0_dead(session.id) {
+               match fresh_ct0.filter(|ct0| ct0 != &current_ct0) {
+                  Some(ct0) => self.sessions.hold_ct0(session.id, ct0),
+                  None => self.sessions.mark_ct0_dead(session.id).await,
+               }
             }
             self.sessions.refund_if_metered(session, endpoint).await;
             return Err(Error::TransientUpstream);
@@ -2927,17 +2962,7 @@ impl ApiClient {
                .sessions
                .ct0(session.id)
                .unwrap_or_else(|| session.ct0.clone());
-            headers.insert(
-               "x-csrf-token",
-               ct0.parse()
-                  .map_err(|_| Error::Internal("invalid ct0 header value".into()))?,
-            );
-            headers.insert(
-               header::COOKIE,
-               format!("auth_token={}; ct0={ct0}", session.auth_token)
-                  .parse()
-                  .map_err(|_| Error::Internal("invalid cookie header value".into()))?,
-            );
+            install_csrf(&mut headers, &session.auth_token, &ct0)?;
             // A same-origin GraphQL GET does not send Origin; POST requests do.
             if method == "POST" {
                headers.insert(
@@ -3004,17 +3029,7 @@ impl ApiClient {
          .sessions
          .ct0(session.id)
          .unwrap_or_else(|| session.ct0.clone());
-      headers.insert(
-         "x-csrf-token",
-         ct0.parse()
-            .map_err(|_| Error::Internal("invalid ct0 header value".into()))?,
-      );
-      headers.insert(
-         header::COOKIE,
-         format!("auth_token={}; ct0={ct0}", session.auth_token)
-            .parse()
-            .map_err(|_| Error::Internal("invalid cookie header value".into()))?,
-      );
+      install_csrf(&mut headers, &session.auth_token, &ct0)?;
       headers.insert(
          header::ORIGIN,
          header::HeaderValue::from_static("https://x.com"),

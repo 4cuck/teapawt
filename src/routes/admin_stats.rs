@@ -483,6 +483,11 @@ pub(super) fn router() -> Router<AppState> {
       .route("/admin/stats/sessions/{id}/cookies", get(cookies))
       .route("/admin/stats/sessions/{id}/probe", post(probe))
       .route("/admin/stats/sessions/{id}/ct0", post(set_ct0))
+      .route(
+         "/admin/stats/sessions/{id}/ct0/resurrect",
+         post(resurrect_ct0),
+      )
+      .route("/admin/stats/ct0/resurrect", post(resurrect_dead_ct0))
       .route("/admin/stats/sessions/{id}/pool", post(set_pool))
 }
 
@@ -571,7 +576,12 @@ async fn snapshot(state: &AppState, minutes: i32) -> Option<Dashboard> {
       let pool = pool
          .ok()
          .map(|stats| (stats.search + stats.search_pass, stats.view))
-         .or_else(|| Some(((census.search + census.search_pass) as i64, census.view as i64)));
+         .or_else(|| {
+            Some((
+               (census.search + census.search_pass) as i64,
+               census.view as i64,
+            ))
+         });
       let search_accounts = build_search_account_rows(
          state,
          search_summaries.unwrap_or_default(),
@@ -826,15 +836,12 @@ fn active_restriction(
 async fn investigation(state: &AppState, query: &InvestigationQuery) -> Option<InvestigationData> {
    let store = state.stats.as_ref()?;
    let kind = restriction_kind(query.kind.as_deref());
-   let pool = query
-      .pool
-      .as_deref()
-      .filter(|pool| {
-         matches!(
-            *pool,
-            "search" | "search-pass" | "view" | "ct0_dead" | "rejected"
-         )
-      });
+   let pool = query.pool.as_deref().filter(|pool| {
+      matches!(
+         *pool,
+         "search" | "search-pass" | "view" | "ct0_dead" | "rejected"
+      )
+   });
    let status = query
       .status
       .as_deref()
@@ -1137,6 +1144,7 @@ async fn execute_probe(
       return Err(StatusCode::NOT_FOUND);
    };
    let before = flags_from_state(&before_state);
+   let ct0_before_probe = state.api.sessions.ct0(id);
    let mode_label = match mode {
       ProbeMode::Health => "health",
       ProbeMode::Search => "search",
@@ -1183,10 +1191,27 @@ async fn execute_probe(
          }
       },
       Some(ProbeVerdict::CsrfRejected) => {
-         let current_ct0 = state.api.sessions.ct0(id).unwrap_or_default();
-         if let Some(replacement) = fresh_ct0.filter(|val| val != &current_ct0) {
+         let current_ct0 = state.api.sessions.ct0(id);
+         if before.ct0_dead {
+            let note = "This account stays in the stale ct0 pool. Use Resurrect CT0 to collect a \
+                        replacement from account settings.";
+            detail = Some(match detail {
+               Some(existing) => format!("{existing}. {note}"),
+               None => note.to_owned(),
+            });
+         } else if let Some(replacement) =
+            fresh_ct0.filter(|val| !val.is_empty() && Some(val) != current_ct0.as_ref())
+         {
             state.api.sessions.hold_ct0(id, replacement);
-            state.api.sessions.clear_ct0_dead(id).await;
+            let note = "X returned a replacement ct0 in Set-Cookie and it was saved; run Probe \
+                        again to verify.";
+            detail = Some(match detail {
+               Some(existing) => format!("{existing}. {note}"),
+               None => note.to_owned(),
+            });
+         } else if current_ct0.as_ref().is_some_and(|ct0| !ct0.is_empty())
+            && current_ct0 != ct0_before_probe
+         {
             let note = "X returned a replacement ct0 in Set-Cookie and it was saved; run Probe \
                         again to verify.";
             detail = Some(match detail {
@@ -1353,6 +1378,90 @@ fn parse_ct0_input(raw: &str) -> std::result::Result<String, &'static str> {
       );
    }
    Ok(extracted)
+}
+
+#[derive(Serialize)]
+struct ResurrectResponse {
+   ok:              bool,
+   detail:          String,
+   filters_cleared: bool,
+   ct0_dead:        bool,
+}
+
+#[derive(Serialize)]
+struct ResurrectAllResponse {
+   started: usize,
+}
+
+async fn resurrect_ct0(
+   State(state): State<AppState>,
+   jar: CookieJar,
+   Path(id): Path<i64>,
+   request: Request,
+) -> Response {
+   let origin = current_origin(state.config.url_prefix());
+   if cross_origin(request.headers(), &origin) {
+      return (
+         StatusCode::FORBIDDEN,
+         "Cross-origin requests are not permitted.",
+      )
+         .into_response();
+   }
+   if !administrator(&state, &jar).await {
+      return StatusCode::FORBIDDEN.into_response();
+   }
+   match state.api.resurrect_ct0(id).await {
+      Ok(done) => {
+         let detail = if done.filters_cleared {
+            "X issued a ct0 from account settings and search safety was turned off."
+         } else {
+            "X issued a ct0 from account settings. Search safety is still waiting on the account's \
+             numeric id."
+         };
+         Json(ResurrectResponse {
+            ok:              true,
+            detail:          detail.to_owned(),
+            filters_cleared: done.filters_cleared,
+            ct0_dead:        state.api.sessions.is_ct0_dead(id),
+         })
+         .into_response()
+      },
+      Err(err) => {
+         let missing = matches!(err, crate::error::Error::NotFound(_));
+         if missing {
+            return StatusCode::NOT_FOUND.into_response();
+         }
+         Json(ResurrectResponse {
+            ok:              false,
+            detail:          err.to_string(),
+            filters_cleared: false,
+            ct0_dead:        state.api.sessions.is_ct0_dead(id),
+         })
+         .into_response()
+      },
+   }
+}
+
+async fn resurrect_dead_ct0(
+   State(state): State<AppState>,
+   jar: CookieJar,
+   request: Request,
+) -> Response {
+   let origin = current_origin(state.config.url_prefix());
+   if cross_origin(request.headers(), &origin) {
+      return (
+         StatusCode::FORBIDDEN,
+         "Cross-origin requests are not permitted.",
+      )
+         .into_response();
+   }
+   if !administrator(&state, &jar).await {
+      return StatusCode::FORBIDDEN.into_response();
+   }
+   match state.api.start_resurrect_dead_ct0() {
+      Ok(started) => Json(ResurrectAllResponse { started }).into_response(),
+      Err(message) => (StatusCode::CONFLICT, message).into_response(),
+   }
 }
 
 async fn set_ct0(

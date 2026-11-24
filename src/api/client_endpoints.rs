@@ -1905,17 +1905,7 @@ impl ApiClient {
          .sessions
          .ct0(session.id)
          .unwrap_or_else(|| session.ct0.clone());
-      headers.insert(
-         "x-csrf-token",
-         ct0.parse()
-            .map_err(|_| Error::Internal("invalid ct0 header value".into()))?,
-      );
-      headers.insert(
-         header::COOKIE,
-         format!("auth_token={}; ct0={ct0}", session.auth_token)
-            .parse()
-            .map_err(|_| Error::Internal("invalid cookie header value".into()))?,
-      );
+      super::install_csrf(&mut headers, &session.auth_token, &ct0)?;
       headers.insert(
          header::ORIGIN,
          header::HeaderValue::from_static("https://x.com"),

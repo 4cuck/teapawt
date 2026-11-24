@@ -417,8 +417,8 @@ pub(crate) fn frame(
             meta name="viewport" content="width=device-width, initial-scale=1";
             meta name="robots" content="noindex, nofollow";
             title { (title) " · Teapot administration" }
-            link rel="stylesheet" href="/css/admin-stats.css?v=9";
-            script src="/js/admin-stats.js?v=9" defer="" {}
+            link rel="stylesheet" href="/css/admin-stats.css?v=10";
+            script src="/js/admin-stats.js?v=10" defer="" {}
             @if nav_fingerprints {
                link rel="stylesheet" href="/css/admin-captures.css?v=1";
                script src="/js/admin-captures.js?v=2" defer="" {}
@@ -1023,7 +1023,16 @@ fn pools_section(
                      "0"
                   }
                }
-               dd class="admin-stats-note" { "Excluded from active slots · replace ct0 to restore" }
+               dd class="admin-stats-note" { "Excluded from active slots · not restored automatically" }
+               @if census.ct0_dead_pool > 0 {
+                  button
+                     id="resurrect-all-ct0"
+                     class="admin-btn admin-btn--sm admin-resurrect-all-ct0"
+                     type="button"
+                  {
+                     "Resurrect all dead CT0"
+                  }
+               }
             }
             div class=(if census.rejected_pool > 0 { "admin-kpi admin-stats-metric admin-kpi--bad admin-stats-metric--bad" } else { "admin-kpi admin-stats-metric" }) {
                dt { "Rejected / locked pool" }
@@ -1656,11 +1665,11 @@ mod tests {
 
    fn sample_clearance() -> ClearanceStatus {
       ClearanceStatus {
-         enabled:         true,
-         armed:           true,
-         tripped:         false,
-         reason:          None,
-         tripped_at:      None,
+         enabled:            true,
+         armed:              true,
+         tripped:            false,
+         reason:             None,
+         tripped_at:         None,
          attempts:           3,
          successes:          3,
          failures:           0,
@@ -1802,8 +1811,9 @@ mod tests {
 
       let markup = page("light", Some(&dashboard), WEEK_MINUTES).into_string();
       assert!(markup.contains("data-theme=\"light\""));
-      assert!(markup.contains("/css/admin-stats.css?v=9"));
-      assert!(markup.contains("/js/admin-stats.js?v=9"));
+      assert!(markup.contains("/css/admin-stats.css?v=10"));
+      assert!(markup.contains("/js/admin-stats.js?v=10"));
+      assert!(markup.contains("Resurrect all dead CT0"));
       assert!(markup.contains("href=\"/admin/stats/out?op=UserTweets\""));
       assert!(!markup.contains("style=\""));
       assert!(!markup.contains("<script>"));

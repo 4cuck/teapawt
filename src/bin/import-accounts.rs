@@ -47,13 +47,16 @@ const USAGE: &str = "Usage:
 Migration reads TEAPOT_SESSIONS_FILE (default: sessions.jsonl) and
 TEAPOT_COOKIES_FILE (default: session-cookies.json).
 All commands that access PostgreSQL use TEAPOT_LIMITS_DATABASE_URL.
-Import does not validate accounts against X; provide both auth_token and ct0.";
+Import does not validate accounts against X; auth_token is required and ct0 is optional.";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
    Help,
    Migrate,
-   Import { path: PathBuf, pool: types::AccountPool },
+   Import {
+      path: PathBuf,
+      pool: types::AccountPool,
+   },
    Stats,
 }
 

@@ -1032,7 +1032,8 @@ fn parse_export_with(line: &str, separator: &str) -> Option<Session> {
    let ct0 = credentials
       .iter()
       .copied()
-      .find(|field| is_hex(field, 160))?;
+      .find(|field| is_hex(field, 160))
+      .unwrap_or("");
    if username.is_empty() || username.chars().any(char::is_control) {
       return None;
    }
@@ -1087,7 +1088,13 @@ fn parse_netscape(text: &str) -> Option<(Session, CookieJar)> {
 
 fn finish_import_jar(mut jar: CookieJar) -> Option<(Session, CookieJar)> {
    let auth_token = jar.remove(AUTH).filter(|value| !value.is_empty())?;
-   let ct0 = jar.remove(CSRF).filter(|value| !value.is_empty())?;
+   // `ct0` is optional. The settings write that turns search safety off sends
+   // `auth_token` alone; X answers 353 and issues a csrf cookie on that
+   // response, and the write continues with it.
+   let ct0 = jar
+      .remove(CSRF)
+      .filter(|value| !value.is_empty())
+      .unwrap_or_default();
    let username = jar
       .get("twid")
       .and_then(|twid| {
@@ -1115,21 +1122,21 @@ mod tests {
    use super::*;
 
    #[test]
-   fn parses_both_export_separators_and_requires_both_tokens() {
+   fn parses_export_lines_and_keeps_auth_token_without_ct0() {
       let auth = "a".repeat(40);
       let ct0 = "b".repeat(160);
       let text = format!(
          "# comment\n \
-          first:pass:mail:extra:{ct0}:{auth}\nsecond----pass----mail----{auth}----{ct0}\n\
-          third|p:a*s|mail@example.com|{auth}|{ct0}|3PUPQYSOGDNPMODH\n\
-          fourth:p|ass:mail@example.com:{auth}:{ct0}\nmissing:\
-          pass:{auth}\n"
+          first:pass:mail:extra:{ct0}:{auth}\nsecond----pass----mail----{auth}----{ct0}\nthird|p:\
+          a*s|mail@example.com|{auth}|{ct0}|3PUPQYSOGDNPMODH\nfourth:p|ass:mail@example.com:\
+          {auth}:{ct0}\nmissing:pass:{auth}\n"
       );
       let (accounts, summary) = parse_import(&text);
-      assert_eq!(summary.invalid, 1);
-      assert_eq!(accounts.len(), 4);
+      assert_eq!(summary.invalid, 0);
+      assert_eq!(accounts.len(), 5);
       for ((session, jar), name) in accounts
          .iter()
+         .take(4)
          .zip(["first", "second", "third", "fourth"])
       {
          assert_eq!(session.username, name);
@@ -1138,6 +1145,9 @@ mod tests {
          assert_eq!(session.kind, SessionKind::Cookie);
          assert!(jar.is_empty());
       }
+      assert_eq!(accounts[4].0.username, "missing");
+      assert_eq!(accounts[4].0.auth_token, auth);
+      assert!(accounts[4].0.ct0.is_empty());
    }
 
    #[test]
@@ -1152,11 +1162,15 @@ mod tests {
          "{\"cookies\":{\"auth_token\":\"fake-g\",\"ct0\":\"\"}}\n",
       );
       let (accounts, summary) = parse_import(text);
-      assert_eq!(summary.invalid, 3);
-      assert_eq!(accounts.len(), 3);
+      assert_eq!(summary.invalid, 1);
+      assert_eq!(accounts.len(), 5);
       assert_eq!(accounts[0].1["lang"], "en");
-      assert_eq!(accounts[1].0.username, "demo");
-      assert_eq!(accounts[2].0.ct0, "fake-f");
+      assert!(accounts[1].0.ct0.is_empty());
+      assert_eq!(accounts[1].0.auth_token, "missing-csrf");
+      assert_eq!(accounts[2].0.username, "demo");
+      assert_eq!(accounts[3].0.ct0, "fake-f");
+      assert_eq!(accounts[4].0.auth_token, "fake-g");
+      assert!(accounts[4].0.ct0.is_empty());
    }
 
    #[test]
@@ -1182,15 +1196,23 @@ mod tests {
    }
 
    #[test]
-   fn rejects_an_incomplete_or_conflicting_netscape_jar() {
+   fn a_netscape_jar_needs_auth_token_and_rejects_conflicts() {
       let auth = ".twitter.com\tTRUE\t/\tTRUE\t0\tauth_token\ta";
+      let (accounts, summary) = parse_import(auth);
+      assert_eq!(summary.invalid, 0);
+      assert_eq!(accounts.len(), 1);
+      assert_eq!(accounts[0].0.auth_token, "a");
+      assert!(accounts[0].0.ct0.is_empty());
+
       let csrf = ".twitter.com\tTRUE\t/\tTRUE\t0\tct0\tc";
       let conflict = ".x.com\tTRUE\t/\tTRUE\t0\tauth_token\tb";
-      for text in [auth.to_owned(), format!("{auth}\n{csrf}\n{conflict}")] {
-         let (accounts, summary) = parse_import(&text);
-         assert!(accounts.is_empty());
-         assert_eq!(summary.invalid, 1);
-      }
+      let (accounts, summary) = parse_import(&format!("{auth}\n{csrf}\n{conflict}"));
+      assert!(accounts.is_empty());
+      assert_eq!(summary.invalid, 1);
+
+      let (accounts, summary) = parse_import(csrf);
+      assert!(accounts.is_empty());
+      assert_eq!(summary.invalid, 1);
    }
 
    #[test]

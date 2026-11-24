@@ -84,9 +84,10 @@ fn scope_heading(query: &OutAccountsQuery) -> (&'static str, &'static str) {
             Some("ct0_dead") => {
                (
                   "Stale ct0 pool (ct0_dead)",
-                  "Accounts held out of active search and view slot utilization because their CSRF \
-                   token (ct0) expired. Paste a fresh ct0 to return each account straight to its \
-                   home pool.",
+                  "Accounts held out of active search and view slot utilization because their \
+                   CSRF token (ct0) expired. They are not brought back on their own. Resurrect \
+                   CT0 asks account settings for a replacement, then turns search safety off. \
+                   Paste a cookie to restore one by hand.",
                )
             },
             Some("rejected") => {
@@ -258,8 +259,8 @@ pub(crate) fn out_accounts(
       ),
    ];
 
-   let search_mode_default = op == Some("SearchTimeline")
-      || matches!(pool, Some("demoted" | "search" | "search-pass"));
+   let search_mode_default =
+      op == Some("SearchTimeline") || matches!(pool, Some("demoted" | "search" | "search-pass"));
 
    frame(theme, heading, "out", None, html! {
       header class="admin-page-header" {
@@ -375,6 +376,15 @@ pub(crate) fn out_accounts(
             div {
                h2 id="out-accounts-title" { "Accounts requiring investigation" }
                p { "Use Copy cookies or JSON to import into Cookie-Editor in your browser, Fix ct0 to insert a replacement CSRF token, or Probe to test live against X." }
+            }
+            @if query.pool.as_deref() == Some("ct0_dead") && data.counts.ct0_dead_pool > 0 {
+               button
+                  id="resurrect-all-ct0"
+                  class="admin-btn admin-resurrect-all-ct0"
+                  type="button"
+               {
+                  "Resurrect all dead CT0"
+               }
             }
          }
          p id="out-status" class="admin-notice" role="status" hidden {}
@@ -562,6 +572,15 @@ fn account_row(row: &OutAccountRow, search_mode_default: bool) -> Markup {
                      title="Download Cookie-Editor JSON file"
                   {
                      "JSON"
+                  }
+               }
+               @if is_cookie && entry.reasons.ct0_dead {
+                  button
+                     class="admin-btn admin-btn--sm admin-resurrect-ct0"
+                     type="button"
+                     data-session=(id)
+                  {
+                     "Resurrect CT0"
                   }
                }
                @if is_cookie {
