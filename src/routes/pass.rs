@@ -674,7 +674,11 @@ struct KeyForm {
    label:  String,
 }
 
-async fn keys(State(state): State<AppState>, jar: CookieJar, Form(form): Form<KeyForm>) -> Response {
+async fn keys(
+   State(state): State<AppState>,
+   jar: CookieJar,
+   Form(form): Form<KeyForm>,
+) -> Response {
    let Some(account_id) = state.passes.signed_in(&jar) else {
       return see("/search-pass/login");
    };
@@ -693,7 +697,13 @@ async fn keys(State(state): State<AppState>, jar: CookieJar, Form(form): Form<Ke
    }
    match state.passes.create_key(account_id).await {
       Ok(passes::Minted::Created(key)) => {
-         render(&state, &jar, "New API key", view::render_new_key(&key))
+         let origin = current_origin(state.config.url_prefix());
+         render(
+            &state,
+            &jar,
+            "New API key",
+            view::render_new_key(&key, &origin),
+         )
       },
       Ok(passes::Minted::Full) => see_note("key-full"),
       Err(err) => {

@@ -634,20 +634,28 @@ pub fn render_return(view: &Return<'_>) -> Markup {
    )
 }
 
-pub fn render_new_key(key: &str) -> Markup {
+/// The one page a new key is shown on. `origin` is this instance, for a call
+/// that can be pasted as it is.
+///
+/// The key is in the two boxes and nowhere in the sentence between them: a
+/// 68-character token cannot wrap, and three copies of it ran past the card.
+pub fn render_new_key(key: &str, origin: &str) -> Markup {
    shell(true, html! {
        section class="pass-card" {
            h1 { "New API key" }
            p class="pass-notice is-bad" { "Save it now. It is shown once, and cannot be looked up later." }
            pre class="pass-copy" { (key) }
            p class="pass-hint" {
-               "Send "
-               code { "Authorization: Bearer " (key) }
+               "Send it as "
+               code { "Authorization: Bearer" }
                " or "
-               code { "X-Api-Key: " (key) }
-               ". It skips the search checkbox and calls "
+               code { "X-Api-Key" }
+               " on every call. It skips the search checkbox and calls "
                a href="/api" { "/api" }
-               " while this pass is paid up."
+               " while this pass is paid up. To try it:"
+           }
+           pre class="pass-copy" {
+               "curl -H 'Authorization: Bearer " (key) "' '" (origin) "/api/search?q=rust'"
            }
            a class="pass-link" href="/search-pass" { "Back to the pass →" }
        }
@@ -724,4 +732,26 @@ pub fn render_forgot(mail: bool, sent: bool) -> Markup {
        }
        p class="pass-foot" { a href="/search-pass/login" { "Back to log in" } }
    })
+}
+
+#[cfg(test)]
+mod tests {
+   use super::render_new_key;
+
+   #[test]
+   fn a_new_key_is_shown_whole_only_in_the_boxes_that_wrap() {
+      let key = format!("tpk_{}", "ab".repeat(32));
+      let html = render_new_key(&key, "https://xitter.cf").into_string();
+      assert!(html.contains(&format!("<pre class=\"pass-copy\">{key}</pre>")));
+      assert!(html.contains("https://xitter.cf/api/search?q=rust"));
+      // Once alone and once in the call to paste.
+      assert_eq!(html.matches(&key).count(), 2);
+      let hint = html
+         .split("<p class=\"pass-hint\">")
+         .nth(1)
+         .and_then(|rest| rest.split("</p>").next())
+         .unwrap();
+      assert!(hint.contains("<code>Authorization: Bearer</code>"));
+      assert!(!hint.contains(&key));
+   }
 }

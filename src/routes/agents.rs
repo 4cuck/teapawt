@@ -1027,8 +1027,8 @@ fn clean_username(username: &str) -> String {
 async fn search_text(state: &AppState, query: &str) -> Result<String, String> {
    if state.config.turnstile.guards_search() && !state.passes.admits_address() {
       return Err(
-         "Search requires the checkbox on the website, or a search pass with this IP address \
-          whitelisted."
+         "Search requires the checkbox on the website, or a search pass: send its API key, or \
+          whitelist this IP address."
             .into(),
       );
    }

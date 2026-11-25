@@ -924,6 +924,49 @@ pub(super) fn twitter_error_code(body: &str) -> Option<i64> {
       .find(|code| *code != 0)
 }
 
+/// A 1.1 call's refusal to show this account someone else's data:
+/// `{"request":"/1.1/friends/ids.json","error":"Not authorized."}`.
+///
+/// It names the request and carries no `errors` array. X's verdict on the
+/// token itself always has one (code 32 or 89), so that is never read as
+/// this.
+fn target_not_authorized(body: &str) -> bool {
+   #[derive(Deserialize)]
+   struct Refused {
+      request: String,
+      error:   String,
+   }
+   twitter_error_code(body).is_none()
+      && serde_json::from_str::<Refused>(body).is_ok_and(|refused| {
+         !refused.request.is_empty()
+            && refused
+               .error
+               .trim_end_matches('.')
+               .eq_ignore_ascii_case("not authorized")
+      })
+}
+
+#[cfg(test)]
+#[test]
+fn a_closed_target_is_not_a_dead_token() {
+   assert!(target_not_authorized(
+      r#"{"request":"\/1.1\/friends\/ids.json","error":"Not authorized."}"#
+   ));
+   // X's verdict on the token itself still benches the account, and so does
+   // any 401 whose body is not exactly this refusal.
+   for dead in [
+      r#"{"errors":[{"code":32,"message":"Could not authenticate you."}]}"#,
+      r#"{"errors":[{"code":89,"message":"Invalid or expired token."}]}"#,
+      r#"{"request":"\/1.1\/friends\/ids.json","error":"Not authorized.","errors":[{"code":89}]}"#,
+      r#"{"error":"Not authorized."}"#,
+      r#"{"request":"\/1.1\/friends\/ids.json","error":"Something else."}"#,
+      "",
+      "<html>401</html>",
+   ] {
+      assert!(!target_not_authorized(dead), "{dead}");
+   }
+}
+
 fn is_settings_not_found(endpoint: &str, body: &str) -> bool {
    endpoint == endpoints::ACCOUNT_SETTINGS && twitter_error_code(body) == Some(34)
 }
@@ -1225,9 +1268,10 @@ impl ApiClient {
    /// Solving visits x.com, reads Cloudflare's JSD challenge and posts the
    /// oneshot; the cookie it returns lands in the session's jar and is sent on
    /// the search that follows. This is best-effort and never blocks search: a
-   /// session that already has a fresh cookie, a non-Chrome identity, or a
-   /// tripped breaker returns at once. The first solve failure trips the
-   /// breaker, after which no further x.com clearance requests are made and
+   /// session that already has a fresh cookie, a non-Chrome identity, a failed
+   /// solve in the last minute, or a tripped breaker returns at once. A
+   /// changed challenge trips the breaker, and so does a long run of other
+   /// failures. After that no further x.com clearance requests are made and
    /// search continues without the cookie.
    pub(crate) async fn ensure_search_clearance(&self, session: &SessionLease) {
       if session.kind != SessionKind::Cookie || !self.clearance.should_solve(session.id) {
@@ -1268,7 +1312,7 @@ impl ApiClient {
             // Cloudflare changed the challenge: every solve would fail the same
             // way, so disable the whole flow until restart (one strike).
             let reason = err.reason();
-            self.clearance.record_failure(reason, false, true);
+            self.clearance.record_failure(&err);
             self.clearance.trip(reason);
             tracing::warn!(
                session_id = session.id,
@@ -1285,8 +1329,8 @@ impl ApiClient {
             // next search does not immediately fetch it again.
             self.clearance.defer_retry(session.id);
             let reason = err.reason();
-            if !err.counts_streak() {
-               self.clearance.record_failure(reason, true, false);
+            let streak = self.clearance.record_failure(&err);
+            if err.is_shell() {
                tracing::info!(
                   session_id = session.id,
                   reason = %reason,
@@ -1294,7 +1338,6 @@ impl ApiClient {
                );
                return;
             }
-            let streak = self.clearance.record_failure(reason, true, true);
             if streak >= super::clearance::max_failure_streak() {
                self.clearance.trip(&format!(
                   "{streak} consecutive clearance failures; last: {reason}"
@@ -2741,6 +2784,22 @@ impl ApiClient {
          // this request, not the account: Cloudflare answers a 269-byte block
          // page this way, and reading it as dead credentials benched healthy
          // accounts for good. Only a JSON 403 can carry X's own verdict.
+         //
+         // One 401 is not a dead token either. A 1.1 call about another
+         // account, such as its follow lists, is answered 401 when that
+         // account is protected. X is refusing the resource; its verdict on
+         // the token comes as an `errors` array. Benching on it would cost
+         // one healthy account for every protected account an API client
+         // asks about, so it is passed on as what it is.
+         if status.as_u16() == 401 && target_not_authorized(&body) {
+            tracing::debug!(
+               session_id = session.id,
+               endpoint,
+               "X will not show this account the target: {shown}"
+            );
+            self.sessions.disarm_meter(session);
+            return Err(Error::ProtectedUser(format!("Status {status}: {shown}")));
+         }
          if status.as_u16() == 401
             || (status.as_u16() == 403 && twitter_error_code(&body) == Some(326))
          {

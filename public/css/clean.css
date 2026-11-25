@@ -1652,11 +1652,12 @@ nav.explore-tabbar {
 .pass-page p { margin: 0; }
 .pass-page form { margin: 0; }
 .pass-page a { color: var(--accent); }
+/* Wraps a long token only where it would overflow. break-all would also
+   split a short one, such as a header name, in the middle of a sentence. */
 .pass-page code, .pass-mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   overflow-wrap: anywhere;
-  word-break: break-all;
 }
 
 .pass-card, .pass-hero {
@@ -1775,8 +1776,10 @@ nav.explore-tabbar {
   font-size: 13px;
   line-height: 1.45;
 }
-.pass-notice.is-good { border-left-color: var(--pass-good); }
-.pass-notice.is-bad { border-left-color: var(--pass-bad); }
+/* The colours are named again here because /api uses these notices outside
+   .pass-page, where the variables are not set. */
+.pass-notice.is-good { border-left-color: var(--pass-good, #3fb27f); }
+.pass-notice.is-bad { border-left-color: var(--pass-bad, #e5534b); }
 .pass-notice.is-info { border-left-color: var(--accent); }
 .pass-center .pass-notice { align-self: stretch; text-align: left; }
 

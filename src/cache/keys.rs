@@ -41,6 +41,27 @@ pub fn list_tweets(id: &str, cursor: Option<&str>) -> String {
    format!("lt:{id}:{}", cursor.unwrap_or(""))
 }
 
+/// One page of a community's posts. `ranking` is the mode sent to X.
+pub fn community_tweets(id: &str, ranking: &str, cursor: Option<&str>) -> String {
+   format!("ct:{id}:{ranking}:{}", cursor.unwrap_or(""))
+}
+
+/// One page of an account's posts and replies.
+pub fn user_replies(user_id: &str, cursor: Option<&str>) -> String {
+   format!("ur:{user_id}:{}", cursor.unwrap_or(""))
+}
+
+/// One page of the accounts that reposted a post.
+pub fn retweeters(id: &str, cursor: Option<&str>) -> String {
+   format!("rt:{id}:{}", cursor.unwrap_or(""))
+}
+
+/// One page of who an account follows or is followed by. `kind` names the
+/// call, since each returns a different shape for the same account.
+pub fn user_graph(kind: &str, user_id: &str, count: u32, cursor: Option<&str>) -> String {
+   format!("g:{kind}:{user_id}:{count}:{}", cursor.unwrap_or(""))
+}
+
 pub fn list_members(id: &str) -> String {
    format!("lm:{id}")
 }

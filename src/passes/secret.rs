@@ -195,7 +195,11 @@ mod tests {
       assert_ne!(first, second);
       assert!(valid_api_key(&first));
       assert_eq!(first.len(), 68);
-      assert!(first.as_bytes()[4..].iter().all(|byte| byte.is_ascii_hexdigit()));
+      assert!(
+         first.as_bytes()[4..]
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit())
+      );
       let label = api_key_label(&first).unwrap();
       assert!(valid_key_label(&label));
       assert!(!valid_api_key(&label));

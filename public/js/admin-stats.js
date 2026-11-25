@@ -1525,7 +1525,9 @@
       const result = await response.json();
       const message = result.detail || (result.ok ? 'ct0 resurrected.' : 'ct0 was not resurrected.');
       const display = getMain(document)?.dataset.page === 'out' ? `Account #${id}: ${message}` : message;
-      const tone = result.ok ? 'ok' : 'error';
+      // The ct0 can be resurrected while the settings write after it is not
+      // made. That is a warning: the account is back, with one thing left.
+      const tone = !result.ok ? 'error' : result.filters_cleared ? 'ok' : 'warn';
       await refreshMain(window.location.href);
       const freshBanner =
         document.getElementById('ct0-status') ||

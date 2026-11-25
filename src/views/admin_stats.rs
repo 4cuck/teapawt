@@ -418,7 +418,7 @@ pub(crate) fn frame(
             meta name="robots" content="noindex, nofollow";
             title { (title) " · Teapot administration" }
             link rel="stylesheet" href="/css/admin-stats.css?v=10";
-            script src="/js/admin-stats.js?v=10" defer="" {}
+            script src="/js/admin-stats.js?v=11" defer="" {}
             @if nav_fingerprints {
                link rel="stylesheet" href="/css/admin-captures.css?v=1";
                script src="/js/admin-captures.js?v=2" defer="" {}
@@ -1812,7 +1812,7 @@ mod tests {
       let markup = page("light", Some(&dashboard), WEEK_MINUTES).into_string();
       assert!(markup.contains("data-theme=\"light\""));
       assert!(markup.contains("/css/admin-stats.css?v=10"));
-      assert!(markup.contains("/js/admin-stats.js?v=10"));
+      assert!(markup.contains("/js/admin-stats.js?v=11"));
       assert!(markup.contains("Resurrect all dead CT0"));
       assert!(markup.contains("href=\"/admin/stats/out?op=UserTweets\""));
       assert!(!markup.contains("style=\""));

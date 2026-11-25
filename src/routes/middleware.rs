@@ -51,6 +51,10 @@ pub async fn snowflake_guard(
          !(1..=19).contains(&id.len()) || !id.bytes().all(|byte| byte.is_ascii_digit())
       });
    if bad_id {
+      // An API client reads JSON, so its refusal is not the HTML error page.
+      if super::json_api::owns(request.uri().path()) {
+         return super::json_api::invalid_id();
+      }
       return Error::InvalidUrl("Invalid id".into()).into_response();
    }
    next.run(request).await

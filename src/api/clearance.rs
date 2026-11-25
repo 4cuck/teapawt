@@ -132,8 +132,9 @@ const TEMPLATE_JSON: &str = include_str!("jsd_payload_template.json");
 
 // ───────────────────────── the gate ─────────────────────────
 
-/// The circuit breaker around the clearance flow. One solve failure trips it
-/// for the life of the process.
+/// The circuit breaker around the clearance flow. A changed challenge trips
+/// it at once and a long run of other failures trips it too, for the life of
+/// the process. The HTML shell does neither.
 #[derive(Clone)]
 pub(crate) struct ClearanceGate {
    inner: Arc<Inner>,
@@ -141,28 +142,29 @@ pub(crate) struct ClearanceGate {
 
 struct Inner {
    /// `searchClearance` in config: the flow runs at all.
-   enabled:   bool,
-   state:     RwLock<GateState>,
+   enabled:     bool,
+   state:       RwLock<GateState>,
    /// Session id → when its clearance was last minted.
-   sessions:  Mutex<HashMap<i64, Instant>>,
+   sessions:    Mutex<HashMap<i64, Instant>>,
    /// Session id → earliest time it may try to solve again. A failed solve used
    /// to stay eligible, so the next search retried immediately and one exit
    /// that kept receiving the HTML shell walked the global streak to the cap
    /// by itself.
    retry_after: Mutex<HashMap<i64, Instant>>,
    /// One solve at a time, so a cold start does not stampede x.com.
-   solving:   tokio::sync::Mutex<()>,
-   attempts:  AtomicU64,
-   successes: AtomicU64,
-   failures:  AtomicU64,
+   solving:     tokio::sync::Mutex<()>,
+   attempts:    AtomicU64,
+   successes:   AtomicU64,
+   failures:    AtomicU64,
    /// Transient failures (a subset of `failures`): bad responses, network
    /// errors, declined mints. These do not trip the breaker on their own.
-   transient: AtomicU64,
-   /// Failures in a row (any kind), reset by a success. A long run trips the
-   /// breaker so a persistent problem stops hammering x.com.
-   streak:    AtomicU64,
-   last_ok:   Mutex<Option<OffsetDateTime>>,
-   last_err:  Mutex<Option<String>>,
+   transient:   AtomicU64,
+   /// Failures in a row, reset by a success. A long run trips the breaker so
+   /// a persistent problem stops hammering x.com. The HTML shell is not
+   /// counted: it comes in bursts on one exit and clears by itself.
+   streak:      AtomicU64,
+   last_ok:     Mutex<Option<OffsetDateTime>>,
+   last_err:    Mutex<Option<String>>,
 }
 
 /// Consecutive failures that trip the breaker even when each looks transient:
@@ -277,31 +279,34 @@ impl ClearanceGate {
          .lock()
          .unwrap_or_else(std::sync::PoisonError::into_inner)
          .insert(session_id, Instant::now());
-      self.inner
+      self
+         .inner
          .retry_after
          .lock()
          .unwrap_or_else(std::sync::PoisonError::into_inner)
          .remove(&session_id);
    }
 
-   /// Count a failure and return the consecutive-failure streak. `transient`
-   /// failures are also tallied separately. `advance_streak` is false for the
-   /// HTML shell: that answer is recorded, but it does not move the breaker.
-   /// Does not trip; the caller decides.
-   pub(crate) fn record_failure(&self, reason: &str, transient: bool, advance_streak: bool) -> u64 {
+   /// Count a failure and return the consecutive-failure streak. Does not
+   /// trip; the caller decides.
+   ///
+   /// Anything but a changed challenge is also tallied as transient. The
+   /// HTML shell is recorded like the rest and leaves the streak where it
+   /// was, so it never moves the breaker.
+   pub(crate) fn record_failure(&self, err: &SolveError) -> u64 {
       self.inner.failures.fetch_add(1, Ordering::Relaxed);
-      if transient {
+      if !err.is_changed() {
          self.inner.transient.fetch_add(1, Ordering::Relaxed);
       }
       *self
          .inner
          .last_err
          .lock()
-         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason.to_owned());
-      if advance_streak {
-         self.inner.streak.fetch_add(1, Ordering::Relaxed) + 1
-      } else {
+         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(err.reason().to_owned());
+      if err.is_shell() {
          self.inner.streak.load(Ordering::Relaxed)
+      } else {
+         self.inner.streak.fetch_add(1, Ordering::Relaxed) + 1
       }
    }
 
@@ -388,7 +393,7 @@ pub struct ClearanceStatus {
    pub enabled:         bool,
    /// Enabled and not tripped: solves are still happening.
    pub armed:           bool,
-   /// A solve failed; the flow is off until restart.
+   /// The breaker tripped; the flow is off until restart.
    pub tripped:         bool,
    /// Why it tripped.
    pub reason:          Option<String>,
@@ -446,9 +451,10 @@ impl SolveError {
       matches!(self, Self::Changed(_))
    }
 
-   /// HTML-shell misses are recorded but do not move the trip streak.
-   pub(crate) const fn counts_streak(&self) -> bool {
-      matches!(self, Self::Transient(_))
+   /// The exit sent a document where the script should be. Recorded, but it
+   /// does not move the trip streak.
+   pub(crate) const fn is_shell(&self) -> bool {
+      matches!(self, Self::Shell(_))
    }
 }
 
@@ -1557,5 +1563,66 @@ mod tests {
       assert!(payload.contains("https://x.com"));
       assert!(payload.contains("n.hardwareConcurrency"));
       assert!(payload.contains("Win32"));
+   }
+
+   #[test]
+   fn a_document_is_told_apart_from_a_script() {
+      assert!(looks_like_document("<!DOCTYPE html><html>"));
+      assert!(looks_like_document("\n  <html lang=\"en\">"));
+      assert!(!looks_like_document(
+         "window._cf_chl_opt={};(function(){})()"
+      ));
+      assert!(!looks_like_document(""));
+   }
+
+   #[test]
+   fn the_html_shell_is_recorded_without_moving_the_breaker() {
+      let gate = ClearanceGate::new(true);
+      let shell = SolveError::Shell("html shell".to_owned());
+      // More of them than would trip the breaker if they counted.
+      let burst = MAX_FAILURE_STREAK * 2;
+      for _ in 0..burst {
+         assert_eq!(gate.record_failure(&shell), 0);
+      }
+      let status = gate.status();
+      assert_eq!(status.failures, burst);
+      assert_eq!(status.transient_failures, burst);
+      assert_eq!(status.last_error.as_deref(), Some("html shell"));
+      assert!(status.armed);
+
+      // A one-off does count, a shell between two of them changes nothing,
+      // and a success starts the count again.
+      let blip = SolveError::Transient("blip".to_owned());
+      assert_eq!(gate.record_failure(&blip), 1);
+      assert_eq!(gate.record_failure(&shell), 1);
+      assert_eq!(gate.record_failure(&blip), 2);
+      gate.mark_ok(7);
+      assert_eq!(gate.record_failure(&blip), 1);
+
+      // A changed challenge is a failure but not a transient one.
+      let transient_before = gate.status().transient_failures;
+      assert_eq!(
+         gate.record_failure(&SolveError::Changed("new encoder".to_owned())),
+         2
+      );
+      assert_eq!(gate.status().transient_failures, transient_before);
+   }
+
+   #[test]
+   fn a_failed_solve_keeps_its_session_out_of_the_solver() {
+      let gate = ClearanceGate::new(true);
+      assert!(gate.should_solve(7));
+      gate.defer_retry(7);
+      assert!(!gate.should_solve(7));
+      // Another session is not held back by it.
+      assert!(gate.should_solve(8));
+
+      // A mint ends the wait. The session then holds a fresh cookie, which
+      // is its own reason not to solve.
+      gate.mark_ok(7);
+      assert!(!gate.inner.retry_after.lock().unwrap().contains_key(&7));
+      assert!(!gate.should_solve(7));
+
+      assert!(!ClearanceGate::new(false).should_solve(7));
    }
 }

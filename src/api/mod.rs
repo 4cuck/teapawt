@@ -24,6 +24,10 @@ mod timeline_route;
 pub use auth::*;
 pub use clearance::ClearanceStatus;
 pub use client::*;
+pub use filters::{
+   Resurrected,
+   SafetyWrite,
+};
 pub use http::HttpClient;
 pub use parser::{
    CommunityInfo,

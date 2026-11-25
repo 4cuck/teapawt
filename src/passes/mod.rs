@@ -266,27 +266,21 @@ struct Index {
    keys:       HashMap<String, i64>,
 }
 
-/// A request that sent a live API key.
-#[derive(Clone, Copy)]
-struct PresentedKey;
-
 tokio::task_local! {
-   static PRESENTED_KEY: PresentedKey;
+   /// Set for a request that sent the API key of a pass that is paid up.
+   /// The key is checked once, where the request comes in, and every later
+   /// question about the pass reads this instead of the headers.
+   static PRESENTED_KEY: ();
 }
 
 /// Run `future` as a request that sent a live API key.
 pub async fn scope_presented<F: std::future::Future>(future: F) -> F::Output {
-   PRESENTED_KEY.scope(PresentedKey, future).await
-}
-
-fn presented_key() -> Option<PresentedKey> {
-   PRESENTED_KEY.try_with(|key| *key).ok()
+   PRESENTED_KEY.scope((), future).await
 }
 
 /// Whether this request sent an API key for a pass that is still paid up.
-#[must_use]
-pub fn holds_key() -> bool {
-   presented_key().is_some()
+fn holds_key() -> bool {
+   PRESENTED_KEY.try_with(|_| ()).is_ok()
 }
 
 /// A canonical API key from `Authorization: Bearer` or `X-Api-Key`.
@@ -331,9 +325,7 @@ impl Index {
 
    /// Whether `hash` is an API key for a pass that is still paid up.
    fn key_active(&self, hash: &str, now: i64) -> bool {
-      self.keys
-         .get(hash)
-         .is_some_and(|id| self.active(*id, now))
+      self.keys.get(hash).is_some_and(|id| self.active(*id, now))
    }
 }
 
@@ -456,13 +448,15 @@ impl PassStore {
    /// Whether this request may search without the checkbox: a signed-in pass,
    /// an API key, or a whitelisted address, any of them still paid up.
    pub fn admits(&self, jar: &CookieJar) -> bool {
+      if holds_key() {
+         return true;
+      }
       let now = now();
       let index = self.index.read().unwrap_or_else(PoisonError::into_inner);
       let by_session = session_hash(jar)
          .and_then(|hash| index.sessions.get(&hash).copied())
          .is_some_and(|id| index.active(id, now));
-      let by_key = presented_key().is_some();
-      by_session || by_key || index.address_active(now)
+      by_session || index.address_active(now)
    }
 
    /// Whether `key` belongs to a pass that is still paid up.
@@ -472,19 +466,22 @@ impl PassStore {
          return false;
       };
       let hash = secret::digest(&canonical);
-      self.index
+      self
+         .index
          .read()
          .unwrap_or_else(PoisonError::into_inner)
          .key_active(&hash, now())
    }
 
-   /// [`admits`](Self::admits) for callers that send no cookies.
+   /// [`admits`](Self::admits) for callers that send no cookies: an API key
+   /// or a whitelisted address.
    pub fn admits_address(&self) -> bool {
-      self
-         .index
-         .read()
-         .unwrap_or_else(PoisonError::into_inner)
-         .address_active(now())
+      holds_key()
+         || self
+            .index
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .address_active(now())
    }
 
    /// The account this browser is signed in to, paid up or not.
@@ -1090,7 +1087,8 @@ impl PassStore {
       Ok(added)
    }
 
-   /// Mint a key. The returned string is the only copy; Postgres keeps the hash.
+   /// Mint a key. The returned string is the only copy; Postgres keeps the
+   /// hash.
    pub async fn create_key(&self, account_id: i64) -> Result<Minted, PassError> {
       let now = now();
       let created = self
@@ -1101,10 +1099,9 @@ impl PassStore {
             ])
             .await?;
             let count: i64 = tx
-               .query_one(
-                  "SELECT count(*) FROM pass_keys WHERE account_id = $1",
-                  &[&account_id],
-               )
+               .query_one("SELECT count(*) FROM pass_keys WHERE account_id = $1", &[
+                  &account_id,
+               ])
                .await?
                .get(0);
             if count >= i64::try_from(MAX_KEYS).unwrap_or(i64::MAX) {
@@ -1655,8 +1652,8 @@ mod tests {
 
    #[tokio::test]
    async fn a_presented_key_is_visible_to_the_request_it_scopes() {
-      let seen = scope_presented(async { presented_key().is_some() }).await;
+      let seen = scope_presented(async { holds_key() }).await;
       assert!(seen);
-      assert!(presented_key().is_none());
+      assert!(!holds_key());
    }
 }

@@ -245,6 +245,7 @@ fn operation(
          "403": { "$ref": "#/components/responses/Error" },
          "404": { "$ref": "#/components/responses/Error" },
          "429": { "$ref": "#/components/responses/Error" },
+         "500": { "$ref": "#/components/responses/Error" },
          "503": { "$ref": "#/components/responses/Error" }
       }
    })
@@ -329,7 +330,7 @@ fn search_parameters() -> Vec<Value> {
       json!({
          "name": "min_faves",
          "in": "query",
-         "schema": { "type": "string" },
+         "schema": { "type": "integer", "minimum": 0 },
          "description": "Minimum likes."
       }),
       json!({
@@ -348,7 +349,11 @@ fn search_parameters() -> Vec<Value> {
       }),
    ];
    for name in TOGGLES {
-      let which = if name.starts_with("e-") { "Hide" } else { "Only" };
+      let which = if name.starts_with("e-") {
+         "Hide"
+      } else {
+         "Only"
+      };
       parameters.push(json!({
          "name": name,
          "in": "query",
@@ -361,21 +366,27 @@ fn search_parameters() -> Vec<Value> {
 
 fn components() -> Value {
    let mut schemas = serde_json::Map::new();
-   schemas.insert("Failure".into(), json!({
-      "type": "object",
-      "required": ["errors"],
-      "properties": {
-         "errors": { "type": "array", "items": { "$ref": "#/components/schemas/FailureItem" } }
-      }
-   }));
-   schemas.insert("FailureItem".into(), json!({
-      "type": "object",
-      "required": ["code", "message"],
-      "properties": {
-         "code": { "type": "string" },
-         "message": { "type": "string" }
-      }
-   }));
+   schemas.insert(
+      "Failure".into(),
+      json!({
+         "type": "object",
+         "required": ["errors"],
+         "properties": {
+            "errors": { "type": "array", "items": { "$ref": "#/components/schemas/FailureItem" } }
+         }
+      }),
+   );
+   schemas.insert(
+      "FailureItem".into(),
+      json!({
+         "type": "object",
+         "required": ["code", "message"],
+         "properties": {
+            "code": { "type": "string" },
+            "message": { "type": "string" }
+         }
+      }),
+   );
    schemas.insert("Meta".into(), json!({
       "type": "object",
       "required": ["result_count"],
@@ -388,117 +399,144 @@ fn components() -> Value {
    schemas.insert("PostPage".into(), page_schema("Post"));
    schemas.insert("AccountPage".into(), page_schema("Account"));
    schemas.insert("ListPage".into(), page_schema("List"));
-   schemas.insert("IdPage".into(), json!({
-      "type": "object",
-      "required": ["data", "meta"],
-      "properties": {
-         "data": { "type": "array", "items": { "type": "string" } },
-         "meta": { "$ref": "#/components/schemas/Meta" }
-      }
-   }));
+   schemas.insert(
+      "IdPage".into(),
+      json!({
+         "type": "object",
+         "required": ["data", "meta"],
+         "properties": {
+            "data": { "type": "array", "items": { "type": "string" } },
+            "meta": { "$ref": "#/components/schemas/Meta" }
+         }
+      }),
+   );
    schemas.insert("PostEnvelope".into(), envelope("Post"));
    schemas.insert("AccountEnvelope".into(), envelope("Account"));
    schemas.insert("AboutEnvelope".into(), envelope("About"));
    schemas.insert("Account".into(), account_schema());
    schemas.insert("Post".into(), post_schema());
-   schemas.insert("Metrics".into(), json!({
-      "type": "object",
-      "description": "A missing count is zero.",
-      "properties": {
-         "replies": { "type": "integer" },
-         "reposts": { "type": "integer" },
-         "likes": { "type": "integer" },
-         "quotes": { "type": "integer" },
-         "views": { "type": "integer" }
-      }
-   }));
-   schemas.insert("Media".into(), json!({
-      "type": "object",
-      "required": ["type", "url"],
-      "properties": {
-         "type": { "type": "string", "enum": ["photo", "video", "gif"] },
-         "url": { "type": "string" },
-         "preview_url": { "type": "string" },
-         "width": { "type": "integer" },
-         "height": { "type": "integer" },
-         "alt": { "type": "string" },
-         "duration_ms": { "type": "integer" },
-         "variants": {
-            "type": "array",
-            "description": "Present when tweet.fields includes variants.",
-            "items": { "$ref": "#/components/schemas/Variant" }
+   schemas.insert(
+      "Metrics".into(),
+      json!({
+         "type": "object",
+         "description": "A missing count is zero.",
+         "properties": {
+            "replies": { "type": "integer" },
+            "reposts": { "type": "integer" },
+            "likes": { "type": "integer" },
+            "quotes": { "type": "integer" },
+            "views": { "type": "integer" }
          }
-      }
-   }));
-   schemas.insert("Variant".into(), json!({
-      "type": "object",
-      "required": ["content_type", "url"],
-      "properties": {
-         "content_type": { "type": "string" },
-         "url": { "type": "string" },
-         "bitrate": { "type": "integer" },
-         "height": { "type": "integer" }
-      }
-   }));
+      }),
+   );
+   schemas.insert(
+      "Media".into(),
+      json!({
+         "type": "object",
+         "required": ["type", "url"],
+         "properties": {
+            "type": { "type": "string", "enum": ["photo", "video", "gif"] },
+            "url": { "type": "string" },
+            "preview_url": { "type": "string" },
+            "width": { "type": "integer" },
+            "height": { "type": "integer" },
+            "alt": { "type": "string" },
+            "duration_ms": { "type": "integer" },
+            "variants": {
+               "type": "array",
+               "description": "Present when tweet.fields includes variants.",
+               "items": { "$ref": "#/components/schemas/Variant" }
+            }
+         }
+      }),
+   );
+   schemas.insert(
+      "Variant".into(),
+      json!({
+         "type": "object",
+         "required": ["content_type", "url"],
+         "properties": {
+            "content_type": { "type": "string" },
+            "url": { "type": "string" },
+            "bitrate": { "type": "integer" },
+            "height": { "type": "integer" }
+         }
+      }),
+   );
    schemas.insert("Entity".into(), json!({
       "type": "object",
       "required": ["type", "start", "end"],
       "properties": {
          "type": { "type": "string", "enum": ["url", "mention", "hashtag", "symbol"] },
-         "start": { "type": "integer", "description": "Byte offset into text." },
-         "end": { "type": "integer", "description": "Byte offset into text." },
-         "text": { "type": "string" },
-         "url": { "type": "string" }
+         "start": { "type": "integer", "description": "Where the entity starts in text, counted in characters (Unicode code points), not bytes." },
+         "end": { "type": "integer", "description": "Where it ends, counted the same way." },
+         "text": { "type": "string", "description": "A mention's display name." },
+         "url": { "type": "string", "description": "The full address of a link. For a mention, the profile path, such as /jack." }
       }
    }));
-   schemas.insert("Card".into(), json!({
-      "type": "object",
-      "required": ["type"],
-      "properties": {
-         "type": { "type": "string" },
-         "url": { "type": "string" },
-         "title": { "type": "string" },
-         "description": { "type": "string" },
-         "image": { "type": "string" }
-      }
-   }));
-   schemas.insert("Poll".into(), json!({
-      "type": "object",
-      "required": ["options", "votes"],
-      "properties": {
-         "options": { "type": "array", "items": { "$ref": "#/components/schemas/Choice" } },
-         "votes": { "type": "integer" },
-         "ends_at": { "type": "string", "format": "date-time" }
-      }
-   }));
-   schemas.insert("Choice".into(), json!({
-      "type": "object",
-      "required": ["label", "votes"],
-      "properties": {
-         "label": { "type": "string" },
-         "votes": { "type": "integer" }
-      }
-   }));
-   schemas.insert("List".into(), json!({
-      "type": "object",
-      "required": ["id", "name"],
-      "properties": {
-         "id": { "type": "string" },
-         "name": { "type": "string" },
-         "description": { "type": "string" },
-         "username": { "type": "string" },
-         "members": { "type": "integer" },
-         "subscribers": { "type": "integer" }
-      }
-   }));
-   schemas.insert("About".into(), json!({
-      "type": "object",
-      "properties": {
-         "account_based_in": { "type": "string" },
-         "connection_source": { "type": "string" },
-         "location_accurate": { "type": "boolean" }
-      }
-   }));
+   schemas.insert(
+      "Card".into(),
+      json!({
+         "type": "object",
+         "required": ["type"],
+         "properties": {
+            "type": { "type": "string" },
+            "url": { "type": "string" },
+            "title": { "type": "string" },
+            "description": { "type": "string" },
+            "image": { "type": "string" }
+         }
+      }),
+   );
+   schemas.insert(
+      "Poll".into(),
+      json!({
+         "type": "object",
+         "required": ["options", "votes"],
+         "properties": {
+            "options": { "type": "array", "items": { "$ref": "#/components/schemas/Choice" } },
+            "votes": { "type": "integer" },
+            "ends_at": { "type": "string", "format": "date-time" }
+         }
+      }),
+   );
+   schemas.insert(
+      "Choice".into(),
+      json!({
+         "type": "object",
+         "required": ["label", "votes"],
+         "properties": {
+            "label": { "type": "string" },
+            "votes": { "type": "integer" }
+         }
+      }),
+   );
+   schemas.insert(
+      "List".into(),
+      json!({
+         "type": "object",
+         "required": ["id", "name"],
+         "properties": {
+            "id": { "type": "string" },
+            "name": { "type": "string" },
+            "description": { "type": "string" },
+            "username": { "type": "string" },
+            "members": { "type": "integer" },
+            "subscribers": { "type": "integer" }
+         }
+      }),
+   );
+   schemas.insert(
+      "About".into(),
+      json!({
+         "type": "object",
+         "properties": {
+            "account_based_in": { "type": "string" },
+            "connection_source": { "type": "string" },
+            "location_accurate": { "type": "boolean" }
+         }
+      }),
+   );
 
    json!({
       "securitySchemes": {
@@ -525,7 +563,7 @@ fn components() -> Value {
             "name": "cursor",
             "in": "query",
             "schema": { "type": "string" },
-            "description": "meta.cursor from the previous page. Omitted by the server on the last page."
+            "description": "meta.cursor from the previous page. The server leaves it out when there is no further page. A page of posts can be empty and still have one."
          },
          "TweetFields": {
             "name": "tweet.fields",
@@ -544,7 +582,13 @@ fn components() -> Value {
       },
       "responses": {
          "Error": {
-            "description": "The call did not return results. code is pass_required (401), paused (429), invalid (400), blocked (400), not_found (404), suspended (403), protected (403), rate_limited (429), or unavailable (503).",
+            "description": "The call did not return results. code is pass_required (401), invalid (400), blocked (400), not_found (404), suspended (403), protected (403), rate_limited (429), unavailable (503), or error (500).",
+            "headers": {
+               "Retry-After": {
+                  "description": "Seconds to wait before calling again. Sent with 429.",
+                  "schema": { "type": "integer" }
+               }
+            },
             "content": {
                "application/json": {
                   "schema": { "$ref": "#/components/schemas/Failure" }
@@ -617,7 +661,6 @@ fn post_schema() -> Value {
    })
 }
 
-
 fn page_schema(item: &str) -> Value {
    json!({
       "type": "object",
@@ -651,7 +694,10 @@ mod tests {
       let doc = document("https://xitter.cf");
       assert_eq!(doc["openapi"], "3.1.0");
       assert_eq!(doc["servers"][0]["url"], "https://xitter.cf");
-      assert_eq!(doc["components"]["schemas"]["Post"]["properties"]["id"]["type"], "string");
+      assert_eq!(
+         doc["components"]["schemas"]["Post"]["properties"]["id"]["type"],
+         "string"
+      );
       let paths = doc["paths"].as_object().unwrap();
       for path in [
          "/api/search",

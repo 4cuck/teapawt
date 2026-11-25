@@ -11,7 +11,11 @@ use std::{
 };
 
 use axum::{
-   http::StatusCode,
+   http::{
+      HeaderValue,
+      StatusCode,
+      header,
+   },
    response::{
       Html,
       IntoResponse,
@@ -72,6 +76,11 @@ pub const RATE_LIMITED_MESSAGE: &str =
    "This instance has reached its upstream rate limit. Please try again later.";
 pub const INTERNAL_ERROR_MESSAGE: &str = "An internal service error occurred.";
 pub const UNAVAILABLE_MESSAGE: &str = "The service has no available upstream sessions.";
+
+/// Seconds a refused caller is asked to wait, sent as `Retry-After` with a
+/// 429. Account windows are staggered, so some quota is back within a minute,
+/// and it is the wait the Anti-DDoS check asks for.
+pub const RETRY_AFTER_SECS: u64 = 60;
 
 #[must_use]
 pub fn client_budget_message() -> &'static str {
@@ -193,6 +202,18 @@ impl Error {
       matches!(self, Self::RateLimited | Self::IpThrottled)
    }
 
+   /// How long to ask the caller to wait, for the refusals that are about
+   /// pace and not about the page: the three that answer 429.
+   #[must_use]
+   pub const fn retry_after(&self) -> Option<u64> {
+      match *self {
+         Self::RateLimited | Self::IpThrottled | Self::ClientBudgetExhausted => {
+            Some(RETRY_AFTER_SECS)
+         },
+         _ => None,
+      }
+   }
+
    /// Status, heading and reader-facing text for this failure.
    #[must_use]
    pub fn presentation(&self) -> (StatusCode, &'static str, &str) {
@@ -306,11 +327,12 @@ impl IntoResponse for Error {
          Error::TransientUpstream | Error::SearchRefused | Error::SearchTimelineFailed
       ) {
          tracing::trace!(error = ?self, "upstream empty");
-      } else if matches!(self, Error::ClientBudgetExhausted) {
-         // A visitor over their own budget being told to slow down is the
-         // budget working, not a failed request. At error level it was 33,779
-         // of a day's 33,870 error lines and hid the other 91.
-         tracing::debug!("client over its budget");
+      } else if status == StatusCode::TOO_MANY_REQUESTS {
+         // A caller told to slow down, or to come back when the accounts have
+         // calls again, is the limit working, not a failed request. At error
+         // level the budget alone was 33,779 of a day's 33,870 error lines
+         // and hid the other 91.
+         tracing::debug!(error = ?self, "request refused");
       } else if status.is_server_error() {
          tracing::error!(error = ?self, "request failed");
       }
@@ -333,7 +355,22 @@ impl IntoResponse for Error {
          html_escape(msg)
       );
 
-      (status, Html(html)).into_response()
+      let mut response = (status, Html(html)).into_response();
+      // A refusal or a failure is about this caller and this moment. Cloudflare
+      // once kept the 429 page for a minute and served it to readers who had
+      // not hit the limit, so neither is left for a shared cache to store.
+      if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+         response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-store"),
+         );
+      }
+      if let Some(seconds) = self.retry_after() {
+         response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
+      }
+      response
    }
 }
 
@@ -373,5 +410,41 @@ impl TwitterError {
          422 => Some(Self::TweetCensored),
          _ => None,
       }
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn a_rate_limit_answers_429_and_says_when_to_come_back() {
+      for err in [
+         Error::RateLimited,
+         Error::IpThrottled,
+         Error::ClientBudgetExhausted,
+      ] {
+         assert_eq!(err.retry_after(), Some(RETRY_AFTER_SECS));
+         let response = err.into_response();
+         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+         assert_eq!(response.headers()[header::RETRY_AFTER], "60");
+         assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-store"
+         );
+      }
+   }
+
+   #[test]
+   fn other_failures_stay_503_and_a_missing_page_can_still_be_cached() {
+      let down = Error::TransientUpstream.into_response();
+      assert_eq!(down.status(), StatusCode::SERVICE_UNAVAILABLE);
+      assert!(down.headers().get(header::RETRY_AFTER).is_none());
+      assert_eq!(down.headers()[header::CACHE_CONTROL], "private, no-store");
+
+      let gone = Error::UserNotFound("nobody".into()).into_response();
+      assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+      assert!(gone.headers().get(header::RETRY_AFTER).is_none());
+      assert!(gone.headers().get(header::CACHE_CONTROL).is_none());
    }
 }

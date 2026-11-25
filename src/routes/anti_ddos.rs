@@ -15,8 +15,8 @@
 //! lapses on its own `antiDdos.floodHoldMinutes` after the last flooded
 //! minute, so an attack that pauses does not walk straight back in.
 //!
-//! Search pass holders (signed-in browsers and whitelisted addresses) and
-//! crawlers Cloudflare has verified never see the check.
+//! Search pass holders (signed-in browsers, API keys and whitelisted
+//! addresses) and crawlers Cloudflare has verified never see the check.
 
 use std::{
    collections::HashMap,
@@ -320,11 +320,17 @@ pub(crate) fn status(state: &AppState, now: i64) -> GateStatus {
 
 /// The home page costs no X call and carries the notice explaining the
 /// check, so it stays readable before the check is solved.
+///
+/// The JSON API is open for another reason. It asks for a search pass itself
+/// and calls X for nobody else, so a script with a mistyped or lapsed key is
+/// told that in JSON. Sent the check instead, it would read a 429 and a page
+/// it cannot solve, and keep retrying a key that will never work.
 fn is_open(path: &str) -> bool {
    matches!(
       path,
       "/" | "/pool-counts" | super::import::PUBLIC_PATH | super::import::REFRESH_PATH
    ) || super::middleware::is_admin_path(path)
+      || super::json_api::owns(path)
       || OPEN_PAGES.iter().any(|page| {
          path == *page
             || path
@@ -436,7 +442,6 @@ fn safe_resume(resume: &str) -> &str {
 
 pub(super) fn cleared(state: &AppState, jar: &CookieJar) -> bool {
    state.passes.admits(jar)
-      || crate::passes::holds_key()
       || budget::current_client().is_some_and(|client| {
          pass_valid(
             &state.config.config.hmac_key,
@@ -686,6 +691,10 @@ mod tests {
          "/pic/abc",
          "/robots.txt",
          "/sitemap-profiles.xml",
+         "/api",
+         "/api/openapi.json",
+         "/api/search",
+         "/api/users/jack/tweets",
       ] {
          assert!(is_open(open), "{open}");
       }
@@ -697,6 +706,10 @@ mod tests {
          "/search",
          "/import/status/20",
          "/administer",
+         // Under `/api`, but pages that call X without asking for a pass.
+         "/api/v1/statuses/20",
+         "/api/search/rss",
+         "/api/lists/rust",
       ] {
          assert!(!is_open(gated), "{gated}");
       }

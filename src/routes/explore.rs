@@ -288,19 +288,22 @@ async fn fetch_for_you(state: &AppState) -> Result<ExploreFeed> {
             Err(err) => Err(err),
          }
       },
-      Err(err) => state
-         .api
-         .explore_timeline("for_you", None)
-         .await
-         .map(curated)
-         .or(Err(err)),
+      Err(err) => {
+         state
+            .api
+            .explore_timeline("for_you", None)
+            .await
+            .map(curated)
+            .or(Err(err))
+      },
    }
 }
 
 /// Headers and topic rows only. Posts are the video feed, and a header that
 /// only introduced those posts is dropped with them.
 fn curated(mut feed: ExploreFeed) -> ExploreFeed {
-   feed.items
+   feed
+      .items
       .retain(|item| !matches!(item, ExploreItem::Tweet(_)));
    let mut index = 0;
    while index < feed.items.len() {

@@ -5,9 +5,9 @@ use maud::{
    html,
 };
 
-/// The docs page. `open` means this request may call the endpoints.
-pub fn render(host: &str, open: bool) -> Markup {
-   let origin = format!("https://{host}");
+/// The docs page. `origin` is this instance as the reader reached it, and
+/// `open` means this request may call the endpoints.
+pub fn render(origin: &str, open: bool) -> Markup {
    html! {
        div class="overlay-panel api-doc" {
            h1 { "API" }
@@ -57,7 +57,16 @@ pub fn render(host: &str, open: bool) -> Markup {
                code { "Cache-Control: private, no-store" }
                ". Ask for gzip with "
                code { "Accept-Encoding" }
-               " and the body is compressed. Empty fields are left out. Post ids are strings, so they stay exact in JavaScript."
+               " and the body is compressed. Empty fields are left out. Post ids are strings, so they stay exact in JavaScript. "
+               "Text is as X sends it: links are "
+               code { "t.co" }
+               " links, and most posts arrive with "
+               code { "&amp;" }
+               ", "
+               code { "&lt;" }
+               " and "
+               code { "&gt;" }
+               " escaped."
            }
 
            h2 { "Search" }
@@ -154,9 +163,10 @@ pub fn render(host: &str, open: bool) -> Markup {
                code { "meta.cursor" }
                " back as "
                code { "cursor" }
-               " for the next page. It is omitted on the last page. "
-               "The same query shares the cache with the HTML search, so a repeat while that page is fresh does not ask X again. "
-               "The pass still uses the search-pass accounts."
+               " for the next page. It is left out when there is no further page. "
+               "A page of posts can be empty and still have a cursor: every post on it was filtered out, and there are more behind it. "
+               "Stop when the cursor is gone, or after two empty pages in a row. "
+               "Searches run on the search-pass accounts."
            }
            pre { code {
 "{
@@ -202,11 +212,12 @@ pub fn render(host: &str, open: bool) -> Markup {
                " and "
                code { "suspended" }
                " are present only when true. "
+               "The posts and the follow lists of a suspended or protected account answer 403. "
                "Media URLs point at the CDN. "
                code { "entities.start" }
                " and "
                code { "entities.end" }
-               " are byte offsets into "
+               " count characters (Unicode code points, not bytes) into "
                code { "text" }
                "."
            }
@@ -246,7 +257,7 @@ pub fn render(host: &str, open: bool) -> Markup {
            table {
                thead { tr { th { "Name" } th { "Adds" } } }
                tbody {
-                   tr { td { code { "entities" } } td { "Mentions, hashtags, symbols, and links." } }
+                   tr { td { code { "entities" } } td { "Mentions, hashtags, symbols, and links, each with where it sits in the text. A link has its full " code { "url" } "." } }
                    tr { td { code { "card" } } td { "Link preview: title, description, image." } }
                    tr { td { code { "poll" } } td { "Choices, votes, and end time." } }
                    tr { td { code { "source" } } td { "Client the post was sent from." } }
@@ -302,26 +313,27 @@ pub fn render(host: &str, open: bool) -> Markup {
                ". "
                code { "user.fields=all" }
                " selects those. "
-               "User search already includes verification, the avatar, the bio, counts, location, and website. "
+               "A list of accounts (user search, following, followers, friends, retweeters) already includes verification, the avatar, the bio, counts, location, and website. "
                code { "GET /api/users/{username}" }
                " returns the full profile."
            }
            pre { code { (origin) "/api/search?q=rust&tweet.fields=created_at,author,metrics&user.fields=verified,followers" } }
 
            h2 { "Errors" }
-           p { "Every failure has the same shape." }
+           p { "Every failure has the same shape, and it is JSON on every path listed above." }
            pre { code { "{ \"errors\": [{ \"code\": \"pass_required\", \"message\": \"A search pass is required.\" }] }" } }
            table {
                thead { tr { th { "Code" } th { "Status" } th { "When" } } }
                tbody {
-                   tr { td { code { "pass_required" } } td { "401" } td { "No paid pass on this browser or address." } }
-                   tr { td { code { "invalid" } } td { "400" } td { "Missing query, unknown field, or a bad username." } }
+                   tr { td { code { "pass_required" } } td { "401" } td { "No paid pass on this request, or an API key that was not accepted: mistyped, revoked, or on a pass that has run out." } }
+                   tr { td { code { "invalid" } } td { "400" } td { "A missing or malformed parameter, an unknown field, or a bad username or id." } }
                    tr { td { code { "blocked" } } td { "400" } td { "X will not run that search." } }
                    tr { td { code { "not_found" } } td { "404" } td { "No such account or post." } }
                    tr { td { code { "suspended" } } td { "403" } td { "The account is suspended." } }
                    tr { td { code { "protected" } } td { "403" } td { "The account's posts are private." } }
-                   tr { td { code { "rate_limited" } } td { "429" } td { "The search accounts are out of calls. Try again shortly." } }
-                   tr { td { code { "unavailable" } } td { "503" } td { "X returned nothing for this call." } }
+                   tr { td { code { "rate_limited" } } td { "429" } td { "The accounts are out of calls, or this address is calling faster than its budget refills. " code { "Retry-After" } " says how many seconds to wait." } }
+                   tr { td { code { "unavailable" } } td { "503" } td { "X returned nothing for this call. Try it again." } }
+                   tr { td { code { "error" } } td { "500" } td { "The call failed on this side." } }
                }
            }
        }

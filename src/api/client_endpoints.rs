@@ -2161,10 +2161,12 @@ impl ApiClient {
       let ids = body
          .ids
          .iter()
-         .filter_map(|id| match id {
-            serde_json::Value::String(text) if !text.is_empty() => Some(text.clone()),
-            serde_json::Value::Number(number) => Some(number.to_string()),
-            _ => None,
+         .filter_map(|id| {
+            match id {
+               serde_json::Value::String(text) if !text.is_empty() => Some(text.clone()),
+               serde_json::Value::Number(number) => Some(number.to_string()),
+               _ => None,
+            }
          })
          .collect();
       Ok((ids, open_cursor(body.next_cursor_str, body.next_cursor)))
@@ -2177,7 +2179,8 @@ impl ApiClient {
       cursor: Option<&str>,
       count: u32,
    ) -> Result<PaginatedResult<User>> {
-      self.rest_users(endpoints::FRIENDS_LIST_PATH, user_id, cursor, count)
+      self
+         .rest_users(endpoints::FRIENDS_LIST_PATH, user_id, cursor, count)
          .await
    }
 
@@ -2188,7 +2191,8 @@ impl ApiClient {
       cursor: Option<&str>,
       count: u32,
    ) -> Result<PaginatedResult<User>> {
-      self.rest_users(endpoints::FOLLOWERS_LIST_PATH, user_id, cursor, count)
+      self
+         .rest_users(endpoints::FOLLOWERS_LIST_PATH, user_id, cursor, count)
          .await
    }
 
@@ -2199,7 +2203,9 @@ impl ApiClient {
       cursor: Option<&str>,
       count: u32,
    ) -> Result<PaginatedResult<User>> {
-      let body = self.rest_graph::<UserBody>(path, user_id, cursor, count).await?;
+      let body = self
+         .rest_graph::<UserBody>(path, user_id, cursor, count)
+         .await?;
       Ok(PaginatedResult {
          content: body.users.into_iter().filter_map(v1_user).collect(),
          bottom: open_cursor(body.next_cursor_str, body.next_cursor),
@@ -2284,32 +2290,37 @@ struct UserBody {
 
 #[derive(Deserialize, Default)]
 struct V1User {
-   id_str:                   Option<String>,
-   id:                       Option<i64>,
-   screen_name:              Option<String>,
-   name:                     Option<String>,
-   description:              Option<String>,
-   location:                 Option<String>,
-   url:                      Option<String>,
-   followers_count:          Option<i64>,
-   friends_count:            Option<i64>,
-   statuses_count:           Option<i64>,
-   favourites_count:         Option<i64>,
-   protected:                Option<bool>,
-   verified:                 Option<bool>,
-   profile_image_url_https:  Option<String>,
-   profile_banner_url:       Option<String>,
+   id_str:                  Option<String>,
+   id:                      Option<i64>,
+   screen_name:             Option<String>,
+   name:                    Option<String>,
+   description:             Option<String>,
+   location:                Option<String>,
+   url:                     Option<String>,
+   followers_count:         Option<i64>,
+   friends_count:           Option<i64>,
+   statuses_count:          Option<i64>,
+   favourites_count:        Option<i64>,
+   protected:               Option<bool>,
+   verified:                Option<bool>,
+   profile_image_url_https: Option<String>,
+   profile_banner_url:      Option<String>,
 }
 
 fn open_cursor(raw: Option<String>, numeric: Option<i64>) -> Option<String> {
-   let text = raw.or_else(|| numeric.filter(|cursor| *cursor != 0).map(|cursor| cursor.to_string()));
+   let text = raw.or_else(|| {
+      numeric
+         .filter(|cursor| *cursor != 0)
+         .map(|cursor| cursor.to_string())
+   });
    text.filter(|cursor| !cursor.is_empty() && cursor != "0")
 }
 
 fn v1_user(raw: V1User) -> Option<User> {
-   let id = raw.id_str.filter(|id| !id.is_empty()).or_else(|| {
-      raw.id.and_then(|id| (id != 0).then(|| id.to_string()))
-   })?;
+   let id = raw
+      .id_str
+      .filter(|id| !id.is_empty())
+      .or_else(|| raw.id.and_then(|id| (id != 0).then(|| id.to_string())))?;
    let username = raw.screen_name.filter(|name| !name.is_empty())?;
    Some(User {
       id,

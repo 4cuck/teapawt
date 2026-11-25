@@ -151,7 +151,7 @@ pub struct SearchQuery {
    #[serde(rename = "e-images")]
    pub e_images:         Option<String>,
    #[serde(rename = "e-videos")]
-   pub e_videos:        Option<String>,
+   pub e_videos:         Option<String>,
    #[serde(rename = "e-links")]
    pub e_links:          Option<String>,
    #[serde(rename = "e-news")]
@@ -177,30 +177,30 @@ impl SearchQuery {
    /// Convert URL parameters to `SearchFilters` for form rendering.
    pub fn to_filters(&self) -> search_view::SearchFilters {
       search_view::SearchFilters {
-         media:                 selected(&self.f_media),
-         images:                selected(&self.f_images),
-         videos:                selected(&self.f_videos),
-         links:                 selected(&self.f_links),
-         news:                  selected(&self.f_news),
-         quote:                 selected(&self.f_quote),
-         verified:              selected(&self.f_verified),
-         retweets:              selected(&self.f_nativeretweets),
-         replies:               selected(&self.f_replies),
-         spaces:                selected(&self.f_spaces),
-         native_video:          selected(&self.f_native_video),
-         exclude_replies:       selected(&self.e_replies),
-         exclude_retweets:      selected(&self.e_nativeretweets),
-         exclude_media:         selected(&self.e_media),
-         exclude_images:        selected(&self.e_images),
-         exclude_videos:        selected(&self.e_videos),
-         exclude_links:         selected(&self.e_links),
-         exclude_news:          selected(&self.e_news),
-         exclude_quote:         selected(&self.e_quote),
-         exclude_spaces:        selected(&self.e_spaces),
-         exclude_native_video:  selected(&self.e_native_video),
-         since:            self.since.clone().unwrap_or_default(),
-         until:            self.until.clone().unwrap_or_default(),
-         min_faves:        self.min_faves.clone().unwrap_or_default(),
+         media:                selected(&self.f_media),
+         images:               selected(&self.f_images),
+         videos:               selected(&self.f_videos),
+         links:                selected(&self.f_links),
+         news:                 selected(&self.f_news),
+         quote:                selected(&self.f_quote),
+         verified:             selected(&self.f_verified),
+         retweets:             selected(&self.f_nativeretweets),
+         replies:              selected(&self.f_replies),
+         spaces:               selected(&self.f_spaces),
+         native_video:         selected(&self.f_native_video),
+         exclude_replies:      selected(&self.e_replies),
+         exclude_retweets:     selected(&self.e_nativeretweets),
+         exclude_media:        selected(&self.e_media),
+         exclude_images:       selected(&self.e_images),
+         exclude_videos:       selected(&self.e_videos),
+         exclude_links:        selected(&self.e_links),
+         exclude_news:         selected(&self.e_news),
+         exclude_quote:        selected(&self.e_quote),
+         exclude_spaces:       selected(&self.e_spaces),
+         exclude_native_video: selected(&self.e_native_video),
+         since:                self.since.clone().unwrap_or_default(),
+         until:                self.until.clone().unwrap_or_default(),
+         min_faves:            self.min_faves.clone().unwrap_or_default(),
       }
    }
 
@@ -248,7 +248,7 @@ impl SearchQuery {
          query.min_likes.clone_from(min);
       }
 
-      // Include toggles. Checking both include and exclude keeps the exclude.
+      // The panel's toggles, then the comma lists the API takes.
       let filter_toggles: &[(&Option<String>, &Option<String>, &str)] = &[
          (&self.f_media, &self.e_media, "media"),
          (&self.f_images, &self.e_images, "images"),
@@ -259,13 +259,18 @@ impl SearchQuery {
          (&self.f_replies, &self.e_replies, "replies"),
          (&self.f_spaces, &self.e_spaces, "spaces"),
          (&self.f_native_video, &self.e_native_video, "native_video"),
-         (&self.f_nativeretweets, &self.e_nativeretweets, "nativeretweets"),
+         (
+            &self.f_nativeretweets,
+            &self.e_nativeretweets,
+            "nativeretweets",
+         ),
       ];
       for &(include, exclude, name) in filter_toggles {
+         if selected(include) {
+            push_unique(&mut query.filters, name);
+         }
          if selected(exclude) {
             push_unique(&mut query.excludes, name);
-         } else if selected(include) {
-            push_unique(&mut query.filters, name);
          }
       }
       if selected(&self.f_verified) {
@@ -273,6 +278,10 @@ impl SearchQuery {
       }
       push_filter_list(&self.filters, &mut query.filters);
       push_filter_list(&self.exclude, &mut query.excludes);
+      // A name both included and excluded keeps only the exclude, whichever
+      // of the toggles, the lists and the typed query each one came from. X
+      // answers `filter:images -filter:images` with nothing.
+      query.filters.retain(|name| !query.excludes.contains(name));
 
       query
    }
@@ -373,7 +382,11 @@ pub fn search_fields(params: &SearchQuery) -> Vec<(&'static str, &str)> {
    push_field(&mut fields, "f-verified", params.f_verified.as_ref());
    push_field(&mut fields, "f-replies", params.f_replies.as_ref());
    push_field(&mut fields, "f-spaces", params.f_spaces.as_ref());
-   push_field(&mut fields, "f-native_video", params.f_native_video.as_ref());
+   push_field(
+      &mut fields,
+      "f-native_video",
+      params.f_native_video.as_ref(),
+   );
    push_field(
       &mut fields,
       "f-nativeretweets",
@@ -1044,6 +1057,39 @@ mod tests {
       assert!(filters.exclude_media);
       assert!(filters.exclude_retweets);
       assert!(filters.retweets);
+   }
+
+   #[test]
+   fn an_exclude_wins_wherever_the_include_came_from() {
+      for query in [
+         // Both comma lists.
+         SearchQuery {
+            filters: Some("images,links".to_owned()),
+            exclude: Some("images".to_owned()),
+            ..SearchQuery::default()
+         },
+         // A toggle against a list.
+         SearchQuery {
+            f_images: Some("on".to_owned()),
+            f_links: Some("on".to_owned()),
+            exclude: Some("images".to_owned()),
+            ..SearchQuery::default()
+         },
+         // Typed into the box against a toggle.
+         SearchQuery {
+            query: Some("cats filter:images filter:links".to_owned()),
+            e_images: Some("on".to_owned()),
+            ..SearchQuery::default()
+         },
+      ] {
+         let parsed = query.to_query();
+         assert_eq!(parsed.filters, ["links"]);
+         assert_eq!(parsed.excludes, ["images"]);
+         let api = parsed.build();
+         assert!(api.contains("filter:links"), "{api}");
+         assert!(api.contains("-filter:images"), "{api}");
+         assert_eq!(api.matches("filter:images").count(), 1, "{api}");
+      }
    }
 
    #[test]

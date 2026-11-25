@@ -813,12 +813,18 @@ pub fn api_error_titled(config: &Config, err: &Error, generic: &str) -> Response
    let markup = layout::render_error(config, title, message);
    // Cloudflare was storing this page for a minute and serving the 429 to
    // people who had not hit the limit.
-   (
+   let mut response = (
       status,
       [(header::CACHE_CONTROL, "private, no-store")],
       Html(markup.into_string()),
    )
-      .into_response()
+      .into_response();
+   if let Some(seconds) = err.retry_after() {
+      response
+         .headers_mut()
+         .insert(header::RETRY_AFTER, header::HeaderValue::from(seconds));
+   }
+   response
 }
 
 fn classify_error<'a>(err: &'a Error, generic: &'a str) -> (StatusCode, &'a str, &'a str) {

@@ -48,6 +48,8 @@ use crate::{
    AppState,
    accounts::AccountIdentity,
    api::{
+      Resurrected,
+      SafetyWrite,
       auth::{
          OutAccountEntry,
          OutBreakdown,
@@ -1124,6 +1126,15 @@ fn parse_probe_mode(raw: Option<&str>) -> std::result::Result<ProbeMode, &'stati
    }
 }
 
+/// Add a sentence to what a probe reports, after whatever X's answer put
+/// there.
+fn add_note(detail: &mut Option<String>, note: &str) {
+   *detail = Some(match detail.take() {
+      Some(existing) => format!("{existing}. {note}"),
+      None => note.to_owned(),
+   });
+}
+
 fn flags_from_state(account: &crate::api::auth::AccountState) -> ProbeFlags {
    ProbeFlags {
       suspended:            account.suspended,
@@ -1181,45 +1192,41 @@ async fn execute_probe(
                state.api.record_probe_search_verified(id).await;
                verified_search = true;
             } else {
-               let note =
-                  "Account is currently in the view pool; use Move to Search Pool to promote it.";
-               detail = Some(match detail {
-                  Some(existing) => format!("{existing}. {note}"),
-                  None => note.to_owned(),
-               });
+               add_note(
+                  &mut detail,
+                  "Account is currently in the view pool; use Move to Search Pool to promote it.",
+               );
             }
          }
       },
       Some(ProbeVerdict::CsrfRejected) => {
          let current_ct0 = state.api.sessions.ct0(id);
          if before.ct0_dead {
-            let note = "This account stays in the stale ct0 pool. Use Resurrect CT0 to collect a \
-                        replacement from account settings.";
-            detail = Some(match detail {
-               Some(existing) => format!("{existing}. {note}"),
-               None => note.to_owned(),
-            });
-         } else if let Some(replacement) =
-            fresh_ct0.filter(|val| !val.is_empty() && Some(val) != current_ct0.as_ref())
-         {
-            state.api.sessions.hold_ct0(id, replacement);
-            let note = "X returned a replacement ct0 in Set-Cookie and it was saved; run Probe \
-                        again to verify.";
-            detail = Some(match detail {
-               Some(existing) => format!("{existing}. {note}"),
-               None => note.to_owned(),
-            });
-         } else if current_ct0.as_ref().is_some_and(|ct0| !ct0.is_empty())
-            && current_ct0 != ct0_before_probe
-         {
-            let note = "X returned a replacement ct0 in Set-Cookie and it was saved; run Probe \
-                        again to verify.";
-            detail = Some(match detail {
-               Some(existing) => format!("{existing}. {note}"),
-               None => note.to_owned(),
-            });
+            add_note(
+               &mut detail,
+               "This account stays in the stale ct0 pool. Use Resurrect CT0 to collect a \
+                replacement from account settings.",
+            );
          } else {
-            state.api.sessions.mark_ct0_dead(id).await;
+            // The replacement is on the probe's own response, or the call
+            // that carried the probe has stored it already.
+            let replacement =
+               fresh_ct0.filter(|ct0| !ct0.is_empty() && Some(ct0) != current_ct0.as_ref());
+            let stored_by_probe = current_ct0.as_ref().is_some_and(|ct0| !ct0.is_empty())
+               && current_ct0 != ct0_before_probe;
+            let replaced = replacement.is_some() || stored_by_probe;
+            if let Some(ct0) = replacement {
+               state.api.sessions.hold_ct0(id, ct0);
+            }
+            if replaced {
+               add_note(
+                  &mut detail,
+                  "X returned a replacement ct0 in Set-Cookie and it was saved; run Probe again \
+                   to verify.",
+               );
+            } else {
+               state.api.sessions.mark_ct0_dead(id).await;
+            }
          }
       },
       Some(ProbeVerdict::CredentialsRejected) => {
@@ -1393,6 +1400,34 @@ struct ResurrectAllResponse {
    started: usize,
 }
 
+/// What a resurrection did, for the banner: the token first, then the
+/// settings write, which can fail on its own without undoing the first.
+fn resurrection_summary(done: &Resurrected) -> String {
+   let token = match (done.issued, done.was_dead) {
+      (true, true) => "X issued a new ct0 and the account left the stale pool.",
+      (true, false) => "X issued a ct0 from account settings.",
+      (false, true) => "X accepted the ct0 already stored, so the account left the stale pool.",
+      (false, false) => "X accepted the ct0 already stored.",
+   };
+   match &done.safety {
+      SafetyWrite::Written => format!("{token} Search safety was turned off."),
+      SafetyWrite::AwaitingUserId => {
+         format!("{token} Search safety is still waiting on the account's numeric id.")
+      },
+      // The settings endpoint is closed to accounts that search and read
+      // without trouble, so this is not shown as a suspension.
+      SafetyWrite::NotWritten(Error::UserSuspended(_)) => {
+         format!(
+            "{token} Search safety was not turned off: X refuses this account the settings write. \
+             That alone does not show it cannot search."
+         )
+      },
+      SafetyWrite::NotWritten(err) => {
+         format!("{token} Search safety was not turned off: {err}")
+      },
+   }
+}
+
 async fn resurrect_ct0(
    State(state): State<AppState>,
    jar: CookieJar,
@@ -1412,25 +1447,16 @@ async fn resurrect_ct0(
    }
    match state.api.resurrect_ct0(id).await {
       Ok(done) => {
-         let detail = if done.filters_cleared {
-            "X issued a ct0 from account settings and search safety was turned off."
-         } else {
-            "X issued a ct0 from account settings. Search safety is still waiting on the account's \
-             numeric id."
-         };
          Json(ResurrectResponse {
             ok:              true,
-            detail:          detail.to_owned(),
-            filters_cleared: done.filters_cleared,
+            detail:          resurrection_summary(&done),
+            filters_cleared: matches!(done.safety, SafetyWrite::Written),
             ct0_dead:        state.api.sessions.is_ct0_dead(id),
          })
          .into_response()
       },
+      Err(Error::NotFound(_)) => StatusCode::NOT_FOUND.into_response(),
       Err(err) => {
-         let missing = matches!(err, crate::error::Error::NotFound(_));
-         if missing {
-            return StatusCode::NOT_FOUND.into_response();
-         }
          Json(ResurrectResponse {
             ok:              false,
             detail:          err.to_string(),
@@ -1897,6 +1923,44 @@ mod tests {
          response.headers()["cloudflare-cdn-cache-control"],
          "no-store"
       );
+   }
+
+   #[test]
+   fn a_resurrection_is_reported_apart_from_the_settings_write_after_it() {
+      // What the first sweep of the stale pool met on every account: a new
+      // token, then the settings write refused.
+      let refused = Resurrected {
+         issued:   true,
+         was_dead: true,
+         safety:   SafetyWrite::NotWritten(Error::UserSuspended("Status 403".into())),
+      };
+      let summary = resurrection_summary(&refused);
+      assert!(
+         summary.starts_with("X issued a new ct0 and the account left the stale pool."),
+         "{summary}"
+      );
+      assert!(
+         summary.contains("Search safety was not turned off"),
+         "{summary}"
+      );
+      assert!(!summary.contains("User suspended"), "{summary}");
+
+      let kept = Resurrected {
+         issued:   false,
+         was_dead: false,
+         safety:   SafetyWrite::Written,
+      };
+      assert_eq!(
+         resurrection_summary(&kept),
+         "X accepted the ct0 already stored. Search safety was turned off."
+      );
+
+      let mut note = Some("HTTP 403 code 353".to_owned());
+      add_note(&mut note, "Saved");
+      assert_eq!(note.as_deref(), Some("HTTP 403 code 353. Saved"));
+      let mut empty = None;
+      add_note(&mut empty, "Saved");
+      assert_eq!(empty.as_deref(), Some("Saved"));
    }
 
    #[test]

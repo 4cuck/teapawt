@@ -11,6 +11,7 @@
 
 use std::{
    collections::BTreeMap,
+   future::Future,
    sync::atomic::{
       AtomicBool,
       Ordering,
@@ -56,10 +57,43 @@ const SEARCH_SAFETY_BODY: &str = r#"{"optInFiltering":false,"optInBlocking":fals
 /// twelve at once is a pattern no browser makes.
 const GAP: Duration = Duration::from_secs(5);
 
-/// What one settings resurrection finished.
+/// What one resurrection did. The account holds a csrf token X accepts in
+/// every case this is returned for.
 pub struct Resurrected {
-   /// Both hiding settings were written, including `searchSafety`.
-   pub filters_cleared: bool,
+   /// X issued a token on this call. `false` when the one already stored
+   /// turned out to be accepted.
+   pub issued:   bool,
+   /// The account was in the stale pool and has left it.
+   pub was_dead: bool,
+   /// What became of the settings that hide posts.
+   pub safety:   SafetyWrite,
+}
+
+/// How the settings writes after a resurrection went.
+///
+/// Kept apart from the resurrection because they fail apart from it. X
+/// renewed the token of every account in the first sweep of the stale pool
+/// and then refused each one the settings write (code 64). Reported as one
+/// result, that was 750 lines saying the ct0 could not be resurrected, about
+/// 750 accounts that had just left the stale pool.
+pub enum SafetyWrite {
+   /// Both settings are off.
+   Written,
+   /// The media setting is off. Search safety waits on the numeric id it is
+   /// keyed by, and the filter sync comes back for it.
+   AwaitingUserId,
+   /// X refused the write, or it could not be sent.
+   NotWritten(Error),
+}
+
+impl SafetyWrite {
+   const fn label(&self) -> &'static str {
+      match *self {
+         Self::Written => "written",
+         Self::AwaitingUserId => "awaiting user id",
+         Self::NotWritten(_) => "not written",
+      }
+   }
 }
 
 /// Accounts written per batch. Small enough that a batch finishes in a couple
@@ -450,27 +484,17 @@ impl ApiClient {
 
    /// The signed-in account's own id, from the session's own credentials.
    async fn own_user_id(&self, session_id: i64) -> Option<String> {
-      let before = self.sessions.ct0(session_id);
       let session = self
          .sessions
          .acquire_id(session_id, endpoints::VERIFY_CREDENTIALS)
          .await
          .ok()?;
-      let first = self.verify_credentials(&session).await?;
-      let parsed = self
-         .account_response(&session, endpoints::VERIFY_CREDENTIALS, first)
-         .await;
-      let (bytes, _) = match parsed {
-         Err(Error::TransientUpstream) if self.ct0_issued(session.id, before.as_deref()) => {
-            let retry = self.verify_credentials(&session).await?;
-            self
-               .account_response(&session, endpoints::VERIFY_CREDENTIALS, retry)
-               .await
-               .ok()?
-         },
-         Ok(body) => body,
-         Err(_) => return None,
-      };
+      let bytes = self
+         .send_minting(&session, endpoints::VERIFY_CREDENTIALS, || {
+            self.verify_credentials(&session)
+         })
+         .await
+         .ok()?;
 
       #[derive(Deserialize)]
       struct OwnAccount {
@@ -481,12 +505,11 @@ impl ApiClient {
          .then_some(own.id_str)
    }
 
-   async fn verify_credentials(&self, session: &SessionLease) -> Option<super::http::Response> {
+   async fn verify_credentials(&self, session: &SessionLease) -> Result<super::http::Response> {
       let path = "/1.1/account/verify_credentials.json";
       let headers = self
          .settings_headers(session, "GET", path, "application/x-www-form-urlencoded")
-         .await
-         .ok()?;
+         .await?;
       self
          .client
          .get_on(
@@ -495,7 +518,35 @@ impl ApiClient {
             Some(&self.egress_for(session)),
          )
          .await
-         .ok()
+   }
+
+   /// Send a call this account makes about itself, and send it once more when
+   /// the first answer was X issuing the csrf token the account lacked.
+   ///
+   /// A missing ct0 makes X answer 353 and set the cookie on that same
+   /// response. The token is stored before the error comes back, so the call
+   /// is repeated with it instead of waiting out a refusal. Any other answer,
+   /// and the answer to the repeat, is returned as it is.
+   async fn send_minting<F, Fut>(
+      &self,
+      session: &SessionLease,
+      endpoint: &str,
+      send: F,
+   ) -> Result<Bytes>
+   where
+      F: Fn() -> Fut,
+      Fut: Future<Output = Result<super::http::Response>>,
+   {
+      let before = self.sessions.ct0(session.id);
+      let first = send().await?;
+      let answer = match self.account_response(session, endpoint, first).await {
+         Err(Error::TransientUpstream) if self.ct0_issued(session.id, before.as_deref()) => {
+            let repeat = send().await?;
+            self.account_response(session, endpoint, repeat).await
+         },
+         answer => answer,
+      };
+      answer.map(|(bytes, _)| bytes)
    }
 
    async fn post_account_settings(
@@ -503,23 +554,11 @@ impl ApiClient {
       session: &SessionLease,
       form: &'static str,
    ) -> Result<Bytes> {
-      let before = self.sessions.ct0(session.id);
-      let response = self.post_settings_request(session, form).await?;
-      let parsed = self
-         .account_response(session, endpoints::ACCOUNT_SETTINGS, response)
-         .await;
-      // A missing ct0 makes X answer 353 and issue the cookie on that same
-      // response. The token is stored before the error returns, so the write
-      // is sent again with it instead of waiting out a refusal.
-      let (bytes, _) = match parsed {
-         Err(Error::TransientUpstream) if self.ct0_issued(session.id, before.as_deref()) => {
-            let retry = self.post_settings_request(session, form).await?;
-            self
-               .account_response(session, endpoints::ACCOUNT_SETTINGS, retry)
-               .await?
-         },
-         other => other?,
-      };
+      let bytes = self
+         .send_minting(session, endpoints::ACCOUNT_SETTINGS, || {
+            self.post_settings_request(session, form)
+         })
+         .await?;
       Self::check_api_errors(&bytes)?;
       Ok(bytes)
    }
@@ -563,6 +602,10 @@ impl ApiClient {
    /// A 353 carries the replacement `ct0` in `Set-Cookie`; that token is
    /// stored, the account leaves the stale pool, and the safety writes
    /// continue.
+   ///
+   /// `Err` means the account holds no token X accepts. What the safety
+   /// writes did afterwards is in [`Resurrected::safety`] and never undoes the
+   /// resurrection.
    pub async fn resurrect_ct0(&self, session_id: i64) -> Result<Resurrected> {
       let Some(credentials) = self.sessions.credentials(session_id) else {
          return Err(Error::NotFound(format!(
@@ -592,7 +635,7 @@ impl ApiClient {
       };
 
       let code = super::client::twitter_error_code(&body);
-      if status.as_u16() == 401 || code == Some(326) || code == Some(89) {
+      if status.as_u16() == 401 || matches!(code, Some(326 | 89)) {
          self.sessions.mark_rejected(session_id).await;
          return Err(Error::SessionRejected(format!(
             "Status {status}: credentials rejected"
@@ -600,39 +643,87 @@ impl ApiClient {
       }
 
       let issued = fresh.filter(|ct0| !ct0.is_empty() && Some(ct0) != before.as_ref());
-      let adopted = issued.is_some() || status.is_success();
+      // X checks the token before it looks at the account. Every account of
+      // the first sweep was answered 353 while its token was stale and 64
+      // once it was not, so a 64 or 63 here was sent a token X accepts.
+      let write_refused = matches!(code, Some(63 | 64));
+      if issued.is_none() && !status.is_success() && !write_refused {
+         let code = code.map_or_else(String::new, |code| format!(" (code {code})"));
+         return Err(Error::TwitterApi(format!(
+            "Status {status}{code}: account settings did not issue a ct0"
+         )));
+      }
+
+      let minted = issued.is_some();
       if let Some(ct0) = issued {
          self.sessions.hold_ct0(session_id, ct0);
       }
-      if was_dead && adopted {
+      if was_dead {
          self.sessions.clear_ct0_dead(session_id).await;
          self.sessions.record_event(
             crate::stats::AccountEvent::new(
                session_id,
                crate::stats::Restriction::Reinstated,
                "account/settings",
-               "Resurrected ct0 from the settings response",
+               if minted {
+                  "Resurrected ct0 from the settings response"
+               } else {
+                  "Account settings accepted the stored ct0"
+               },
             )
             .upstream(status.as_u16(), code),
          );
       }
-      if !adopted {
-         return Err(Error::TwitterApi(format!(
-            "Status {status}: settings did not return a ct0 cookie"
-         )));
-      }
 
-      let filters_cleared = self.clear_session_filters(session_id).await?;
-      if filters_cleared {
-         self.sessions.mark_filters_cleared(session_id).await;
+      let safety = if write_refused {
+         // The same write would be refused the same way. Recorded as the
+         // filter sync records it, which paces the next attempt.
+         self
+            .sessions
+            .note_suspended(
+               session_id,
+               SuspensionProbe::Settings,
+               None,
+               "Settings write refused while resurrecting ct0",
+            )
+            .await;
+         SafetyWrite::NotWritten(Error::UserSuspended(format!(
+            "Status {status}: account settings refused the write"
+         )))
+      } else {
+         match self.clear_session_filters(session_id).await {
+            Ok(true) => {
+               self.sessions.mark_filters_cleared(session_id).await;
+               SafetyWrite::Written
+            },
+            Ok(false) => SafetyWrite::AwaitingUserId,
+            Err(err) => SafetyWrite::NotWritten(err),
+         }
+      };
+      match &safety {
+         SafetyWrite::NotWritten(err) => {
+            tracing::info!(
+               session_id,
+               was_dead,
+               issued = minted,
+               "resurrected ct0 from account settings; search safety not written: {err}"
+            );
+         },
+         SafetyWrite::Written | SafetyWrite::AwaitingUserId => {
+            tracing::info!(
+               session_id,
+               was_dead,
+               issued = minted,
+               safety = safety.label(),
+               "resurrected ct0 from account settings"
+            );
+         },
       }
-      tracing::info!(
-         session_id,
+      Ok(Resurrected {
+         issued: minted,
          was_dead,
-         filters_cleared,
-         "resurrected ct0 from account settings"
-      );
-      Ok(Resurrected { filters_cleared })
+         safety,
+      })
    }
 
    /// Walk the stale-ct0 pool once. Returns how many accounts were queued.
@@ -653,25 +744,31 @@ impl ApiClient {
       let client = self.clone();
       tokio::spawn(async move {
          let _reset = ResurrectGuard;
+         let (mut resurrected, mut safety_written, mut failed) = (0_usize, 0_usize, 0_usize);
          for id in ids {
             if !client.sessions.is_ct0_dead(id) {
                continue;
             }
+            // Each resurrection writes its own line. Only a failure is added
+            // here, and the totals once the walk is over.
             match client.resurrect_ct0(id).await {
                Ok(done) => {
-                  tracing::info!(
-                     session_id = id,
-                     filters_cleared = done.filters_cleared,
-                     "resurrected a dead ct0"
-                  )
+                  resurrected += 1;
+                  safety_written += usize::from(matches!(done.safety, SafetyWrite::Written));
                },
                Err(err) => {
+                  failed += 1;
                   tracing::info!(session_id = id, "could not resurrect ct0: {err}");
                },
             }
             sleep(GAP).await;
          }
-         tracing::info!("finished resurrecting dead ct0 cookies");
+         tracing::info!(
+            resurrected,
+            safety_written,
+            failed,
+            "finished resurrecting dead ct0 cookies"
+         );
       });
       Ok(started)
    }
@@ -696,21 +793,12 @@ impl ApiClient {
    }
 
    async fn set_search_safety(&self, session: &SessionLease, user_id: &str) -> Result<()> {
-      let before = self.sessions.ct0(session.id);
-      let response = self.search_safety_request(session, user_id).await?;
-      let parsed = self
-         .account_response(session, endpoints::SEARCH_SAFETY, response)
-         .await;
-      let _ = match parsed {
-         Err(Error::TransientUpstream) if self.ct0_issued(session.id, before.as_deref()) => {
-            let retry = self.search_safety_request(session, user_id).await?;
-            self
-               .account_response(session, endpoints::SEARCH_SAFETY, retry)
-               .await?
-         },
-         other => other?,
-      };
-      Ok(())
+      self
+         .send_minting(session, endpoints::SEARCH_SAFETY, || {
+            self.search_safety_request(session, user_id)
+         })
+         .await
+         .map(drop)
    }
 
    async fn search_safety_request(

@@ -20,7 +20,8 @@ pub enum EntityKind {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Entity {
-   /// Start and end byte indices in the text.
+   /// Start and end of the entity in the text, counted in characters (code
+   /// points) as X counts them. Not byte offsets.
    pub indices: (usize, usize),
    /// Type of entity.
    pub kind:    EntityKind,
@@ -115,7 +116,7 @@ impl Video {
 
    /// Parse dimensions from Twitter video URLs (`/vid/WIDTHxHEIGHT/` or
    /// `/vid/avc1/WIDTHxHEIGHT/`).
-   fn dimensions_from_url(url: &str) -> Option<(i32, i32)> {
+   pub fn dimensions_from_url(url: &str) -> Option<(i32, i32)> {
       let after_vid = url.split("/vid/").nth(1)?;
       for segment in after_vid.split('/') {
          let dims = segment
